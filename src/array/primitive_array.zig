@@ -14,21 +14,23 @@ pub fn PrimitiveArray(comptime T: type) type {
     return struct {
         data: ArrayData,
 
-        pub fn len(self: @This()) usize {
+        const Self = @This();
+
+        pub fn len(self: Self) usize {
             return self.data.length;
         }
 
-        pub fn isNull(self: @This(), i: usize) bool {
+        pub fn isNull(self: Self, i: usize) bool {
             return self.data.isNull(i);
         }
 
-        pub fn values(self: @This()) []const T {
+        pub fn values(self: Self) []const T {
             std.debug.assert(self.data.buffers.len >= 2);
             const raw = self.data.buffers[1].typedSlice(T);
             return raw[self.data.offset .. self.data.offset + self.data.length];
         }
 
-        pub fn value(self: @This(), i: usize) T {
+        pub fn value(self: Self, i: usize) T {
             std.debug.assert(i < self.data.length);
             return self.values()[i];
         }

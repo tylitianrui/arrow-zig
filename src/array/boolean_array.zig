@@ -14,16 +14,17 @@ const BOOL_TYPE = DataType{ .bool = {} };
 /// Bit-packed boolean array view.
 pub const BooleanArray = struct {
     data: ArrayData,
+    const Self = @This();
 
-    pub fn len(self: BooleanArray) usize {
+    pub fn len(self: Self) usize {
         return self.data.length;
     }
 
-    pub fn isNull(self: BooleanArray, i: usize) bool {
+    pub fn isNull(self: Self, i: usize) bool {
         return self.data.isNull(i);
     }
 
-    pub fn value(self: BooleanArray, i: usize) bool {
+    pub fn value(self: Self, i: usize) bool {
         std.debug.assert(i < self.data.length);
         std.debug.assert(self.data.buffers.len >= 2);
         return bitmap.bitIsSet(self.data.buffers[1].data, self.data.offset + i);
@@ -59,25 +60,27 @@ pub const BooleanBuilder = struct {
     len: usize = 0,
     null_count: isize = 0,
 
-    pub fn init(allocator: std.mem.Allocator, capacity: usize) !BooleanBuilder {
+    const Self = @This();
+
+    pub fn init(allocator: std.mem.Allocator, capacity: usize) !Self {
         return .{
             .allocator = allocator,
             .values = try MutableBuffer.init(allocator, bitmap.byteLength(capacity)),
         };
     }
 
-    pub fn deinit(self: *BooleanBuilder) void {
+    pub fn deinit(self: *Self) void {
         self.values.deinit();
         if (self.validity) |*valid| valid.deinit();
     }
 
-    fn ensureValuesCapacity(self: *BooleanBuilder, new_len: usize) !void {
+    fn ensureValuesCapacity(self: *Self, new_len: usize) !void {
         const needed = bitmap.byteLength(new_len);
         if (needed <= self.values.len()) return;
         try self.values.resize(needed);
     }
 
-    fn ensureValidityForNull(self: *BooleanBuilder, new_len: usize) !void {
+    fn ensureValidityForNull(self: *Self, new_len: usize) !void {
         if (self.validity == null) {
             var buf = try initValidityAllValid(self.allocator, new_len);
             bitmap.clearBit(buf.data[0..bitmap.byteLength(new_len)], new_len - 1);
@@ -91,14 +94,14 @@ pub const BooleanBuilder = struct {
         self.null_count += 1;
     }
 
-    fn setValidBit(self: *BooleanBuilder, index: usize) !void {
+    fn setValidBit(self: *Self, index: usize) !void {
         if (self.validity == null) return;
         var buf = &self.validity.?;
         try ensureBitmapCapacity(buf, index + 1);
         bitmap.setBit(buf.data[0..bitmap.byteLength(index + 1)], index);
     }
 
-    pub fn append(self: *BooleanBuilder, value: bool) !void {
+    pub fn append(self: *Self, value: bool) !void {
         const next_len = self.len + 1;
         try self.ensureValuesCapacity(next_len);
         if (value) {
@@ -110,14 +113,14 @@ pub const BooleanBuilder = struct {
         self.len = next_len;
     }
 
-    pub fn appendNull(self: *BooleanBuilder) !void {
+    pub fn appendNull(self: *Self) !void {
         const next_len = self.len + 1;
         try self.ensureValuesCapacity(next_len);
         try self.ensureValidityForNull(next_len);
         self.len = next_len;
     }
 
-    pub fn finish(self: *BooleanBuilder) BooleanArray {
+    pub fn finish(self: *Self) BooleanArray {
         const validity_buf = if (self.validity) |buf| buf.toBuffer(bitmap.byteLength(self.len)) else Buffer.empty;
         self.buffers[0] = validity_buf;
         self.buffers[1] = self.values.toBuffer(bitmap.byteLength(self.len));
