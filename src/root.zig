@@ -3,6 +3,7 @@ const buffer = @import("buffer.zig");
 const bitmap = @import("bitmap.zig");
 const datatype = @import("datatype.zig");
 const schema = @import("schema.zig");
+const array = @import("array/array.zig");
 
 pub const Buffer = buffer.Buffer;
 pub const MutableBuffer = buffer.MutableBuffer;
@@ -34,6 +35,17 @@ pub const DictionaryType = datatype.DictionaryType;
 pub const RunEndEncodedType = datatype.RunEndEncodedType;
 pub const ExtensionType = datatype.ExtensionType;
 pub const Schema = schema.Schema;
+pub const ArrayData = array.ArrayData;
+pub const PrimitiveArray = array.PrimitiveArray;
+pub const PrimitiveBuilder = array.PrimitiveBuilder;
+pub const Int32Array = array.Int32Array;
+pub const Float64Array = array.Float64Array;
+pub const BooleanArray = array.BooleanArray;
+pub const StringArray = array.StringArray;
+pub const BinaryArray = array.BinaryArray;
+pub const Int32Builder = array.Int32Builder;
+pub const BooleanBuilder = array.BooleanBuilder;
+pub const StringBuilder = array.StringBuilder;
 
 // Pull buffer tests into the root test target.
 test {
@@ -41,4 +53,10 @@ test {
     _ = @import("bitmap.zig");
     _ = @import("datatype.zig");
     _ = @import("schema.zig");
+    _ = @import("array/array.zig");
+    _ = @import("array/array_data.zig");
+    _ = @import("array/primitive_array.zig");
+    _ = @import("array/boolean_array.zig");
+    _ = @import("array/string_array.zig");
+    _ = @import("array/binary_array.zig");
 }

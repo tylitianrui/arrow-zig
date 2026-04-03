@@ -46,6 +46,9 @@ pub const TypeId = enum(u8) {
     large_list_view = 42,
     decimal32 = 43,
     decimal64 = 44,
+
+    // Sentinel used for range checks and iteration bounds.
+    // Mirrors the C++ Arrow MAX_ID/Type::MAX and similar Rust enum bounds.
     max_id = 45,
 };
 
@@ -242,6 +245,7 @@ pub const DataType = union(TypeId) {
     large_list_view: ListViewType,
     decimal32: DecimalParams,
     decimal64: DecimalParams,
+    max_id: void,
 
     pub fn id(self: DataType) TypeId {
         return std.meta.activeTag(self);
@@ -294,6 +298,7 @@ pub const DataType = union(TypeId) {
             .large_binary => "large_binary",
             .string_view => "utf8_view",
             .binary_view => "binary_view",
+            .max_id => "max_id",
         };
     }
 };
