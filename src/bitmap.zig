@@ -11,6 +11,7 @@ fn bitMask(bit_index: usize) u8 {
     return @as(u8, 1) << @as(u3, @intCast(bit_index & 7));
 }
 
+// Read a single bit using Arrow's least-significant-bit-first order.
 pub fn bitIsSet(data: []const u8, bit_index: usize) bool {
     const byte = data[bit_index >> 3];
     return (byte & bitMask(bit_index)) != 0;
@@ -21,39 +22,84 @@ pub fn setBit(data: []u8, bit_index: usize) void {
     data[bit_index >> 3] |= bitMask(bit_index);
 }
 
+// Clear a single bit in-place using Arrow's least-significant-bit-first bit order.
 pub fn clearBit(data: []u8, bit_index: usize) void {
     data[bit_index >> 3] &= ~bitMask(bit_index);
 }
 
+// Write a single bit in-place with a boolean value.
 pub fn writeBit(data: []u8, bit_index: usize, value: bool) void {
     if (value) setBit(data, bit_index) else clearBit(data, bit_index);
 }
 
+// Count set bits across the logical length, ignoring padding bits.
+pub fn countSetBit(data: []const u8, bit_len: usize) usize {
+    if (bit_len == 0) return 0;
+    var count: usize = 0;
+    const full_bytes = bit_len >> 3;
+    const remainder = bit_len & 7;
+    for (data[0..full_bytes]) |byte| {
+        count += @popCount(byte);
+    }
+
+    if (remainder > 0) {
+        const last_byte = data[full_bytes];
+        const mask = (@as(u8, 1) << @as(u3, @intCast(remainder))) - 1;
+        count += @popCount(last_byte & mask);
+    }
+
+    return count;
+}
+
+// Count unset bits across the logical length, ignoring padding bits.
+pub fn countUnsetBit(data: []const u8, bit_len: usize) usize {
+    return bit_len - countSetBit(data, bit_len);
+}
+
+fn clearTrailingBits(bytes: []u8, len: usize, valid: bool) void {
+    if (len == 0 or bytes.len == 0) return;
+
+    const remainder = len & 7;
+    if (remainder == 0) return;
+
+    const last = bytes.len - 1;
+    const keep_mask = (@as(u8, 1) << @as(u3, @intCast(remainder))) - 1;
+    bytes[last] &= keep_mask;
+    if (valid) bytes[last] |= keep_mask;
+}
+
+// Immutable Arrow validity bitmap view.
 pub const ValidityBitmap = struct {
     data: []const u8,
     bit_len: usize,
 
+    // Build a validity bitmap view from a buffer and logical length.
     pub fn fromBuffer(buf: Buffer, bit_len: usize) ValidityBitmap {
         return .{ .data = buf.data, .bit_len = bit_len };
     }
+    // Read the validity bit for an index.
     pub fn isValid(self: ValidityBitmap, i: usize) bool {
         std.debug.assert(i < self.bit_len);
         return bitIsSet(self.data, i);
     }
+    // Invert the validity bit for convenience.
     pub fn isNull(self: ValidityBitmap, i: usize) bool {
         return !self.isValid(i);
     }
+    // Count valid bits in the logical range.
     pub fn countValid(self: ValidityBitmap) usize {
-        return byteLength(self.bit_len);
+        return countSetBit(self.data, self.bit_len);
     }
+    // Count null bits in the logical range.
     pub fn countNulls(self: ValidityBitmap) usize {
         return self.bit_len - self.countValid();
     }
 };
 
 // MutableValidityBitmap owns writable storage for building or editing Arrow validity bits.
+// Mutable Arrow validity bitmap with owned storage.
 pub const MutableValidityBitmap = struct {
-    storage: MutableBuffer,
+    buf: MutableBuffer,
     bit_len: usize,
 
     // Allocate a bitmap with all values marked valid.
@@ -68,21 +114,21 @@ pub const MutableValidityBitmap = struct {
 
     fn initFilled(allocator: std.mem.Allocator, bit_len: usize, valid: bool) !MutableValidityBitmap {
         const used_bytes = byteLength(bit_len);
-        var storage = try MutableBuffer.init(allocator, used_bytes);
+        var buf = try MutableBuffer.init(allocator, used_bytes);
         if (used_bytes > 0) {
-            @memset(storage.data[0..used_bytes], if (valid) 0xff else 0x00);
-            clearTrailingBits(storage.data[0..used_bytes], bit_len, valid);
+            @memset(buf.data[0..used_bytes], if (valid) 0xFF else 0x00);
+            clearTrailingBits(buf.data[0..used_bytes], bit_len, valid);
         }
 
         return .{
-            .storage = storage,
+            .buf = buf,
             .bit_len = bit_len,
         };
     }
 
     // Release the owned storage.
     pub fn deinit(self: *MutableValidityBitmap) void {
-        self.storage.deinit();
+        self.buf.deinit();
     }
 
     // Return the number of logical bits tracked by this bitmap.
@@ -93,7 +139,12 @@ pub const MutableValidityBitmap = struct {
     // Mark the indexed value as valid.
     pub fn setValid(self: *MutableValidityBitmap, index: usize) void {
         std.debug.assert(index < self.bit_len);
-        setBit(self.storage.data[0..byteLength(self.bit_len)], index);
+        setBit(self.buf.data[0..byteLength(self.bit_len)], index);
+    }
+
+    // Read the indexed validity bit from the mutable bitmap.
+    pub fn isValid(self: MutableValidityBitmap, index: usize) bool {
+        return ValidityBitmap.fromBuffer(self.toBuffer(), self.bit_len).isValid(index);
     }
 
     // Mark the indexed value as null.
@@ -102,99 +153,117 @@ pub const MutableValidityBitmap = struct {
 
         const byte_index = index / 8;
         const mask = bitMask(index);
-        self.storage.data[byte_index] &= ~mask;
+        self.buf.data[byte_index] &= ~mask;
     }
 
-    // Read the indexed validity bit from the mutable bitmap.
-    pub fn isValid(self: MutableValidityBitmap, index: usize) bool {
-        return self.asBitmap().isValid(index);
+    // Invert the validity bit for convenience.
+    pub fn isNull(self: MutableValidityBitmap, index: usize) bool {
+        return !self.isValid(index);
+    }
+
+    // Set the validity bit to a desired value.
+    pub fn set(self: *MutableValidityBitmap, index: usize, valid: bool) void {
+        if (valid) self.setValid(index) else self.setNull(index);
+    }
+
+    // Count valid bits in the logical range.
+    pub fn countValid(self: MutableValidityBitmap) usize {
+        return countSetBit(self.buf.data, self.bit_len);
+    }
+
+    // Count null bits in the logical range.
+    pub fn countNulls(self: MutableValidityBitmap) usize {
+        return countUnsetBit(self.buf.data, self.bit_len);
     }
 
     // Expose the logical bitmap bytes as an immutable buffer view.
     pub fn toBuffer(self: MutableValidityBitmap) Buffer {
-        return self.storage.toBuffer(byteLength(self.bit_len));
-    }
-
-    // Expose a read-only bitmap view over the current mutable storage.
-    pub fn asBitmap(self: MutableValidityBitmap) ValidityBitmap {
-        return ValidityBitmap.init(self.toBuffer(), self.bit_len);
+        return self.buf.toBuffer(byteLength(self.bit_len));
     }
 };
 
-fn clearTrailingBits(bytes: []u8, len: usize, valid: bool) void {
-    if (len == 0 or bytes.len == 0) return;
-
-    const remainder = len & 7;
-    if (remainder == 0) return;
-
-    const last = bytes.len - 1;
-    const keep_mask = (@as(u8, 1) << @as(u3, @intCast(remainder))) - 1;
-    bytes[last] &= keep_mask;
-    if (valid) bytes[last] |= keep_mask;
+// Verify byte-length rounding rules.
+test "bitmap byte length rounds up" {
+    try std.testing.expectEqual(@as(usize, 0), byteLength(0));
+    try std.testing.expectEqual(@as(usize, 1), byteLength(1));
+    try std.testing.expectEqual(@as(usize, 1), byteLength(8));
+    try std.testing.expectEqual(@as(usize, 2), byteLength(9));
 }
 
-test "validity bitmap reads arrow bit ordering" {
-    const raw = [_]u8{0b00001101};
-    const bitmap = ValidityBitmap.init(Buffer.init(raw[0..]), 4);
+// Exercise set, clear, and write operations.
+test "bitmap bit operations set and clear" {
+    var data: [2]u8 = .{ 0, 0 };
+
+    setBit(data[0..], 0);
+    setBit(data[0..], 9);
+    try std.testing.expect(bitIsSet(data[0..], 0));
+    try std.testing.expect(!bitIsSet(data[0..], 1));
+    try std.testing.expect(bitIsSet(data[0..], 9));
+
+    clearBit(data[0..], 0);
+    try std.testing.expect(!bitIsSet(data[0..], 0));
+
+    writeBit(data[0..], 1, true);
+    writeBit(data[0..], 9, false);
+    try std.testing.expect(bitIsSet(data[0..], 1));
+    try std.testing.expect(!bitIsSet(data[0..], 9));
+}
+
+// Validate set/unset counting with partial-byte masks.
+test "bitmap counts set and unset bits" {
+    const data = [_]u8{ 0b1011_0101, 0b0000_1111 };
+
+    try std.testing.expectEqual(@as(usize, 9), countSetBit(data[0..], 12));
+    try std.testing.expectEqual(@as(usize, 3), countUnsetBit(data[0..], 12));
+    try std.testing.expectEqual(@as(usize, 9), countSetBit(data[0..], 16));
+    try std.testing.expectEqual(@as(usize, 7), countUnsetBit(data[0..], 16));
+}
+
+// Read-only validity bitmap behavior.
+test "validity bitmap reads values" {
+    const data = [_]u8{0b0000_0101};
+    const bitmap = ValidityBitmap{ .data = data[0..], .bit_len = 5 };
 
     try std.testing.expect(bitmap.isValid(0));
-    try std.testing.expect(!bitmap.isValid(1));
+    try std.testing.expect(bitmap.isNull(1));
     try std.testing.expect(bitmap.isValid(2));
-    try std.testing.expect(bitmap.isValid(3));
-    try std.testing.expectEqual(@as(usize, 1), bitmap.nullCount());
+    try std.testing.expect(bitmap.isNull(3));
+    try std.testing.expect(bitmap.isNull(4));
+    try std.testing.expectEqual(@as(usize, 2), bitmap.countValid());
+    try std.testing.expectEqual(@as(usize, 3), bitmap.countNulls());
 }
 
-test "empty validity buffer means all valid" {
-    const bitmap = ValidityBitmap.init(Buffer.empty, 3);
-
-    try std.testing.expect(bitmap.isValid(0));
-    try std.testing.expect(bitmap.isValid(1));
-    try std.testing.expect(bitmap.isValid(2));
-    try std.testing.expect(bitmap.allValid());
-}
-
-test "mutable validity bitmap toggles bits" {
+// Allocate, mutate, and export a mutable validity bitmap.
+test "mutable validity bitmap init and mutate" {
     var bitmap = try MutableValidityBitmap.initAllNull(std.testing.allocator, 10);
     defer bitmap.deinit();
 
-    bitmap.setValid(1);
-    bitmap.setValid(8);
+    try std.testing.expectEqual(@as(usize, 10), bitmap.bitLength());
+    try std.testing.expectEqual(@as(usize, 0), bitmap.countValid());
+    try std.testing.expectEqual(@as(usize, 10), bitmap.countNulls());
+
+    bitmap.setValid(0);
     bitmap.setValid(9);
-    bitmap.setNull(8);
+    try std.testing.expect(bitmap.isValid(0));
+    try std.testing.expect(bitmap.isNull(1));
+    try std.testing.expect(bitmap.isValid(9));
 
-    const view = bitmap.asBitmap();
-    try std.testing.expect(view.isNull(0));
-    try std.testing.expect(view.isValid(1));
-    try std.testing.expect(view.isNull(8));
-    try std.testing.expect(view.isValid(9));
-    try std.testing.expectEqual(@as(usize, 8), view.nullCount());
+    bitmap.setNull(0);
+    bitmap.set(1, true);
+    try std.testing.expect(bitmap.isNull(0));
+    try std.testing.expect(bitmap.isValid(1));
+
+    const buf = bitmap.toBuffer();
+    try std.testing.expectEqual(@as(usize, 2), buf.len());
 }
 
-test "bitIsSet reads bits using arrow bit order" {
-    const data = [_]u8{
-        0b10000101,
-        0b00000010,
-    };
+// Ensure trailing padding bits are cleared for non-byte-aligned lengths.
+test "mutable validity bitmap clears trailing bits" {
+    var bitmap = try MutableValidityBitmap.initAllValid(std.testing.allocator, 10);
+    defer bitmap.deinit();
 
-    try std.testing.expect(bitIsSet(data[0..], 0));
-    try std.testing.expect(!bitIsSet(data[0..], 1));
-    try std.testing.expect(bitIsSet(data[0..], 2));
-    try std.testing.expect(!bitIsSet(data[0..], 6));
-    try std.testing.expect(bitIsSet(data[0..], 7));
-    try std.testing.expect(!bitIsSet(data[0..], 8));
-    try std.testing.expect(bitIsSet(data[0..], 9));
-}
-
-test "setBit writes bits using arrow bit order" {
-    var data = [_]u8{ 0, 0 };
-
-    setBit(data[0..], 0);
-    setBit(data[0..], 7);
-    setBit(data[0..], 9);
-
-    try std.testing.expectEqual(@as(u8, 0b10000001), data[0]);
-    try std.testing.expectEqual(@as(u8, 0b00000010), data[1]);
-    try std.testing.expect(bitIsSet(data[0..], 0));
-    try std.testing.expect(bitIsSet(data[0..], 7));
-    try std.testing.expect(bitIsSet(data[0..], 9));
+    const buf = bitmap.toBuffer();
+    try std.testing.expectEqual(@as(usize, 2), buf.len());
+    try std.testing.expectEqual(@as(u8, 0b0000_0011), buf.data[1]);
+    try std.testing.expectEqual(@as(usize, 10), bitmap.countValid());
 }
