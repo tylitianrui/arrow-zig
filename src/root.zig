@@ -2,6 +2,7 @@
 const buffer = @import("buffer.zig");
 const bitmap = @import("bitmap.zig");
 const datatype = @import("datatype.zig");
+const schema = @import("schema.zig");
 
 pub const Buffer = buffer.Buffer;
 pub const MutableBuffer = buffer.MutableBuffer;
@@ -32,11 +33,12 @@ pub const UnionType = datatype.UnionType;
 pub const DictionaryType = datatype.DictionaryType;
 pub const RunEndEncodedType = datatype.RunEndEncodedType;
 pub const ExtensionType = datatype.ExtensionType;
-pub const Schema = datatype.Schema;
+pub const Schema = schema.Schema;
 
 // Pull buffer tests into the root test target.
 test {
     _ = @import("buffer.zig");
     _ = @import("bitmap.zig");
     _ = @import("datatype.zig");
+    _ = @import("schema.zig");
 }

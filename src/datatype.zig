@@ -196,12 +196,6 @@ pub const ExtensionType = struct {
     metadata: ?[]const u8 = null,
 };
 
-pub const Schema = struct {
-    fields: []const Field,
-    endianness: Endianness = .native,
-    metadata: ?[]const KeyValue = null,
-};
-
 pub const DataType = union(TypeId) {
     null: void,
     bool: void,
@@ -304,7 +298,6 @@ pub const DataType = union(TypeId) {
     }
 };
 
-// Basic sanity checks against the C++ Arrow Type::type enum ordering.
 comptime {
     std.debug.assert(@intFromEnum(TypeId.null) == 0);
     std.debug.assert(@intFromEnum(TypeId.bool) == 1);
