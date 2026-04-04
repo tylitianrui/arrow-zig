@@ -67,27 +67,29 @@ pub fn PrimitiveBuilder(comptime T: type, comptime dtype: DataType) type {
         len: usize = 0,
         null_count: isize = 0,
 
+        const Self = @This();
+
         const TYPE: DataType = dtype;
 
-        pub fn init(allocator: std.mem.Allocator, capacity: usize) !@This() {
+        pub fn init(allocator: std.mem.Allocator, capacity: usize) !Self {
             return .{
                 .allocator = allocator,
                 .values = try MutableBuffer.init(allocator, capacity * @sizeOf(T)),
             };
         }
 
-        pub fn deinit(self: *@This()) void {
+        pub fn deinit(self: *Self) void {
             self.values.deinit();
             if (self.validity) |*valid| valid.deinit();
         }
 
-        fn ensureValuesCapacity(self: *@This(), new_len: usize) !void {
+        fn ensureValuesCapacity(self: *Self, new_len: usize) !void {
             const capacity = self.values.len() / @sizeOf(T);
             if (new_len <= capacity) return;
             try self.values.resize(new_len * @sizeOf(T));
         }
 
-        fn ensureValidityForNull(self: *@This(), new_len: usize) !void {
+        fn ensureValidityForNull(self: *Self, new_len: usize) !void {
             if (self.validity == null) {
                 var buf = try initValidityAllValid(self.allocator, new_len);
                 bitmap.clearBit(buf.data[0..bitmap.byteLength(new_len)], new_len - 1);
@@ -101,14 +103,14 @@ pub fn PrimitiveBuilder(comptime T: type, comptime dtype: DataType) type {
             self.null_count += 1;
         }
 
-        fn setValidBit(self: *@This(), index: usize) !void {
+        fn setValidBit(self: *Self, index: usize) !void {
             if (self.validity == null) return;
             var buf = &self.validity.?;
             try ensureBitmapCapacity(buf, index + 1);
             bitmap.setBit(buf.data[0..bitmap.byteLength(index + 1)], index);
         }
 
-        pub fn append(self: *@This(), value: T) !void {
+        pub fn append(self: *Self, value: T) !void {
             const next_len = self.len + 1;
             try self.ensureValuesCapacity(next_len);
             const slice = std.mem.bytesAsSlice(T, self.values.data);
@@ -117,14 +119,14 @@ pub fn PrimitiveBuilder(comptime T: type, comptime dtype: DataType) type {
             self.len = next_len;
         }
 
-        pub fn appendNull(self: *@This()) !void {
+        pub fn appendNull(self: *Self) !void {
             const next_len = self.len + 1;
             try self.ensureValuesCapacity(next_len);
             try self.ensureValidityForNull(next_len);
             self.len = next_len;
         }
 
-        pub fn finish(self: *@This()) PrimitiveArray(T) {
+        pub fn finish(self: *Self) PrimitiveArray(T) {
             const validity_buf = if (self.validity) |buf| buf.toBuffer(bitmap.byteLength(self.len)) else Buffer.empty;
             self.buffers[0] = validity_buf;
             self.buffers[1] = self.values.toBuffer(self.len * @sizeOf(T));
