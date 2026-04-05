@@ -9,7 +9,7 @@ pub fn main() !void {
     try builder.appendNull();
     try builder.append("ggy");
 
-    var array_ref = try builder.finish();
+    var array_ref = try builder.finishReset();
     defer array_ref.release();
     const array = zarrow.BinaryArray{ .data = array_ref.data() };
 
@@ -18,10 +18,22 @@ pub fn main() !void {
     std.debug.assert(array.isNull(1));
     std.debug.assert(std.mem.eql(u8, array.value(2), "ggy"));
 
-    std.debug.print("examples/binary_builder.zig | type=BinaryBuilder | length={d}, value_index_0={s}, isNull_index_1={any}, value_index_2={s}\n", .{
+    try builder.append("again");
+    try builder.appendNull();
+
+    var array_ref2 = try builder.finish();
+    defer array_ref2.release();
+    const array2 = zarrow.BinaryArray{ .data = array_ref2.data() };
+
+    std.debug.assert(array2.len() == 2);
+    std.debug.assert(std.mem.eql(u8, array2.value(0), "again"));
+    std.debug.assert(array2.isNull(1));
+
+    std.debug.print("examples/binary_builder.zig | type=BinaryBuilder | length={d}, value_index_0={s}, isNull_index_1={any}, value_index_2={s}, length2={d}\n", .{
         array.len(),
         array.value(0),
         array.isNull(1),
         array.value(2),
+        array2.len(),
     });
 }

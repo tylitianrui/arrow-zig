@@ -66,6 +66,7 @@ pub const StringBuilder = struct {
     len: usize = 0,
     null_count: isize = 0,
     data_len: usize = 0,
+    finished: bool = false,
 
     pub fn init(allocator: std.mem.Allocator, capacity: usize, data_capacity: usize) !StringBuilder {
         const offsets = try OwnedBuffer.init(allocator, (capacity + 1) * @sizeOf(i32));
@@ -84,10 +85,37 @@ pub const StringBuilder = struct {
         if (self.validity) |*valid| valid.deinit();
     }
 
+    pub fn reset(self: *StringBuilder) void {
+        if (!self.offsets.isEmpty()) {
+            const offsets_slice = std.mem.bytesAsSlice(i32, self.offsets.data);
+            offsets_slice[0] = 0;
+        }
+        self.len = 0;
+        self.null_count = 0;
+        self.data_len = 0;
+        self.finished = false;
+    }
+
+    pub fn clear(self: *StringBuilder) void {
+        self.offsets.deinit();
+        self.data.deinit();
+        if (self.validity) |*valid| valid.deinit();
+        self.validity = null;
+        self.len = 0;
+        self.null_count = 0;
+        self.data_len = 0;
+        self.finished = false;
+    }
+
     fn ensureOffsetsCapacity(self: *StringBuilder, needed_len: usize) !void {
         const capacity = self.offsets.len() / @sizeOf(i32);
         if (needed_len <= capacity) return;
+        const was_empty = capacity == 0;
         try self.offsets.resize(needed_len * @sizeOf(i32));
+        if (was_empty) {
+            const offsets_slice = std.mem.bytesAsSlice(i32, self.offsets.data);
+            offsets_slice[0] = 0;
+        }
     }
 
     fn ensureDataCapacity(self: *StringBuilder, needed_len: usize) !void {
@@ -116,7 +144,10 @@ pub const StringBuilder = struct {
         bitmap.setBit(buf.data[0..bitmap.byteLength(index + 1)], index);
     }
 
+    const BuilderError = error{AlreadyFinished};
+
     pub fn append(self: *StringBuilder, value: []const u8) !void {
+        if (self.finished) return BuilderError.AlreadyFinished;
         const next_len = self.len + 1;
         try self.ensureOffsetsCapacity(next_len + 1);
         try self.ensureDataCapacity(self.data_len + value.len);
@@ -130,6 +161,7 @@ pub const StringBuilder = struct {
     }
 
     pub fn appendNull(self: *StringBuilder) !void {
+        if (self.finished) return BuilderError.AlreadyFinished;
         const next_len = self.len + 1;
         try self.ensureOffsetsCapacity(next_len + 1);
         const offsets_slice = std.mem.bytesAsSlice(i32, self.offsets.data);
@@ -139,6 +171,7 @@ pub const StringBuilder = struct {
     }
 
     pub fn finish(self: *StringBuilder) !ArrayRef {
+        if (self.finished) return BuilderError.AlreadyFinished;
         const validity_buf = if (self.validity) |*buf| try buf.toShared(bitmap.byteLength(self.len)) else SharedBuffer.empty;
         self.buffers[0] = validity_buf;
         self.buffers[1] = try self.offsets.toShared((self.len + 1) * @sizeOf(i32));
@@ -156,7 +189,14 @@ pub const StringBuilder = struct {
             .buffers = buffers,
         };
 
+        self.finished = true;
         return ArrayRef.fromOwned(self.allocator, data);
+    }
+
+    pub fn finishReset(self: *StringBuilder) !ArrayRef {
+        const finished_ref = try self.finish();
+        self.reset();
+        return finished_ref;
     }
 };
 

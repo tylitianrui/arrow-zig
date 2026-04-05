@@ -134,7 +134,9 @@ pub const OwnedBuffer = struct {
         @memcpy(newData[0..copySize], self.data[0..copySize]);
         if (actualSize > copySize) @memset(newData[copySize..], 0);
 
-        self.allocator.free(self.data);
+        if (self.data.len > 0) {
+            self.allocator.free(self.data);
+        }
         self.data = newData;
     }
 };

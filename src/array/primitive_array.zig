@@ -70,8 +70,11 @@ pub fn PrimitiveBuilder(comptime T: type, comptime dtype: DataType) type {
         buffers: [2]SharedBuffer = undefined,
         len: usize = 0,
         null_count: isize = 0,
+        finished: bool = false,
 
         const Self = @This();
+
+        const BuilderError = error{AlreadyFinished};
 
         const TYPE: DataType = dtype;
 
@@ -85,6 +88,21 @@ pub fn PrimitiveBuilder(comptime T: type, comptime dtype: DataType) type {
         pub fn deinit(self: *Self) void {
             self.values.deinit();
             if (self.validity) |*valid| valid.deinit();
+        }
+
+        pub fn reset(self: *Self) void {
+            self.len = 0;
+            self.null_count = 0;
+            self.finished = false;
+        }
+
+        pub fn clear(self: *Self) void {
+            self.values.deinit();
+            if (self.validity) |*valid| valid.deinit();
+            self.validity = null;
+            self.len = 0;
+            self.null_count = 0;
+            self.finished = false;
         }
 
         fn ensureValuesCapacity(self: *Self, new_len: usize) !void {
@@ -115,6 +133,7 @@ pub fn PrimitiveBuilder(comptime T: type, comptime dtype: DataType) type {
         }
 
         pub fn append(self: *Self, value: T) !void {
+            if (self.finished) return BuilderError.AlreadyFinished;
             const next_len = self.len + 1;
             try self.ensureValuesCapacity(next_len);
             const slice = std.mem.bytesAsSlice(T, self.values.data);
@@ -124,6 +143,7 @@ pub fn PrimitiveBuilder(comptime T: type, comptime dtype: DataType) type {
         }
 
         pub fn appendNull(self: *Self) !void {
+            if (self.finished) return BuilderError.AlreadyFinished;
             const next_len = self.len + 1;
             try self.ensureValuesCapacity(next_len);
             try self.ensureValidityForNull(next_len);
@@ -131,6 +151,7 @@ pub fn PrimitiveBuilder(comptime T: type, comptime dtype: DataType) type {
         }
 
         pub fn finish(self: *Self) !ArrayRef {
+            if (self.finished) return BuilderError.AlreadyFinished;
             const validity_buf = if (self.validity) |*buf| try buf.toShared(bitmap.byteLength(self.len)) else SharedBuffer.empty;
             self.buffers[0] = validity_buf;
             self.buffers[1] = try self.values.toShared(self.len * @sizeOf(T));
@@ -146,7 +167,14 @@ pub fn PrimitiveBuilder(comptime T: type, comptime dtype: DataType) type {
                 .buffers = buffers,
             };
 
+            self.finished = true;
             return ArrayRef.fromOwned(self.allocator, data);
+        }
+
+        pub fn finishReset(self: *Self) !ArrayRef {
+            const finished_ref = try self.finish();
+            self.reset();
+            return finished_ref;
         }
     };
 }
