@@ -208,8 +208,8 @@ test "array ref owned layout check rejects static empties" {
     const layout = ArrayData{
         .data_type = dtype,
         .length = 0,
-        .buffers = &[_]SharedBuffer{},
-        .children = &[_]ArrayRef{},
+        .buffers = empty_buffers[0..],
+        .children = empty_children[0..],
     };
 
     try std.testing.expect(!isOwnedLayout(layout));
@@ -238,8 +238,8 @@ test "array ref fromOwnedUnsafe requires owned layout" {
     const layout = ArrayData{
         .data_type = dtype,
         .length = 0,
-        .buffers = &[_]SharedBuffer{},
-        .children = &[_]ArrayRef{},
+        .buffers = empty_buffers[0..],
+        .children = empty_children[0..],
     };
 
     // In debug builds, fromOwnedUnsafe asserts on non-owned layouts.
