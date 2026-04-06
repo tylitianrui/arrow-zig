@@ -25,7 +25,7 @@ pub const ValidationError = error{
 /// - data_type: logical Arrow type describing the array.
 /// - length: number of logical elements.
 /// - offset: logical slice offset into buffers.
-/// - null_count: number of nulls (-1 means unknown; 0 means no nulls).
+/// - null_count: number of nulls (null means unknown; 0 means no nulls).
 /// - buffers: Arrow buffers in type-specific order.
 /// - children: child arrays for nested types (list/struct/union/map).
 /// - dictionary: dictionary values for dictionary-encoded arrays.
@@ -47,7 +47,7 @@ pub const ArrayData = struct {
     data_type: DataType,
     length: usize,
     offset: usize = 0,
-    null_count: isize = -1, // -1 means unknown; 0 means no nulls
+    null_count: ?usize = null, // null means unknown; 0 means no nulls
     buffers: []const SharedBuffer,
     children: []const ArrayRef = &.{},
     dictionary: ?ArrayRef = null,
@@ -62,7 +62,9 @@ pub const ArrayData = struct {
 
     pub fn isNull(self: Self, i: usize) bool {
         std.debug.assert(i < self.length);
-        if (self.null_count == 0) return false;
+        if (self.null_count) |count| {
+            if (count == 0) return false;
+        }
         const validity_bitmap = self.validity() orelse return false;
         return !validity_bitmap.isValid(self.offset + i);
     }
@@ -72,18 +74,17 @@ pub const ArrayData = struct {
     }
 
     pub fn hasNulls(self: Self) bool {
-        if (self.null_count == 0) return false;
-        if (self.null_count > 0) return true;
+        if (self.null_count) |count| return count != 0;
         const validity_bitmap = self.validity() orelse return false;
         return validity_bitmap.countNulls() > 0;
     }
 
     pub fn setNullCountUnknown(self: *Self) void {
-        self.null_count = -1;
+        self.null_count = null;
     }
 
     pub fn setNullCountKnown(self: *Self, count: usize) void {
-        self.null_count = @intCast(count);
+        self.null_count = count;
     }
 
     pub fn slice(self: Self, offset: usize, length: usize) Self {
@@ -94,7 +95,7 @@ pub const ArrayData = struct {
             .data_type = self.data_type,
             .length = length,
             .offset = self.offset + offset,
-            .null_count = if (self.null_count == 0) 0 else -1,
+            .null_count = if (self.null_count == 0) 0 else null,
             .buffers = self.buffers,
             .children = self.children,
             .dictionary = self.dictionary,
@@ -102,7 +103,7 @@ pub const ArrayData = struct {
     }
 
     pub fn nullCount(self: *Self) usize {
-        if (self.null_count >= 0) return @intCast(self.null_count);
+        if (self.null_count) |count| return count;
         const validity_bitmap = self.validity() orelse {
             self.null_count = 0;
             return 0;
@@ -112,7 +113,7 @@ pub const ArrayData = struct {
         while (i < self.length) : (i += 1) {
             if (!validity_bitmap.isValid(self.offset + i)) count += 1;
         }
-        self.null_count = @intCast(count);
+        self.null_count = count;
         return count;
     }
 
@@ -238,7 +239,9 @@ pub const ArrayData = struct {
     }
 
     pub fn validateLayout(self: Self) ValidationError!void {
-        if (self.null_count < -1) return error.InvalidNullCount;
+        if (self.null_count) |count| {
+            if (count != 0 and (self.buffers.len == 0 or self.buffers[0].isEmpty())) return error.InvalidNullCount;
+        }
 
         const total_len = self.offset + self.length;
         if (self.buffers.len > 0 and !self.buffers[0].isEmpty()) {
@@ -367,19 +370,16 @@ pub const ArrayData = struct {
     pub fn validateFull(self: Self) ValidationError!void {
         try self.validateLayout();
 
-        if (self.null_count < -1) return error.InvalidNullCount;
-        if (self.null_count > 0) {
-            if (self.buffers.len == 0 or self.buffers[0].isEmpty()) return error.InvalidNullCount;
-        }
-
-        if (self.null_count >= 0 and self.buffers.len > 0 and !self.buffers[0].isEmpty()) {
-            const validity_bitmap = ValidityBitmap.fromBuffer(self.buffers[0], self.offset + self.length);
-            var count: usize = 0;
-            var i: usize = 0;
-            while (i < self.length) : (i += 1) {
-                if (!validity_bitmap.isValid(self.offset + i)) count += 1;
+        if (self.null_count) |expected_count| {
+            if (self.buffers.len > 0 and !self.buffers[0].isEmpty()) {
+                const validity_bitmap = ValidityBitmap.fromBuffer(self.buffers[0], self.offset + self.length);
+                var actual_count: usize = 0;
+                var i: usize = 0;
+                while (i < self.length) : (i += 1) {
+                    if (!validity_bitmap.isValid(self.offset + i)) actual_count += 1;
+                }
+                if (actual_count != expected_count) return error.InvalidNullCount;
             }
-            if (count != @as(usize, @intCast(self.null_count))) return error.InvalidNullCount;
         }
 
         for (self.children) |child| try child.data().validateFull();
@@ -400,7 +400,7 @@ test "array data slice updates offset and length" {
     const sliced = data.slice(3, 4);
     try std.testing.expectEqual(@as(usize, 4), sliced.length);
     try std.testing.expectEqual(@as(usize, 5), sliced.offset);
-    try std.testing.expectEqual(@as(isize, 0), sliced.null_count);
+    try std.testing.expectEqual(@as(?usize, 0), sliced.null_count);
 }
 
 test "array data nullCount caches when unknown" {
@@ -409,12 +409,12 @@ test "array data nullCount caches when unknown" {
     var data = ArrayData{
         .data_type = dtype,
         .length = 4,
-        .null_count = -1,
+        .null_count = null,
         .buffers = &[_]SharedBuffer{SharedBuffer.fromSlice(validity[0..])},
     };
 
     try std.testing.expectEqual(@as(usize, 1), data.nullCount());
-    try std.testing.expectEqual(@as(isize, 1), data.null_count);
+    try std.testing.expectEqual(@as(?usize, 1), data.null_count);
     try std.testing.expect(data.hasNulls());
 }
 
@@ -423,7 +423,7 @@ test "array data hasNulls handles no validity" {
     const data = ArrayData{
         .data_type = dtype,
         .length = 3,
-        .null_count = -1,
+        .null_count = null,
         .buffers = &[_]SharedBuffer{SharedBuffer.empty},
     };
 
@@ -436,14 +436,14 @@ test "array data slice on unknown null count" {
         .data_type = dtype,
         .length = 6,
         .offset = 1,
-        .null_count = -1,
+        .null_count = null,
         .buffers = &[_]SharedBuffer{SharedBuffer.empty},
     };
 
     const sliced = data.slice(2, 3);
     try std.testing.expectEqual(@as(usize, 3), sliced.length);
     try std.testing.expectEqual(@as(usize, 3), sliced.offset);
-    try std.testing.expectEqual(@as(isize, -1), sliced.null_count);
+    try std.testing.expectEqual(@as(?usize, null), sliced.null_count);
 }
 
 test "array data validateLayout accepts primitive" {

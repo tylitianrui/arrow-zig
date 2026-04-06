@@ -65,7 +65,7 @@ pub const BinaryBuilder = struct {
     validity: ?OwnedBuffer = null,
     buffers: [3]SharedBuffer = undefined,
     len: usize = 0,
-    null_count: isize = 0,
+    null_count: usize = 0,
     data_len: usize = 0,
     state: BuilderState = .ready,
 

@@ -99,7 +99,7 @@ pub const ListBuilder = struct {
     validity: ?OwnedBuffer = null,
     buffers: [2]SharedBuffer = undefined,
     len: usize = 0,
-    null_count: isize = 0,
+    null_count: usize = 0,
     values_len: usize = 0,
     state: BuilderState = .ready,
 
@@ -258,7 +258,7 @@ pub const LargeListBuilder = struct {
     validity: ?OwnedBuffer = null,
     buffers: [2]SharedBuffer = undefined,
     len: usize = 0,
-    null_count: isize = 0,
+    null_count: usize = 0,
     values_len: usize = 0,
     state: BuilderState = .ready,
 

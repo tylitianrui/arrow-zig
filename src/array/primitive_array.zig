@@ -71,7 +71,7 @@ pub fn PrimitiveBuilder(comptime T: type, comptime dtype: DataType) type {
         validity: ?OwnedBuffer = null,
         buffers: [2]SharedBuffer = undefined,
         len: usize = 0,
-        null_count: isize = 0,
+        null_count: usize = 0,
         state: BuilderState = .ready,
 
         const Self = @This();

@@ -14,6 +14,13 @@ pub const DataType = datatype.DataType;
 pub const Field = datatype.Field;
 pub const BuilderState = builder_state.BuilderState;
 
+pub const ChildBuilder = struct {
+    ctx: *anyopaque,
+    finishFn: *const fn (*anyopaque) anyerror!ArrayRef,
+    lenFn: *const fn (*anyopaque) usize,
+    resetFn: ?*const fn (*anyopaque) anyerror!void = null,
+};
+
 fn initValidityAllValid(allocator: std.mem.Allocator, bit_len: usize) !OwnedBuffer {
     const used_bytes = bitmap.byteLength(bit_len);
     var buf = try OwnedBuffer.init(allocator, used_bytes);
@@ -68,16 +75,21 @@ pub const StructArray = struct {
 pub const StructBuilder = struct {
     allocator: std.mem.Allocator,
     fields: []const Field,
+    child_builders: ?[]const ChildBuilder = null,
     validity: ?OwnedBuffer = null,
     buffers: [1]SharedBuffer = undefined,
     len: usize = 0,
-    null_count: isize = 0,
+    null_count: usize = 0,
     state: BuilderState = .ready,
 
-    const BuilderError = error{ AlreadyFinished, NotFinished, InvalidChildCount, InvalidChildLength };
+    const BuilderError = error{ AlreadyFinished, NotFinished, InvalidChildCount, InvalidChildLength, InvalidChildType, InvalidChildOffset, MissingChildBuilders };
 
     pub fn init(allocator: std.mem.Allocator, fields: []const Field) StructBuilder {
         return .{ .allocator = allocator, .fields = fields };
+    }
+
+    pub fn initWithChildren(allocator: std.mem.Allocator, fields: []const Field, child_builders: []const ChildBuilder) StructBuilder {
+        return .{ .allocator = allocator, .fields = fields, .child_builders = child_builders };
     }
 
     pub fn deinit(self: *StructBuilder) void {
@@ -98,6 +110,11 @@ pub const StructBuilder = struct {
         self.len = 0;
         self.null_count = 0;
         self.state = .ready;
+    }
+
+    pub fn reserve(self: *StructBuilder, additional: usize) !void {
+        if (self.validity == null) return;
+        try ensureBitmapCapacity(&self.validity.?, self.len + additional);
     }
 
     fn ensureValidityForNull(self: *StructBuilder, new_len: usize) !void {
@@ -128,6 +145,10 @@ pub const StructBuilder = struct {
         self.len = next_len;
     }
 
+    pub fn appendPresent(self: *StructBuilder) !void {
+        try self.appendValid();
+    }
+
     pub fn appendNull(self: *StructBuilder) !void {
         if (self.state == .finished) return BuilderError.AlreadyFinished;
         const next_len = self.len + 1;
@@ -135,11 +156,25 @@ pub const StructBuilder = struct {
         self.len = next_len;
     }
 
+    pub fn appendMany(self: *StructBuilder, present: []const bool) !void {
+        if (self.state == .finished) return BuilderError.AlreadyFinished;
+        for (present) |is_present| {
+            if (is_present) {
+                try self.appendValid();
+            } else {
+                try self.appendNull();
+            }
+        }
+    }
+
     pub fn finish(self: *StructBuilder, children: []const ArrayRef) !ArrayRef {
         if (self.state == .finished) return BuilderError.AlreadyFinished;
         if (children.len != self.fields.len) return BuilderError.InvalidChildCount;
-        for (children) |child| {
-            if (child.data().length != self.len) return BuilderError.InvalidChildLength;
+        for (children, 0..) |child, i| {
+            const child_data = child.data();
+            if (child_data.length != self.len) return BuilderError.InvalidChildLength;
+            if (child_data.offset != 0) return BuilderError.InvalidChildOffset;
+            if (!std.meta.eql(child_data.data_type, self.fields[i].data_type.*)) return BuilderError.InvalidChildType;
         }
 
         const validity_buf = if (self.validity) |*buf| try buf.toShared(bitmap.byteLength(self.len)) else SharedBuffer.empty;
@@ -182,6 +217,36 @@ pub const StructBuilder = struct {
 
         const array_ref_out = try ArrayRef.fromOwnedUnsafe(self.allocator, data);
         self.state = .finished;
+        return array_ref_out;
+    }
+
+    pub fn finishFromChildren(self: *StructBuilder) !ArrayRef {
+        if (self.child_builders == null) return BuilderError.MissingChildBuilders;
+        const builders = self.child_builders.?;
+        if (builders.len != self.fields.len) return BuilderError.InvalidChildCount;
+
+        const children = try self.allocator.alloc(ArrayRef, builders.len);
+        var child_count: usize = 0;
+        errdefer {
+            var i: usize = 0;
+            while (i < child_count) : (i += 1) {
+                children[i].release();
+            }
+            self.allocator.free(children);
+        }
+
+        for (builders, 0..) |builder, i| {
+            if (builder.lenFn(builder.ctx) != self.len) return BuilderError.InvalidChildLength;
+            children[i] = try builder.finishFn(builder.ctx);
+            child_count += 1;
+        }
+
+        const array_ref_out = try self.finish(children);
+        var i: usize = 0;
+        while (i < child_count) : (i += 1) {
+            children[i].release();
+        }
+        self.allocator.free(children);
         return array_ref_out;
     }
 
@@ -343,4 +408,46 @@ test "struct builder finishReset allows reuse" {
     defer struct_ref2.release();
     const struct_array2 = StructArray{ .data = struct_ref2.data() };
     try std.testing.expectEqual(@as(usize, 1), struct_array2.len());
+}
+
+test "struct builder finishFromChildren builds" {
+    const allocator = std.testing.allocator;
+    const value_type = DataType{ .int32 = {} };
+    const fields = &[_]Field{
+        .{ .name = "a", .data_type = &value_type, .nullable = true },
+    };
+
+    const IntBuilder = @import("primitive_array.zig").PrimitiveBuilder(i32, DataType{ .int32 = {} });
+
+    var child_builder = try IntBuilder.init(allocator, 2);
+    defer child_builder.deinit();
+    try child_builder.append(1);
+    try child_builder.append(2);
+
+    var builder = StructBuilder.initWithChildren(allocator, fields, &[_]ChildBuilder{
+        .{
+            .ctx = &child_builder,
+            .finishFn = struct {
+                fn finish(ctx: *anyopaque) !ArrayRef {
+                    const ptr: *IntBuilder = @ptrCast(@alignCast(ctx));
+                    return ptr.finish();
+                }
+            }.finish,
+            .lenFn = struct {
+                fn len(ctx: *anyopaque) usize {
+                    const ptr: *IntBuilder = @ptrCast(@alignCast(ctx));
+                    return ptr.len;
+                }
+            }.len,
+        },
+    });
+    defer builder.deinit();
+    try builder.appendValid();
+    try builder.appendValid();
+
+    var struct_ref = try builder.finishFromChildren();
+    defer struct_ref.release();
+
+    const struct_array = StructArray{ .data = struct_ref.data() };
+    try std.testing.expectEqual(@as(usize, 2), struct_array.len());
 }
