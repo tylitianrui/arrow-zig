@@ -40,3 +40,4 @@ pub const LargeListArray = @import("list_array.zig").LargeListArray;
 pub const ListBuilder = @import("list_array.zig").ListBuilder;
 pub const LargeListBuilder = @import("list_array.zig").LargeListBuilder;
 pub const StructArray = @import("struct_array.zig").StructArray;
+pub const StructBuilder = @import("struct_array.zig").StructBuilder;

@@ -70,6 +70,7 @@ pub const LargeListArray = array.LargeListArray;
 pub const ListBuilder = array.ListBuilder;
 pub const LargeListBuilder = array.LargeListBuilder;
 pub const StructArray = array.StructArray;
+pub const StructBuilder = array.StructBuilder;
 
 // Pull buffer tests into the root test target.
 test {
