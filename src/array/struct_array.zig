@@ -1,6 +1,7 @@
 const std = @import("std");
 const bitmap = @import("../bitmap.zig");
 const buffer = @import("../buffer.zig");
+const array_utils = @import("array_utils.zig");
 const array_ref = @import("array_ref.zig");
 const builder_state = @import("builder_state.zig");
 const datatype = @import("../datatype.zig");
@@ -21,25 +22,8 @@ pub const ChildBuilder = struct {
     resetFn: ?*const fn (*anyopaque) anyerror!void = null,
 };
 
-fn initValidityAllValid(allocator: std.mem.Allocator, bit_len: usize) !OwnedBuffer {
-    const used_bytes = bitmap.byteLength(bit_len);
-    var buf = try OwnedBuffer.init(allocator, used_bytes);
-    if (used_bytes > 0) {
-        @memset(buf.data[0..used_bytes], 0xFF);
-        const remainder = bit_len & 7;
-        if (remainder != 0) {
-            const keep_mask = (@as(u8, 1) << @as(u3, @intCast(remainder))) - 1;
-            buf.data[used_bytes - 1] &= keep_mask;
-        }
-    }
-    return buf;
-}
-
-fn ensureBitmapCapacity(buf: *OwnedBuffer, bit_len: usize) !void {
-    const needed = bitmap.byteLength(bit_len);
-    if (needed <= buf.len()) return;
-    try buf.resize(needed);
-}
+const initValidityAllValid = array_utils.initValidityAllValid;
+const ensureBitmapCapacity = array_utils.ensureBitmapCapacity;
 
 pub const StructArray = struct {
     data: *const ArrayData,

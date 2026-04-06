@@ -1,6 +1,7 @@
 const std = @import("std");
 const bitmap = @import("../bitmap.zig");
 const buffer = @import("../buffer.zig");
+const array_utils = @import("array_utils.zig");
 const array_ref = @import("array_ref.zig");
 const builder_state = @import("builder_state.zig");
 const datatype = @import("../datatype.zig");
@@ -14,25 +15,8 @@ pub const Field = datatype.Field;
 pub const ArrayRef = array_ref.ArrayRef;
 pub const BuilderState = builder_state.BuilderState;
 
-fn initValidityAllValid(allocator: std.mem.Allocator, bit_len: usize) !OwnedBuffer {
-    const used_bytes = bitmap.byteLength(bit_len);
-    var buf = try OwnedBuffer.init(allocator, used_bytes);
-    if (used_bytes > 0) {
-        @memset(buf.data[0..used_bytes], 0xFF);
-        const remainder = bit_len & 7;
-        if (remainder != 0) {
-            const keep_mask = (@as(u8, 1) << @as(u3, @intCast(remainder))) - 1;
-            buf.data[used_bytes - 1] &= keep_mask;
-        }
-    }
-    return buf;
-}
-
-fn ensureBitmapCapacity(buf: *OwnedBuffer, bit_len: usize) !void {
-    const needed = bitmap.byteLength(bit_len);
-    if (needed <= buf.len()) return;
-    try buf.resize(needed);
-}
+const initValidityAllValid = array_utils.initValidityAllValid;
+const ensureBitmapCapacity = array_utils.ensureBitmapCapacity;
 
 pub const ListArray = struct {
     data: *const ArrayData,
@@ -92,323 +76,180 @@ pub const LargeListArray = struct {
     }
 };
 
-pub const ListBuilder = struct {
-    allocator: std.mem.Allocator,
-    value_field: Field,
-    offsets: OwnedBuffer,
-    validity: ?OwnedBuffer = null,
-    buffers: [2]SharedBuffer = undefined,
-    len: usize = 0,
-    null_count: usize = 0,
-    values_len: usize = 0,
-    state: BuilderState = .ready,
+pub fn GenericListBuilder(comptime OffsetsT: type) type {
+    return struct {
+        allocator: std.mem.Allocator,
+        value_field: Field,
+        offsets: OwnedBuffer,
+        validity: ?OwnedBuffer = null,
+        buffers: [2]SharedBuffer = undefined,
+        len: usize = 0,
+        null_count: usize = 0,
+        values_len: usize = 0,
+        state: BuilderState = .ready,
 
-    const BuilderError = error{ AlreadyFinished, NotFinished, OffsetOverflow, InvalidChildLength };
+        const Self = @This();
+        const BuilderError = error{ AlreadyFinished, NotFinished, OffsetOverflow, InvalidChildLength };
 
-    pub fn init(allocator: std.mem.Allocator, capacity: usize, value_field: Field) !ListBuilder {
-        const offsets = try OwnedBuffer.init(allocator, (capacity + 1) * @sizeOf(i32));
-        const offsets_slice = std.mem.bytesAsSlice(i32, offsets.data);
-        offsets_slice[0] = 0;
-        return .{
-            .allocator = allocator,
-            .value_field = value_field,
-            .offsets = offsets,
-        };
-    }
-
-    pub fn deinit(self: *ListBuilder) void {
-        self.offsets.deinit();
-        if (self.validity) |*valid| valid.deinit();
-    }
-
-    pub fn reset(self: *ListBuilder) BuilderError!void {
-        if (self.state != .finished) return BuilderError.NotFinished;
-        if (!self.offsets.isEmpty()) {
-            const offsets_slice = std.mem.bytesAsSlice(i32, self.offsets.data);
-            offsets_slice[0] = 0;
-        }
-        self.len = 0;
-        self.null_count = 0;
-        self.values_len = 0;
-        self.state = .ready;
-    }
-
-    pub fn clear(self: *ListBuilder) BuilderError!void {
-        if (self.state != .finished) return BuilderError.NotFinished;
-        self.offsets.deinit();
-        if (self.validity) |*valid| valid.deinit();
-        self.validity = null;
-        self.len = 0;
-        self.null_count = 0;
-        self.values_len = 0;
-        self.state = .ready;
-    }
-
-    fn ensureOffsetsCapacity(self: *ListBuilder, needed_len: usize) !void {
-        const capacity = self.offsets.len() / @sizeOf(i32);
-        if (needed_len <= capacity) return;
-        const was_empty = capacity == 0;
-        try self.offsets.resize(needed_len * @sizeOf(i32));
-        if (was_empty) {
-            const offsets_slice = std.mem.bytesAsSlice(i32, self.offsets.data);
-            offsets_slice[0] = 0;
-        }
-    }
-
-    fn ensureValidityForNull(self: *ListBuilder, new_len: usize) !void {
-        if (self.validity == null) {
-            var buf = try initValidityAllValid(self.allocator, new_len);
-            bitmap.clearBit(buf.data[0..bitmap.byteLength(new_len)], new_len - 1);
-            self.validity = buf;
-            self.null_count += 1;
-            return;
-        }
-        var buf = &self.validity.?;
-        try ensureBitmapCapacity(buf, new_len);
-        bitmap.clearBit(buf.data[0..bitmap.byteLength(new_len)], new_len - 1);
-        self.null_count += 1;
-    }
-
-    fn setValidBit(self: *ListBuilder, index: usize) !void {
-        if (self.validity == null) return;
-        var buf = &self.validity.?;
-        try ensureBitmapCapacity(buf, index + 1);
-        bitmap.setBit(buf.data[0..bitmap.byteLength(index + 1)], index);
-    }
-
-    pub fn appendLen(self: *ListBuilder, value_len: usize) !void {
-        if (self.state == .finished) return BuilderError.AlreadyFinished;
-        const next_len = self.len + 1;
-        try self.ensureOffsetsCapacity(next_len + 1);
-
-        const next_offset = self.values_len + value_len;
-        const cast_offset = std.math.cast(i32, next_offset) orelse return BuilderError.OffsetOverflow;
-        const offsets_slice = std.mem.bytesAsSlice(i32, self.offsets.data);
-        offsets_slice[next_len] = cast_offset;
-
-        try self.setValidBit(self.len);
-        self.len = next_len;
-        self.values_len = next_offset;
-    }
-
-    pub fn appendNull(self: *ListBuilder) !void {
-        if (self.state == .finished) return BuilderError.AlreadyFinished;
-        const next_len = self.len + 1;
-        try self.ensureOffsetsCapacity(next_len + 1);
-        const offsets_slice = std.mem.bytesAsSlice(i32, self.offsets.data);
-        offsets_slice[next_len] = std.math.cast(i32, self.values_len) orelse return BuilderError.OffsetOverflow;
-        try self.ensureValidityForNull(next_len);
-        self.len = next_len;
-    }
-
-    pub fn finish(self: *ListBuilder, values: ArrayRef) !ArrayRef {
-        if (self.state == .finished) return BuilderError.AlreadyFinished;
-        if (values.data().length != self.values_len) return BuilderError.InvalidChildLength;
-
-        try self.ensureOffsetsCapacity(self.len + 1);
-
-        const validity_buf = if (self.validity) |*buf| try buf.toShared(bitmap.byteLength(self.len)) else SharedBuffer.empty;
-        self.buffers[0] = validity_buf;
-        self.buffers[1] = try self.offsets.toShared((self.len + 1) * @sizeOf(i32));
-
-        const buffers = try self.allocator.alloc(SharedBuffer, 2);
-        var filled: usize = 0;
-        errdefer {
-            var i: usize = 0;
-            while (i < filled) : (i += 1) {
-                var owned = buffers[i];
-                owned.release();
+        fn listDataType(value_field: Field) DataType {
+            if (OffsetsT == i32) {
+                return DataType{ .list = .{ .value_field = value_field } };
             }
-            self.allocator.free(buffers);
-        }
-        buffers[0] = self.buffers[0];
-        filled = 1;
-        buffers[1] = self.buffers[1];
-        filled = 2;
-
-        const children = try self.allocator.alloc(ArrayRef, 1);
-        errdefer self.allocator.free(children);
-        children[0] = values.retain();
-        errdefer children[0].release();
-
-        const data = ArrayData{
-            .data_type = DataType{ .list = .{ .value_field = self.value_field } },
-            .length = self.len,
-            .null_count = self.null_count,
-            .buffers = buffers,
-            .children = children,
-        };
-
-        const finished_ref = try ArrayRef.fromOwnedUnsafe(self.allocator, data);
-        self.state = .finished;
-        return finished_ref;
-    }
-
-    pub fn finishReset(self: *ListBuilder, values: ArrayRef) !ArrayRef {
-        const ref = try self.finish(values);
-        try self.reset();
-        return ref;
-    }
-};
-
-pub const LargeListBuilder = struct {
-    allocator: std.mem.Allocator,
-    value_field: Field,
-    offsets: OwnedBuffer,
-    validity: ?OwnedBuffer = null,
-    buffers: [2]SharedBuffer = undefined,
-    len: usize = 0,
-    null_count: usize = 0,
-    values_len: usize = 0,
-    state: BuilderState = .ready,
-
-    const BuilderError = error{ AlreadyFinished, NotFinished, OffsetOverflow, InvalidChildLength };
-
-    pub fn init(allocator: std.mem.Allocator, capacity: usize, value_field: Field) !LargeListBuilder {
-        const offsets = try OwnedBuffer.init(allocator, (capacity + 1) * @sizeOf(i64));
-        const offsets_slice = std.mem.bytesAsSlice(i64, offsets.data);
-        offsets_slice[0] = 0;
-        return .{
-            .allocator = allocator,
-            .value_field = value_field,
-            .offsets = offsets,
-        };
-    }
-
-    pub fn deinit(self: *LargeListBuilder) void {
-        self.offsets.deinit();
-        if (self.validity) |*valid| valid.deinit();
-    }
-
-    pub fn reset(self: *LargeListBuilder) BuilderError!void {
-        if (self.state != .finished) return BuilderError.NotFinished;
-        if (!self.offsets.isEmpty()) {
-            const offsets_slice = std.mem.bytesAsSlice(i64, self.offsets.data);
-            offsets_slice[0] = 0;
-        }
-        self.len = 0;
-        self.null_count = 0;
-        self.values_len = 0;
-        self.state = .ready;
-    }
-
-    pub fn clear(self: *LargeListBuilder) BuilderError!void {
-        if (self.state != .finished) return BuilderError.NotFinished;
-        self.offsets.deinit();
-        if (self.validity) |*valid| valid.deinit();
-        self.validity = null;
-        self.len = 0;
-        self.null_count = 0;
-        self.values_len = 0;
-        self.state = .ready;
-    }
-
-    fn ensureOffsetsCapacity(self: *LargeListBuilder, needed_len: usize) !void {
-        const capacity = self.offsets.len() / @sizeOf(i64);
-        if (needed_len <= capacity) return;
-        const was_empty = capacity == 0;
-        try self.offsets.resize(needed_len * @sizeOf(i64));
-        if (was_empty) {
-            const offsets_slice = std.mem.bytesAsSlice(i64, self.offsets.data);
-            offsets_slice[0] = 0;
-        }
-    }
-
-    fn ensureValidityForNull(self: *LargeListBuilder, new_len: usize) !void {
-        if (self.validity == null) {
-            var buf = try initValidityAllValid(self.allocator, new_len);
-            bitmap.clearBit(buf.data[0..bitmap.byteLength(new_len)], new_len - 1);
-            self.validity = buf;
-            self.null_count += 1;
-            return;
-        }
-        var buf = &self.validity.?;
-        try ensureBitmapCapacity(buf, new_len);
-        bitmap.clearBit(buf.data[0..bitmap.byteLength(new_len)], new_len - 1);
-        self.null_count += 1;
-    }
-
-    fn setValidBit(self: *LargeListBuilder, index: usize) !void {
-        if (self.validity == null) return;
-        var buf = &self.validity.?;
-        try ensureBitmapCapacity(buf, index + 1);
-        bitmap.setBit(buf.data[0..bitmap.byteLength(index + 1)], index);
-    }
-
-    pub fn appendLen(self: *LargeListBuilder, value_len: usize) !void {
-        if (self.state == .finished) return BuilderError.AlreadyFinished;
-        const next_len = self.len + 1;
-        try self.ensureOffsetsCapacity(next_len + 1);
-
-        const next_offset = self.values_len + value_len;
-        const cast_offset = std.math.cast(i64, next_offset) orelse return BuilderError.OffsetOverflow;
-        const offsets_slice = std.mem.bytesAsSlice(i64, self.offsets.data);
-        offsets_slice[next_len] = cast_offset;
-
-        try self.setValidBit(self.len);
-        self.len = next_len;
-        self.values_len = next_offset;
-    }
-
-    pub fn appendNull(self: *LargeListBuilder) !void {
-        if (self.state == .finished) return BuilderError.AlreadyFinished;
-        const next_len = self.len + 1;
-        try self.ensureOffsetsCapacity(next_len + 1);
-        const offsets_slice = std.mem.bytesAsSlice(i64, self.offsets.data);
-        offsets_slice[next_len] = std.math.cast(i64, self.values_len) orelse return BuilderError.OffsetOverflow;
-        try self.ensureValidityForNull(next_len);
-        self.len = next_len;
-    }
-
-    pub fn finish(self: *LargeListBuilder, values: ArrayRef) !ArrayRef {
-        if (self.state == .finished) return BuilderError.AlreadyFinished;
-        if (values.data().length != self.values_len) return BuilderError.InvalidChildLength;
-
-        try self.ensureOffsetsCapacity(self.len + 1);
-
-        const validity_buf = if (self.validity) |*buf| try buf.toShared(bitmap.byteLength(self.len)) else SharedBuffer.empty;
-        self.buffers[0] = validity_buf;
-        self.buffers[1] = try self.offsets.toShared((self.len + 1) * @sizeOf(i64));
-
-        const buffers = try self.allocator.alloc(SharedBuffer, 2);
-        var filled: usize = 0;
-        errdefer {
-            var i: usize = 0;
-            while (i < filled) : (i += 1) {
-                var owned = buffers[i];
-                owned.release();
+            if (OffsetsT == i64) {
+                return DataType{ .large_list = .{ .value_field = value_field } };
             }
-            self.allocator.free(buffers);
+            @compileError("GenericListBuilder only supports i32 or i64 offsets");
         }
-        buffers[0] = self.buffers[0];
-        filled = 1;
-        buffers[1] = self.buffers[1];
-        filled = 2;
 
-        const children = try self.allocator.alloc(ArrayRef, 1);
-        errdefer self.allocator.free(children);
-        children[0] = values.retain();
-        errdefer children[0].release();
+        pub fn init(allocator: std.mem.Allocator, capacity: usize, value_field: Field) !Self {
+            const offsets = try OwnedBuffer.init(allocator, (capacity + 1) * @sizeOf(OffsetsT));
+            const offsets_slice = std.mem.bytesAsSlice(OffsetsT, offsets.data);
+            offsets_slice[0] = 0;
+            return .{
+                .allocator = allocator,
+                .value_field = value_field,
+                .offsets = offsets,
+            };
+        }
 
-        const data = ArrayData{
-            .data_type = DataType{ .large_list = .{ .value_field = self.value_field } },
-            .length = self.len,
-            .null_count = self.null_count,
-            .buffers = buffers,
-            .children = children,
-        };
+        pub fn deinit(self: *Self) void {
+            self.offsets.deinit();
+            if (self.validity) |*valid| valid.deinit();
+        }
 
-        const finished_ref = try ArrayRef.fromOwnedUnsafe(self.allocator, data);
-        self.state = .finished;
-        return finished_ref;
-    }
+        pub fn reset(self: *Self) BuilderError!void {
+            if (self.state != .finished) return BuilderError.NotFinished;
+            if (!self.offsets.isEmpty()) {
+                const offsets_slice = std.mem.bytesAsSlice(OffsetsT, self.offsets.data);
+                offsets_slice[0] = 0;
+            }
+            self.len = 0;
+            self.null_count = 0;
+            self.values_len = 0;
+            self.state = .ready;
+        }
 
-    pub fn finishReset(self: *LargeListBuilder, values: ArrayRef) !ArrayRef {
-        const ref = try self.finish(values);
-        try self.reset();
-        return ref;
-    }
-};
+        pub fn clear(self: *Self) BuilderError!void {
+            if (self.state != .finished) return BuilderError.NotFinished;
+            self.offsets.deinit();
+            if (self.validity) |*valid| valid.deinit();
+            self.validity = null;
+            self.len = 0;
+            self.null_count = 0;
+            self.values_len = 0;
+            self.state = .ready;
+        }
+
+        fn ensureOffsetsCapacity(self: *Self, needed_len: usize) !void {
+            const capacity = self.offsets.len() / @sizeOf(OffsetsT);
+            if (needed_len <= capacity) return;
+            const was_empty = capacity == 0;
+            try self.offsets.resize(needed_len * @sizeOf(OffsetsT));
+            if (was_empty) {
+                const offsets_slice = std.mem.bytesAsSlice(OffsetsT, self.offsets.data);
+                offsets_slice[0] = 0;
+            }
+        }
+
+        fn ensureValidityForNull(self: *Self, new_len: usize) !void {
+            if (self.validity == null) {
+                var buf = try initValidityAllValid(self.allocator, new_len);
+                bitmap.clearBit(buf.data[0..bitmap.byteLength(new_len)], new_len - 1);
+                self.validity = buf;
+                self.null_count += 1;
+                return;
+            }
+            var buf = &self.validity.?;
+            try ensureBitmapCapacity(buf, new_len);
+            bitmap.clearBit(buf.data[0..bitmap.byteLength(new_len)], new_len - 1);
+            self.null_count += 1;
+        }
+
+        fn setValidBit(self: *Self, index: usize) !void {
+            if (self.validity == null) return;
+            var buf = &self.validity.?;
+            try ensureBitmapCapacity(buf, index + 1);
+            bitmap.setBit(buf.data[0..bitmap.byteLength(index + 1)], index);
+        }
+
+        pub fn appendLen(self: *Self, value_len: usize) !void {
+            if (self.state == .finished) return BuilderError.AlreadyFinished;
+            const next_len = self.len + 1;
+            try self.ensureOffsetsCapacity(next_len + 1);
+
+            const next_offset = self.values_len + value_len;
+            const cast_offset = std.math.cast(OffsetsT, next_offset) orelse return BuilderError.OffsetOverflow;
+            const offsets_slice = std.mem.bytesAsSlice(OffsetsT, self.offsets.data);
+            offsets_slice[next_len] = cast_offset;
+
+            try self.setValidBit(self.len);
+            self.len = next_len;
+            self.values_len = next_offset;
+        }
+
+        pub fn appendNull(self: *Self) !void {
+            if (self.state == .finished) return BuilderError.AlreadyFinished;
+            const next_len = self.len + 1;
+            try self.ensureOffsetsCapacity(next_len + 1);
+            const offsets_slice = std.mem.bytesAsSlice(OffsetsT, self.offsets.data);
+            offsets_slice[next_len] = std.math.cast(OffsetsT, self.values_len) orelse return BuilderError.OffsetOverflow;
+            try self.ensureValidityForNull(next_len);
+            self.len = next_len;
+        }
+
+        pub fn finish(self: *Self, values: ArrayRef) !ArrayRef {
+            if (self.state == .finished) return BuilderError.AlreadyFinished;
+            if (values.data().length != self.values_len) return BuilderError.InvalidChildLength;
+
+            try self.ensureOffsetsCapacity(self.len + 1);
+
+            const validity_buf = if (self.validity) |*buf| try buf.toShared(bitmap.byteLength(self.len)) else SharedBuffer.empty;
+            self.buffers[0] = validity_buf;
+            self.buffers[1] = try self.offsets.toShared((self.len + 1) * @sizeOf(OffsetsT));
+
+            const buffers = try self.allocator.alloc(SharedBuffer, 2);
+            var filled: usize = 0;
+            errdefer {
+                var i: usize = 0;
+                while (i < filled) : (i += 1) {
+                    var owned = buffers[i];
+                    owned.release();
+                }
+                self.allocator.free(buffers);
+            }
+            buffers[0] = self.buffers[0];
+            filled = 1;
+            buffers[1] = self.buffers[1];
+            filled = 2;
+
+            const children = try self.allocator.alloc(ArrayRef, 1);
+            errdefer self.allocator.free(children);
+            children[0] = values.retain();
+            errdefer children[0].release();
+
+            const data = ArrayData{
+                .data_type = listDataType(self.value_field),
+                .length = self.len,
+                .null_count = self.null_count,
+                .buffers = buffers,
+                .children = children,
+            };
+
+            const finished_ref = try ArrayRef.fromOwnedUnsafe(self.allocator, data);
+            self.state = .finished;
+            return finished_ref;
+        }
+
+        pub fn finishReset(self: *Self, values: ArrayRef) !ArrayRef {
+            const ref = try self.finish(values);
+            try self.reset();
+            return ref;
+        }
+    };
+}
+
+pub const ListBuilder = GenericListBuilder(i32);
+pub const LargeListBuilder = GenericListBuilder(i64);
 
 test "list array reads values" {
     const allocator = std.testing.allocator;
