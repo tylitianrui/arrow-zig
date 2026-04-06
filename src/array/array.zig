@@ -35,3 +35,7 @@ pub const StringArray = @import("string_array.zig").StringArray;
 pub const StringBuilder = @import("string_array.zig").StringBuilder;
 pub const BinaryArray = @import("binary_array.zig").BinaryArray;
 pub const BinaryBuilder = @import("binary_array.zig").BinaryBuilder;
+pub const ListArray = @import("list_array.zig").ListArray;
+pub const LargeListArray = @import("list_array.zig").LargeListArray;
+pub const ListBuilder = @import("list_array.zig").ListBuilder;
+pub const LargeListBuilder = @import("list_array.zig").LargeListBuilder;

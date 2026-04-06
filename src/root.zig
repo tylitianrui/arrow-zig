@@ -65,6 +65,10 @@ pub const BinaryArray = array.BinaryArray;
 pub const BooleanBuilder = array.BooleanBuilder;
 pub const StringBuilder = array.StringBuilder;
 pub const BinaryBuilder = array.BinaryBuilder;
+pub const ListArray = array.ListArray;
+pub const LargeListArray = array.LargeListArray;
+pub const ListBuilder = array.ListBuilder;
+pub const LargeListBuilder = array.LargeListBuilder;
 
 // Pull buffer tests into the root test target.
 test {
@@ -78,4 +82,5 @@ test {
     _ = @import("array/boolean_array.zig");
     _ = @import("array/string_array.zig");
     _ = @import("array/binary_array.zig");
+    _ = @import("array/list_array.zig");
 }
