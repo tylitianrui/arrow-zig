@@ -12,6 +12,7 @@ const BuilderError = error{
     ChildClearUnsupported,
 };
 pub const ChildBuilderError = error{
+    FinishFailed,
     ResetFailed,
     ClearFailed,
 };
@@ -33,13 +34,14 @@ pub const BuilderState = builder_state.BuilderState;
 
 pub const ChildBuilder = struct {
     ctx: *anyopaque,
-    finishFn: *const fn (*anyopaque) anyerror!ArrayRef,
+    finishFn: *const fn (*anyopaque) ChildBuilderError!ArrayRef,
     lenFn: *const fn (*anyopaque) usize,
     resetFn: ?*const fn (*anyopaque) ChildBuilderError!void = null,
     clearFn: ?*const fn (*anyopaque) ChildBuilderError!void = null,
 };
 
-const FromChildrenError = BuilderError || ChildBuilderError;
+const StructBuilderError = BuilderError || error{OutOfMemory};
+const FromChildrenError = StructBuilderError || ChildBuilderError;
 const RecycleAction = enum {
     reset,
     clear,
@@ -113,7 +115,7 @@ pub const StructBuilder = struct {
         }
     }
 
-    fn materializeChildren(self: *StructBuilder, builders: []const ChildBuilder) ![]ArrayRef {
+    fn materializeChildren(self: *StructBuilder, builders: []const ChildBuilder) FromChildrenError![]ArrayRef {
         if (builders.len != self.fields.len) return BuilderError.InvalidChildCount;
 
         const children = try self.allocator.alloc(ArrayRef, builders.len);
@@ -243,7 +245,7 @@ pub const StructBuilder = struct {
         }
     }
 
-    pub fn finish(self: *StructBuilder, children: []const ArrayRef) !ArrayRef {
+    pub fn finish(self: *StructBuilder, children: []const ArrayRef) StructBuilderError!ArrayRef {
         if (self.state == .finished) return BuilderError.AlreadyFinished;
         if (children.len != self.fields.len) return BuilderError.InvalidChildCount;
         for (children, 0..) |child, i| {
@@ -296,7 +298,7 @@ pub const StructBuilder = struct {
         return array_ref_out;
     }
 
-    pub fn finishFromChildren(self: *StructBuilder) !ArrayRef {
+    pub fn finishFromChildren(self: *StructBuilder) FromChildrenError!ArrayRef {
         if (self.child_builders == null) return BuilderError.MissingChildBuilders;
         const builders = self.child_builders.?;
 
@@ -305,7 +307,7 @@ pub const StructBuilder = struct {
         return self.finish(children);
     }
 
-    pub fn finishFromChildrenReset(self: *StructBuilder) (FromChildrenError || anyerror)!ArrayRef {
+    pub fn finishFromChildrenReset(self: *StructBuilder) FromChildrenError!ArrayRef {
         if (self.child_builders == null) return BuilderError.MissingChildBuilders;
         const builders = self.child_builders.?;
 
@@ -323,7 +325,7 @@ pub const StructBuilder = struct {
         return array_ref_out;
     }
 
-    pub fn finishFromChildrenClear(self: *StructBuilder) (FromChildrenError || anyerror)!ArrayRef {
+    pub fn finishFromChildrenClear(self: *StructBuilder) FromChildrenError!ArrayRef {
         if (self.child_builders == null) return BuilderError.MissingChildBuilders;
         const builders = self.child_builders.?;
 
@@ -341,13 +343,13 @@ pub const StructBuilder = struct {
         return array_ref_out;
     }
 
-    pub fn finishReset(self: *StructBuilder, children: []const ArrayRef) !ArrayRef {
+    pub fn finishReset(self: *StructBuilder, children: []const ArrayRef) FromChildrenError!ArrayRef {
         const array_ref_out = try self.finish(children);
         try self.reset();
         return array_ref_out;
     }
 
-    pub fn finishClear(self: *StructBuilder, children: []const ArrayRef) !ArrayRef {
+    pub fn finishClear(self: *StructBuilder, children: []const ArrayRef) FromChildrenError!ArrayRef {
         const array_ref_out = try self.finish(children);
         try self.clear();
         return array_ref_out;
@@ -525,9 +527,9 @@ test "struct builder finishFromChildren builds" {
         .{
             .ctx = &child_builder,
             .finishFn = struct {
-                fn finish(ctx: *anyopaque) !ArrayRef {
+                fn finish(ctx: *anyopaque) ChildBuilderError!ArrayRef {
                     const ptr: *IntBuilder = @ptrCast(@alignCast(ctx));
-                    return ptr.finish();
+                    return ptr.finish() catch ChildBuilderError.FinishFailed;
                 }
             }.finish,
             .lenFn = struct {
@@ -549,6 +551,131 @@ test "struct builder finishFromChildren builds" {
     try std.testing.expectEqual(@as(usize, 2), struct_array.len());
 }
 
+test "struct builder finishFromChildren maps child finish failures" {
+    const allocator = std.testing.allocator;
+    const value_type = DataType{ .int32 = {} };
+    const fields = &[_]Field{
+        .{ .name = "a", .data_type = &value_type, .nullable = true },
+    };
+
+    const IntBuilder = @import("primitive_array.zig").PrimitiveBuilder(i32, DataType{ .int32 = {} });
+
+    var child_builder = try IntBuilder.init(allocator, 1);
+    defer child_builder.deinit();
+    try child_builder.append(3);
+
+    var builder = StructBuilder.initWithChildren(allocator, fields, &[_]ChildBuilder{
+        .{
+            .ctx = &child_builder,
+            .finishFn = struct {
+                fn finish(_: *anyopaque) ChildBuilderError!ArrayRef {
+                    return ChildBuilderError.FinishFailed;
+                }
+            }.finish,
+            .lenFn = struct {
+                fn len(ctx: *anyopaque) usize {
+                    const ptr: *IntBuilder = @ptrCast(@alignCast(ctx));
+                    return ptr.len;
+                }
+            }.len,
+        },
+    });
+    defer builder.deinit();
+    try builder.appendValid();
+
+    try std.testing.expectError(ChildBuilderError.FinishFailed, builder.finishFromChildren());
+    try std.testing.expectEqual(BuilderState.ready, builder.state);
+    try std.testing.expectEqual(@as(usize, 1), builder.len);
+}
+
+test "struct builder finishFromChildrenReset maps child finish failures" {
+    const allocator = std.testing.allocator;
+    const value_type = DataType{ .int32 = {} };
+    const fields = &[_]Field{
+        .{ .name = "a", .data_type = &value_type, .nullable = true },
+    };
+
+    const IntBuilder = @import("primitive_array.zig").PrimitiveBuilder(i32, DataType{ .int32 = {} });
+
+    var child_builder = try IntBuilder.init(allocator, 1);
+    defer child_builder.deinit();
+    try child_builder.append(3);
+
+    var builder = StructBuilder.initWithChildren(allocator, fields, &[_]ChildBuilder{
+        .{
+            .ctx = &child_builder,
+            .finishFn = struct {
+                fn finish(_: *anyopaque) ChildBuilderError!ArrayRef {
+                    return ChildBuilderError.FinishFailed;
+                }
+            }.finish,
+            .lenFn = struct {
+                fn len(ctx: *anyopaque) usize {
+                    const ptr: *IntBuilder = @ptrCast(@alignCast(ctx));
+                    return ptr.len;
+                }
+            }.len,
+            .resetFn = struct {
+                fn reset(ctx: *anyopaque) ChildBuilderError!void {
+                    const ptr: *IntBuilder = @ptrCast(@alignCast(ctx));
+                    ptr.reset() catch return ChildBuilderError.ResetFailed;
+                }
+            }.reset,
+        },
+    });
+    defer builder.deinit();
+    try builder.appendValid();
+
+    try std.testing.expectError(ChildBuilderError.FinishFailed, builder.finishFromChildrenReset());
+    try std.testing.expectEqual(BuilderState.ready, builder.state);
+    try std.testing.expectEqual(@as(usize, 1), builder.len);
+    try std.testing.expectEqual(@as(usize, 1), child_builder.len);
+}
+
+test "struct builder finishFromChildrenClear maps child finish failures" {
+    const allocator = std.testing.allocator;
+    const value_type = DataType{ .int32 = {} };
+    const fields = &[_]Field{
+        .{ .name = "a", .data_type = &value_type, .nullable = true },
+    };
+
+    const IntBuilder = @import("primitive_array.zig").PrimitiveBuilder(i32, DataType{ .int32 = {} });
+
+    var child_builder = try IntBuilder.init(allocator, 1);
+    defer child_builder.deinit();
+    try child_builder.append(3);
+
+    var builder = StructBuilder.initWithChildren(allocator, fields, &[_]ChildBuilder{
+        .{
+            .ctx = &child_builder,
+            .finishFn = struct {
+                fn finish(_: *anyopaque) ChildBuilderError!ArrayRef {
+                    return ChildBuilderError.FinishFailed;
+                }
+            }.finish,
+            .lenFn = struct {
+                fn len(ctx: *anyopaque) usize {
+                    const ptr: *IntBuilder = @ptrCast(@alignCast(ctx));
+                    return ptr.len;
+                }
+            }.len,
+            .clearFn = struct {
+                fn clear(ctx: *anyopaque) ChildBuilderError!void {
+                    const ptr: *IntBuilder = @ptrCast(@alignCast(ctx));
+                    ptr.clear() catch return ChildBuilderError.ClearFailed;
+                }
+            }.clear,
+        },
+    });
+    defer builder.deinit();
+    try builder.appendValid();
+
+    try std.testing.expectError(ChildBuilderError.FinishFailed, builder.finishFromChildrenClear());
+    try std.testing.expectEqual(BuilderState.ready, builder.state);
+    try std.testing.expectEqual(@as(usize, 1), builder.len);
+    try std.testing.expectEqual(@as(usize, 1), child_builder.len);
+}
+
 test "struct builder finishFromChildrenReset resets child builders" {
     const allocator = std.testing.allocator;
     const value_type = DataType{ .int32 = {} };
@@ -567,9 +694,9 @@ test "struct builder finishFromChildrenReset resets child builders" {
         .{
             .ctx = &child_builder,
             .finishFn = struct {
-                fn finish(ctx: *anyopaque) !ArrayRef {
+                fn finish(ctx: *anyopaque) ChildBuilderError!ArrayRef {
                     const ptr: *IntBuilder = @ptrCast(@alignCast(ctx));
-                    return ptr.finish();
+                    return ptr.finish() catch ChildBuilderError.FinishFailed;
                 }
             }.finish,
             .lenFn = struct {
@@ -620,9 +747,9 @@ test "struct builder reset reuses builders when children configured" {
         .{
             .ctx = &child_builder,
             .finishFn = struct {
-                fn finish(ctx: *anyopaque) !ArrayRef {
+                fn finish(ctx: *anyopaque) ChildBuilderError!ArrayRef {
                     const ptr: *IntBuilder = @ptrCast(@alignCast(ctx));
-                    return ptr.finish();
+                    return ptr.finish() catch ChildBuilderError.FinishFailed;
                 }
             }.finish,
             .lenFn = struct {
@@ -674,9 +801,9 @@ test "struct builder clear frees validity and clears children when configured" {
         .{
             .ctx = &child_builder,
             .finishFn = struct {
-                fn finish(ctx: *anyopaque) !ArrayRef {
+                fn finish(ctx: *anyopaque) ChildBuilderError!ArrayRef {
                     const ptr: *IntBuilder = @ptrCast(@alignCast(ctx));
-                    return ptr.finish();
+                    return ptr.finish() catch ChildBuilderError.FinishFailed;
                 }
             }.finish,
             .lenFn = struct {
@@ -730,9 +857,9 @@ test "struct builder finishFromChildrenClear clears after finish" {
         .{
             .ctx = &child_builder,
             .finishFn = struct {
-                fn finish(ctx: *anyopaque) !ArrayRef {
+                fn finish(ctx: *anyopaque) ChildBuilderError!ArrayRef {
                     const ptr: *IntBuilder = @ptrCast(@alignCast(ctx));
-                    return ptr.finish();
+                    return ptr.finish() catch ChildBuilderError.FinishFailed;
                 }
             }.finish,
             .lenFn = struct {
@@ -845,9 +972,9 @@ test "struct builder reset child failure leaves parent unchanged" {
         .{
             .ctx = &child_builder,
             .finishFn = struct {
-                fn finish(ctx: *anyopaque) !ArrayRef {
+                fn finish(ctx: *anyopaque) ChildBuilderError!ArrayRef {
                     const ptr: *IntBuilder = @ptrCast(@alignCast(ctx));
-                    return ptr.finish();
+                    return ptr.finish() catch ChildBuilderError.FinishFailed;
                 }
             }.finish,
             .lenFn = struct {
@@ -897,9 +1024,9 @@ test "struct builder clear child failure leaves parent unchanged" {
         .{
             .ctx = &child_builder,
             .finishFn = struct {
-                fn finish(ctx: *anyopaque) !ArrayRef {
+                fn finish(ctx: *anyopaque) ChildBuilderError!ArrayRef {
                     const ptr: *IntBuilder = @ptrCast(@alignCast(ctx));
-                    return ptr.finish();
+                    return ptr.finish() catch ChildBuilderError.FinishFailed;
                 }
             }.finish,
             .lenFn = struct {
@@ -951,9 +1078,9 @@ test "struct builder finishFromChildrenReset does not partially recycle on child
         .{
             .ctx = &child_builder,
             .finishFn = struct {
-                fn finish(ctx: *anyopaque) !ArrayRef {
+                fn finish(ctx: *anyopaque) ChildBuilderError!ArrayRef {
                     const ptr: *IntBuilder = @ptrCast(@alignCast(ctx));
-                    return ptr.finish();
+                    return ptr.finish() catch ChildBuilderError.FinishFailed;
                 }
             }.finish,
             .lenFn = struct {
@@ -1000,9 +1127,9 @@ test "struct builder finishFromChildrenClear does not partially recycle on child
         .{
             .ctx = &child_builder,
             .finishFn = struct {
-                fn finish(ctx: *anyopaque) !ArrayRef {
+                fn finish(ctx: *anyopaque) ChildBuilderError!ArrayRef {
                     const ptr: *IntBuilder = @ptrCast(@alignCast(ctx));
-                    return ptr.finish();
+                    return ptr.finish() catch ChildBuilderError.FinishFailed;
                 }
             }.finish,
             .lenFn = struct {

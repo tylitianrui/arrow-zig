@@ -175,6 +175,7 @@ pub const RunEndEncodedArray = struct {
         std.debug.assert(i < self.data.length);
         std.debug.assert(self.data.children.len == 1);
         const run_idx = self.runIndexFor(self.data.offset + i);
+        if (run_idx >= self.runCount()) return error.InvalidRunEnds;
         return self.data.children[0].slice(run_idx, 1);
     }
 
@@ -197,7 +198,13 @@ pub const MapBuilder = struct {
     values_len: usize = 0,
     state: BuilderState = .ready,
 
-    const BuilderError = error{ AlreadyFinished, NotFinished, OffsetOverflow, InvalidChildLength, InvalidEntriesType };
+    const BuilderError = error{ AlreadyFinished, NotFinished, OffsetOverflow, InvalidChildLength, InvalidEntriesType, InvalidEntriesSchema };
+
+    fn fieldMatches(expected: Field, actual: Field) bool {
+        return std.mem.eql(u8, expected.name, actual.name) and
+            expected.nullable == actual.nullable and
+            std.meta.eql(expected.data_type.*, actual.data_type.*);
+    }
 
     pub fn init(allocator: std.mem.Allocator, capacity: usize, key_field: Field, item_field: Field, keys_sorted: bool) !MapBuilder {
         const offsets = try OwnedBuffer.init(allocator, (capacity + 1) * @sizeOf(i32));
@@ -266,6 +273,9 @@ pub const MapBuilder = struct {
 
         const st = entries.data().data_type;
         if (st != .struct_) return BuilderError.InvalidEntriesType;
+        if (st.struct_.fields.len != 2) return BuilderError.InvalidEntriesSchema;
+        if (!fieldMatches(self.key_field, st.struct_.fields[0])) return BuilderError.InvalidEntriesSchema;
+        if (!fieldMatches(self.item_field, st.struct_.fields[1])) return BuilderError.InvalidEntriesSchema;
         const map_type = DataType{ .map = .{ .key_field = self.key_field, .item_field = self.item_field, .keys_sorted = self.keys_sorted } };
 
         const validity_buf = if (self.validity) |*buf| try buf.toShared(bitmap.byteLength(self.len)) else SharedBuffer.empty;
@@ -299,7 +309,7 @@ pub const SparseUnionBuilder = struct {
     len: usize = 0,
     state: BuilderState = .ready,
 
-    const BuilderError = error{ AlreadyFinished, NotFinished, InvalidTypeId, InvalidChildCount, InvalidChildLength };
+    const BuilderError = error{ AlreadyFinished, NotFinished, InvalidTypeId, InvalidChildCount, InvalidChildLength, InvalidChildType };
 
     pub fn init(allocator: std.mem.Allocator, union_type: datatype.UnionType, capacity: usize) !SparseUnionBuilder {
         return .{ .allocator = allocator, .union_type = union_type, .type_ids = try OwnedBuffer.init(allocator, capacity) };
@@ -331,8 +341,9 @@ pub const SparseUnionBuilder = struct {
     pub fn finish(self: *SparseUnionBuilder, children: []const ArrayRef) !ArrayRef {
         if (self.state == .finished) return BuilderError.AlreadyFinished;
         if (children.len != self.union_type.fields.len) return BuilderError.InvalidChildCount;
-        for (children) |child| {
+        for (children, 0..) |child, i| {
             if (child.data().length != self.len) return BuilderError.InvalidChildLength;
+            if (!std.meta.eql(child.data().data_type, self.union_type.fields[i].data_type.*)) return BuilderError.InvalidChildType;
         }
 
         self.buffers[0] = try self.type_ids.toShared(self.len);
@@ -363,7 +374,7 @@ pub const DenseUnionBuilder = struct {
     len: usize = 0,
     state: BuilderState = .ready,
 
-    const BuilderError = error{ AlreadyFinished, NotFinished, InvalidTypeId, InvalidChildCount, InvalidChildOffset };
+    const BuilderError = error{ AlreadyFinished, NotFinished, InvalidTypeId, InvalidChildCount, InvalidChildOffset, InvalidChildType };
 
     pub fn init(allocator: std.mem.Allocator, union_type: datatype.UnionType, capacity: usize) !DenseUnionBuilder {
         return .{
@@ -404,6 +415,9 @@ pub const DenseUnionBuilder = struct {
     pub fn finish(self: *DenseUnionBuilder, children: []const ArrayRef) !ArrayRef {
         if (self.state == .finished) return BuilderError.AlreadyFinished;
         if (children.len != self.union_type.fields.len) return BuilderError.InvalidChildCount;
+        for (children, 0..) |child, i| {
+            if (!std.meta.eql(child.data().data_type, self.union_type.fields[i].data_type.*)) return BuilderError.InvalidChildType;
+        }
 
         const offs = std.mem.bytesAsSlice(i32, self.offsets.data)[0..self.len];
         const type_ids = std.mem.bytesAsSlice(i8, self.type_ids.data)[0..self.len];
@@ -610,6 +624,40 @@ test "map builder and map array basic path" {
     try std.testing.expectEqual(@as(usize, 2), first.data().length);
 }
 
+test "map builder rejects entries schema mismatch" {
+    const allocator = std.testing.allocator;
+
+    const int_type = DataType{ .int32 = {} };
+    const bool_type = DataType{ .bool = {} };
+    const key_field = Field{ .name = "key", .data_type = &int_type, .nullable = false };
+    const item_field = Field{ .name = "item", .data_type = &int_type, .nullable = true };
+
+    var key_builder = try @import("primitive_array.zig").PrimitiveBuilder(i32, DataType{ .int32 = {} }).init(allocator, 1);
+    defer key_builder.deinit();
+    try key_builder.append(1);
+    var key_ref = try key_builder.finish();
+    defer key_ref.release();
+
+    var wrong_item_builder = try @import("boolean_array.zig").BooleanBuilder.init(allocator, 1);
+    defer wrong_item_builder.deinit();
+    try wrong_item_builder.append(true);
+    var wrong_item_ref = try wrong_item_builder.finish();
+    defer wrong_item_ref.release();
+
+    const wrong_item_field = Field{ .name = "item", .data_type = &bool_type, .nullable = true };
+    var entries_builder = @import("struct_array.zig").StructBuilder.init(allocator, &[_]Field{ key_field, wrong_item_field });
+    defer entries_builder.deinit();
+    try entries_builder.appendValid();
+    var entries_ref = try entries_builder.finish(&[_]ArrayRef{ key_ref, wrong_item_ref });
+    defer entries_ref.release();
+
+    var map_builder = try MapBuilder.init(allocator, 1, key_field, item_field, false);
+    defer map_builder.deinit();
+    try map_builder.appendLen(1);
+
+    try std.testing.expectError(error.InvalidEntriesSchema, map_builder.finish(entries_ref));
+}
+
 test "sparse union builder validates child count/length" {
     const allocator = std.testing.allocator;
 
@@ -631,6 +679,26 @@ test "sparse union builder validates child count/length" {
     try std.testing.expectError(error.InvalidChildLength, builder.finish(&[_]ArrayRef{child_ref}));
 }
 
+test "sparse union builder rejects child type mismatch" {
+    const allocator = std.testing.allocator;
+
+    const int_type = DataType{ .int32 = {} };
+    const fields = [_]Field{.{ .name = "a", .data_type = &int_type, .nullable = true }};
+    const union_type = datatype.UnionType{ .type_ids = &[_]i8{0}, .fields = fields[0..], .mode = .sparse };
+
+    var builder = try SparseUnionBuilder.init(allocator, union_type, 1);
+    defer builder.deinit();
+    try builder.appendTypeId(0);
+
+    var bool_builder = try @import("boolean_array.zig").BooleanBuilder.init(allocator, 1);
+    defer bool_builder.deinit();
+    try bool_builder.append(true);
+    var bool_ref = try bool_builder.finish();
+    defer bool_ref.release();
+
+    try std.testing.expectError(error.InvalidChildType, builder.finish(&[_]ArrayRef{bool_ref}));
+}
+
 test "dense union builder validates child offsets" {
     const allocator = std.testing.allocator;
 
@@ -649,6 +717,26 @@ test "dense union builder validates child offsets" {
     defer child_ref.release();
 
     try std.testing.expectError(error.InvalidChildOffset, builder.finish(&[_]ArrayRef{child_ref}));
+}
+
+test "dense union builder rejects child type mismatch" {
+    const allocator = std.testing.allocator;
+
+    const int_type = DataType{ .int32 = {} };
+    const fields = [_]Field{.{ .name = "a", .data_type = &int_type, .nullable = true }};
+    const union_type = datatype.UnionType{ .type_ids = &[_]i8{0}, .fields = fields[0..], .mode = .dense };
+
+    var builder = try DenseUnionBuilder.init(allocator, union_type, 1);
+    defer builder.deinit();
+    try builder.append(0, 0);
+
+    var bool_builder = try @import("boolean_array.zig").BooleanBuilder.init(allocator, 1);
+    defer bool_builder.deinit();
+    try bool_builder.append(true);
+    var bool_ref = try bool_builder.finish();
+    defer bool_ref.release();
+
+    try std.testing.expectError(error.InvalidChildType, builder.finish(&[_]ArrayRef{bool_ref}));
 }
 
 test "run end encoded builder and array basic path" {

@@ -3,6 +3,7 @@
 Goal: Build a production-usable Zig implementation of Apache Arrow core memory model, then incrementally add IPC/interop/compute.
 
 ## Done (Code-Verified)
+
 - [x] D1. Primitive numeric arrays/builders implemented.
 - [x] D2. Boolean array/builder implemented.
 - [x] D3. String/Binary arrays/builders implemented.
@@ -18,6 +19,7 @@ Goal: Build a production-usable Zig implementation of Apache Arrow core memory m
 ## Phase A - Core Type Coverage Completion
 
 ### A1. LargeString / LargeBinary
+
 - [x] A1.1 Add LargeStringArray view type.
 - [x] A1.2 Add LargeBinaryArray view type.
 - [x] A1.3 Add LargeStringBuilder (i64 offsets).
@@ -28,6 +30,7 @@ Goal: Build a production-usable Zig implementation of Apache Arrow core memory m
 - [x] A1.8 Add unit tests: append/appendNull/finish/slice.
 
 ### A2. FixedSizeBinary / FixedSizeList
+
 - [x] A2.1 Add FixedSizeBinaryArray view type.
 - [x] A2.2 Add FixedSizeBinaryBuilder with width checks.
 - [x] A2.3 Add FixedSizeListArray view type.
@@ -37,6 +40,7 @@ Goal: Build a production-usable Zig implementation of Apache Arrow core memory m
 - [x] A2.7 Export from src/array/array.zig and src/root.zig.
 
 ### A3. Dictionary
+
 - [x] A3.1 Add DictionaryArray view (indices + dictionary values).
 - [x] A3.2 Add DictionaryBuilder for index types (int8/int16/int32/int64 at minimum).
 - [x] A3.3 Enforce dictionary presence/type invariants at finish time.
@@ -44,6 +48,7 @@ Goal: Build a production-usable Zig implementation of Apache Arrow core memory m
 - [x] A3.5 Add tests for slicing dictionary arrays.
 
 ### A4. Map / Union / RunEndEncoded
+
 - [x] A4.1 Add MapArray view (offsets + struct child).
 - [x] A4.2 Add SparseUnionArray and DenseUnionArray views.
 - [x] A4.3 Add RunEndEncodedArray view.
@@ -51,6 +56,7 @@ Goal: Build a production-usable Zig implementation of Apache Arrow core memory m
 - [x] A4.5 Add validation-focused tests for child counts and offsets.
 
 ### A5. Validation & Regression Suite Completion
+
 - [ ] A5.1 Add nullability invariant tests across all newly added builders.
 - [ ] A5.2 Add length/type mismatch tests for RecordBatch with new types.
 - [ ] A5.3 Add stress tests for retain/release balance in nested arrays.
@@ -60,23 +66,27 @@ Goal: Build a production-usable Zig implementation of Apache Arrow core memory m
 ## Phase B - IPC MVP (Schema + RecordBatch)
 
 ### B1. Metadata Serialization
+
 - [ ] B1.1 Implement Field metadata serialization.
 - [ ] B1.2 Implement Schema metadata serialization.
 - [ ] B1.3 Add deterministic ordering tests for metadata output.
 
 ### B2. IPC Writer (MVP Subset)
+
 - [ ] B2.1 Implement stream header/footer writer.
 - [ ] B2.2 Write RecordBatch for primitive/boolean/string/binary/list/struct.
 - [ ] B2.3 Add alignment/padding logic for body buffers.
 - [ ] B2.4 Add writer golden tests for small fixtures.
 
 ### B3. IPC Reader (MVP Subset)
+
 - [ ] B3.1 Implement stream message parser.
 - [ ] B3.2 Reconstruct Schema + RecordBatch from stream.
 - [ ] B3.3 Implement zero-copy path for compatible payloads.
 - [ ] B3.4 Add reader roundtrip tests vs writer output.
 
 ### B4. IPC Robustness
+
 - [ ] B4.1 Add malformed header/message length tests.
 - [ ] B4.2 Add invalid offset/length payload tests.
 - [ ] B4.3 Add deterministic error mapping for parse failures.
@@ -84,6 +94,7 @@ Goal: Build a production-usable Zig implementation of Apache Arrow core memory m
 ## Phase C - Interop and Hardening
 
 ### C1. Arrow C Data Interface (FFI)
+
 - [ ] C1.1 Export Schema to C Data Interface.
 - [ ] C1.2 Export Array to C Data Interface.
 - [ ] C1.3 Import Schema from C Data Interface.
@@ -91,26 +102,31 @@ Goal: Build a production-usable Zig implementation of Apache Arrow core memory m
 - [ ] C1.5 Add smoke roundtrip tests.
 
 ### C2. Fuzzing
+
 - [ ] C2.1 Add fuzz target for ArrayData.validateLayout.
 - [ ] C2.2 Add fuzz target for IPC reader message parsing.
 - [ ] C2.3 Seed corpus with malformed and edge payloads.
 
 ### C3. Benchmark Reliability
+
 - [ ] C3.1 Add git_sha field to CSV benchmark output.
 - [ ] C3.2 Add timestamp field to CSV benchmark output.
 - [ ] C3.3 Add benchmark-ci parser sanity check script/test.
 
 ### C4. Project Governance
+
 - [ ] C4.1 Add CONTRIBUTING.md.
 - [ ] C4.2 Add API stability policy (experimental vs stable sections).
 - [ ] C4.3 Define release checklist and semver rules.
 
 ## Immediate Next Sprint (Recommended)
+
 - [x] S1. Complete A1.1-A1.8 (LargeString/LargeBinary full path).
 - [x] S2. Complete A2.1-A2.7 (FixedSizeBinary/FixedSizeList full path).
 - [ ] S3. Start B1.1-B1.3 (Schema/Field metadata serialization scaffold).
 
 ## Definition of Done (Per Task)
+
 - [ ] T1. Code merged with unit tests.
 - [ ] T2. Public exports updated in src/root.zig.
 - [ ] T3. zig build test passes.
