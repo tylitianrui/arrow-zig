@@ -7,6 +7,8 @@ const builder_state = @import("builder_state.zig");
 const datatype = @import("../datatype.zig");
 const array_data = @import("array_data.zig");
 
+// Generic fixed-width primitive array views/builders.
+
 pub const SharedBuffer = buffer.SharedBuffer;
 pub const OwnedBuffer = buffer.OwnedBuffer;
 pub const DataType = datatype.DataType;
@@ -21,14 +23,17 @@ pub fn PrimitiveArray(comptime T: type) type {
 
         const Self = @This();
 
+        /// Return the logical length.
         pub fn len(self: Self) usize {
             return self.data.length;
         }
 
+        /// Check whether the element at index is null.
         pub fn isNull(self: Self, i: usize) bool {
             return self.data.isNull(i);
         }
 
+        /// Execute values logic for this type.
         pub fn values(self: Self) []const T {
             // Primitive arrays require [validity] and [values] buffers.
             std.debug.assert(self.data.buffers.len >= 2);
@@ -36,6 +41,7 @@ pub fn PrimitiveArray(comptime T: type) type {
             return raw[self.data.offset .. self.data.offset + self.data.length];
         }
 
+        /// Return the logical value view at the requested index.
         pub fn value(self: Self, i: usize) T {
             std.debug.assert(i < self.data.length);
             return self.values()[i];
@@ -64,6 +70,7 @@ pub fn PrimitiveBuilder(comptime T: type, comptime dtype: DataType) type {
 
         const TYPE: DataType = dtype;
 
+        /// Initialize and return a new instance.
         pub fn init(allocator: std.mem.Allocator, capacity: usize) !Self {
             return .{
                 .allocator = allocator,
@@ -71,11 +78,13 @@ pub fn PrimitiveBuilder(comptime T: type, comptime dtype: DataType) type {
             };
         }
 
+        /// Release resources owned by this instance.
         pub fn deinit(self: *Self) void {
             self.values.deinit();
             if (self.validity) |*valid| valid.deinit();
         }
 
+        /// Reset state while retaining reusable capacity when possible.
         pub fn reset(self: *Self) BuilderError!void {
             if (self.state != .finished) return BuilderError.NotFinished;
             self.len = 0;
@@ -83,6 +92,7 @@ pub fn PrimitiveBuilder(comptime T: type, comptime dtype: DataType) type {
             self.state = .ready;
         }
 
+        /// Clear state and release reusable buffers when required.
         pub fn clear(self: *Self) BuilderError!void {
             if (self.state != .finished) return BuilderError.NotFinished;
             self.values.deinit();
@@ -93,12 +103,14 @@ pub fn PrimitiveBuilder(comptime T: type, comptime dtype: DataType) type {
             self.state = .ready;
         }
 
+        /// Execute ensureValuesCapacity logic for this type.
         fn ensureValuesCapacity(self: *Self, new_len: usize) !void {
             const capacity = self.values.len() / @sizeOf(T);
             if (new_len <= capacity) return;
             try self.values.resize(new_len * @sizeOf(T));
         }
 
+        /// Execute ensureValidityForNull logic for this type.
         fn ensureValidityForNull(self: *Self, new_len: usize) !void {
             if (self.validity == null) {
                 var buf = try initValidityAllValid(self.allocator, new_len);
@@ -113,6 +125,7 @@ pub fn PrimitiveBuilder(comptime T: type, comptime dtype: DataType) type {
             self.null_count += 1;
         }
 
+        /// Execute setValidBit logic for this type.
         fn setValidBit(self: *Self, index: usize) !void {
             if (self.validity == null) return;
             var buf = &self.validity.?;
@@ -120,6 +133,7 @@ pub fn PrimitiveBuilder(comptime T: type, comptime dtype: DataType) type {
             bitmap.setBit(buf.data[0..bitmap.byteLength(index + 1)], index);
         }
 
+        /// Append one logical value into the builder.
         pub fn append(self: *Self, value: T) !void {
             if (self.state == .finished) return BuilderError.AlreadyFinished;
             const next_len = self.len + 1;
@@ -130,6 +144,7 @@ pub fn PrimitiveBuilder(comptime T: type, comptime dtype: DataType) type {
             self.len = next_len;
         }
 
+        /// Append a null entry into the builder.
         pub fn appendNull(self: *Self) !void {
             if (self.state == .finished) return BuilderError.AlreadyFinished;
             const next_len = self.len + 1;
@@ -138,6 +153,7 @@ pub fn PrimitiveBuilder(comptime T: type, comptime dtype: DataType) type {
             self.len = next_len;
         }
 
+        /// Finalize builder state and return an immutable array reference.
         pub fn finish(self: *Self) !ArrayRef {
             if (self.state == .finished) return BuilderError.AlreadyFinished;
             const validity_buf = if (self.validity) |*buf| try buf.toShared(bitmap.byteLength(self.len)) else SharedBuffer.empty;
@@ -159,6 +175,7 @@ pub fn PrimitiveBuilder(comptime T: type, comptime dtype: DataType) type {
             return ArrayRef.fromOwnedUnsafe(self.allocator, data);
         }
 
+        /// Finalize output and then reset builder state for reuse.
         pub fn finishReset(self: *Self) !ArrayRef {
             const finished_ref = try self.finish();
             try self.reset();

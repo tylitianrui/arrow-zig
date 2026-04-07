@@ -7,6 +7,8 @@ const builder_state = @import("builder_state.zig");
 const datatype = @import("../datatype.zig");
 const array_data = @import("array_data.zig");
 
+// Map/Union/RunEndEncoded array views and minimal builders.
+
 pub const SharedBuffer = buffer.SharedBuffer;
 pub const OwnedBuffer = buffer.OwnedBuffer;
 pub const ArrayData = array_data.ArrayData;
@@ -22,19 +24,23 @@ const ensureBitmapCapacity = array_utils.ensureBitmapCapacity;
 pub const MapArray = struct {
     data: *const ArrayData,
 
+    /// Return the logical length.
     pub fn len(self: MapArray) usize {
         return self.data.length;
     }
 
+    /// Check whether the element at index is null.
     pub fn isNull(self: MapArray, i: usize) bool {
         return self.data.isNull(i);
     }
 
+    /// Execute entriesRef logic for this type.
     pub fn entriesRef(self: MapArray) *const ArrayRef {
         std.debug.assert(self.data.children.len == 1);
         return &self.data.children[0];
     }
 
+    /// Return the logical value view at the requested index.
     pub fn value(self: MapArray, i: usize) !ArrayRef {
         std.debug.assert(i < self.data.length);
         std.debug.assert(self.data.buffers.len >= 2);
@@ -51,21 +57,25 @@ pub const MapArray = struct {
 pub const SparseUnionArray = struct {
     data: *const ArrayData,
 
+    /// Return the logical length.
     pub fn len(self: SparseUnionArray) usize {
         return self.data.length;
     }
 
+    /// Execute typeId logic for this type.
     pub fn typeId(self: SparseUnionArray, i: usize) i8 {
         std.debug.assert(i < self.data.length);
         std.debug.assert(self.data.buffers.len >= 1);
         return self.data.buffers[0].typedSlice(i8)[self.data.offset + i];
     }
 
+    /// Execute childRef logic for this type.
     pub fn childRef(self: SparseUnionArray, child_index: usize) *const ArrayRef {
         std.debug.assert(child_index < self.data.children.len);
         return &self.data.children[child_index];
     }
 
+    /// Return the logical value view at the requested index.
     pub fn value(self: SparseUnionArray, i: usize) !ArrayRef {
         std.debug.assert(i < self.data.length);
         const type_id = self.typeId(i);
@@ -86,22 +96,26 @@ pub const SparseUnionArray = struct {
 pub const DenseUnionArray = struct {
     data: *const ArrayData,
 
+    /// Return the logical length.
     pub fn len(self: DenseUnionArray) usize {
         return self.data.length;
     }
 
+    /// Execute typeId logic for this type.
     pub fn typeId(self: DenseUnionArray, i: usize) i8 {
         std.debug.assert(i < self.data.length);
         std.debug.assert(self.data.buffers.len >= 1);
         return self.data.buffers[0].typedSlice(i8)[self.data.offset + i];
     }
 
+    /// Execute childOffset logic for this type.
     pub fn childOffset(self: DenseUnionArray, i: usize) i32 {
         std.debug.assert(i < self.data.length);
         std.debug.assert(self.data.buffers.len >= 2);
         return self.data.buffers[1].typedSlice(i32)[self.data.offset + i];
     }
 
+    /// Return the logical value view at the requested index.
     pub fn value(self: DenseUnionArray, i: usize) !ArrayRef {
         std.debug.assert(i < self.data.length);
         const type_id = self.typeId(i);
@@ -123,15 +137,18 @@ pub const DenseUnionArray = struct {
 pub const RunEndEncodedArray = struct {
     data: *const ArrayData,
 
+    /// Return the logical length.
     pub fn len(self: RunEndEncodedArray) usize {
         return self.data.length;
     }
 
+    /// Execute runCount logic for this type.
     fn runCount(self: RunEndEncodedArray) usize {
         const byte_width = self.data.data_type.run_end_encoded.run_end_type.bit_width / 8;
         return self.data.buffers[0].len() / byte_width;
     }
 
+    /// Execute runEndAt logic for this type.
     fn runEndAt(self: RunEndEncodedArray, run_index: usize) i64 {
         const run_ty = self.data.data_type.run_end_encoded.run_end_type;
         return switch (run_ty.bit_width) {
@@ -155,6 +172,7 @@ pub const RunEndEncodedArray = struct {
         };
     }
 
+    /// Execute runIndexFor logic for this type.
     fn runIndexFor(self: RunEndEncodedArray, logical_index: usize) usize {
         var lo: usize = 0;
         var hi: usize = self.runCount();
@@ -171,6 +189,7 @@ pub const RunEndEncodedArray = struct {
         return lo;
     }
 
+    /// Return the logical value view at the requested index.
     pub fn value(self: RunEndEncodedArray, i: usize) !ArrayRef {
         std.debug.assert(i < self.data.length);
         std.debug.assert(self.data.children.len == 1);
@@ -179,6 +198,7 @@ pub const RunEndEncodedArray = struct {
         return self.data.children[0].slice(run_idx, 1);
     }
 
+    /// Execute valuesRef logic for this type.
     pub fn valuesRef(self: RunEndEncodedArray) *const ArrayRef {
         std.debug.assert(self.data.children.len == 1);
         return &self.data.children[0];
@@ -200,23 +220,27 @@ pub const MapBuilder = struct {
 
     const BuilderError = error{ AlreadyFinished, NotFinished, OffsetOverflow, InvalidChildLength, InvalidEntriesType, InvalidEntriesSchema };
 
+    /// Execute fieldMatches logic for this type.
     fn fieldMatches(expected: Field, actual: Field) bool {
         return std.mem.eql(u8, expected.name, actual.name) and
             expected.nullable == actual.nullable and
             std.meta.eql(expected.data_type.*, actual.data_type.*);
     }
 
+    /// Initialize and return a new instance.
     pub fn init(allocator: std.mem.Allocator, capacity: usize, key_field: Field, item_field: Field, keys_sorted: bool) !MapBuilder {
         const offsets = try OwnedBuffer.init(allocator, (capacity + 1) * @sizeOf(i32));
         std.mem.bytesAsSlice(i32, offsets.data)[0] = 0;
         return .{ .allocator = allocator, .key_field = key_field, .item_field = item_field, .keys_sorted = keys_sorted, .offsets = offsets };
     }
 
+    /// Release resources owned by this instance.
     pub fn deinit(self: *MapBuilder) void {
         self.offsets.deinit();
         if (self.validity) |*valid| valid.deinit();
     }
 
+    /// Execute ensureOffsetsCapacity logic for this type.
     fn ensureOffsetsCapacity(self: *MapBuilder, needed_len: usize) !void {
         const capacity = self.offsets.len() / @sizeOf(i32);
         if (needed_len <= capacity) return;
@@ -225,6 +249,7 @@ pub const MapBuilder = struct {
         if (was_empty) std.mem.bytesAsSlice(i32, self.offsets.data)[0] = 0;
     }
 
+    /// Execute ensureValidityForNull logic for this type.
     fn ensureValidityForNull(self: *MapBuilder, new_len: usize) !void {
         if (self.validity == null) {
             var buf = try initValidityAllValid(self.allocator, new_len);
@@ -239,6 +264,7 @@ pub const MapBuilder = struct {
         self.null_count += 1;
     }
 
+    /// Execute setValidBit logic for this type.
     fn setValidBit(self: *MapBuilder, index: usize) !void {
         if (self.validity == null) return;
         var buf = &self.validity.?;
@@ -246,6 +272,7 @@ pub const MapBuilder = struct {
         bitmap.setBit(buf.data[0..bitmap.byteLength(index + 1)], index);
     }
 
+    /// Execute appendLen logic for this type.
     pub fn appendLen(self: *MapBuilder, value_len: usize) !void {
         if (self.state == .finished) return BuilderError.AlreadyFinished;
         const next_len = self.len + 1;
@@ -258,6 +285,7 @@ pub const MapBuilder = struct {
         self.values_len = next_offset;
     }
 
+    /// Append a null entry into the builder.
     pub fn appendNull(self: *MapBuilder) !void {
         if (self.state == .finished) return BuilderError.AlreadyFinished;
         const next_len = self.len + 1;
@@ -267,6 +295,7 @@ pub const MapBuilder = struct {
         self.len = next_len;
     }
 
+    /// Finalize builder state and return an immutable array reference.
     pub fn finish(self: *MapBuilder, entries: ArrayRef) !ArrayRef {
         if (self.state == .finished) return BuilderError.AlreadyFinished;
         if (entries.data().length != self.values_len) return BuilderError.InvalidChildLength;
@@ -311,19 +340,23 @@ pub const SparseUnionBuilder = struct {
 
     const BuilderError = error{ AlreadyFinished, NotFinished, InvalidTypeId, InvalidChildCount, InvalidChildLength, InvalidChildType };
 
+    /// Initialize and return a new instance.
     pub fn init(allocator: std.mem.Allocator, union_type: datatype.UnionType, capacity: usize) !SparseUnionBuilder {
         return .{ .allocator = allocator, .union_type = union_type, .type_ids = try OwnedBuffer.init(allocator, capacity) };
     }
 
+    /// Release resources owned by this instance.
     pub fn deinit(self: *SparseUnionBuilder) void {
         self.type_ids.deinit();
     }
 
+    /// Execute ensureCapacity logic for this type.
     fn ensureCapacity(self: *SparseUnionBuilder, needed_len: usize) !void {
         if (needed_len <= self.type_ids.len()) return;
         try self.type_ids.resize(needed_len);
     }
 
+    /// Execute appendTypeId logic for this type.
     pub fn appendTypeId(self: *SparseUnionBuilder, type_id: i8) !void {
         if (self.state == .finished) return BuilderError.AlreadyFinished;
         var known = false;
@@ -338,6 +371,7 @@ pub const SparseUnionBuilder = struct {
         self.len = next_len;
     }
 
+    /// Finalize builder state and return an immutable array reference.
     pub fn finish(self: *SparseUnionBuilder, children: []const ArrayRef) !ArrayRef {
         if (self.state == .finished) return BuilderError.AlreadyFinished;
         if (children.len != self.union_type.fields.len) return BuilderError.InvalidChildCount;
@@ -376,6 +410,7 @@ pub const DenseUnionBuilder = struct {
 
     const BuilderError = error{ AlreadyFinished, NotFinished, InvalidTypeId, InvalidChildCount, InvalidChildOffset, InvalidChildType };
 
+    /// Initialize and return a new instance.
     pub fn init(allocator: std.mem.Allocator, union_type: datatype.UnionType, capacity: usize) !DenseUnionBuilder {
         return .{
             .allocator = allocator,
@@ -385,16 +420,19 @@ pub const DenseUnionBuilder = struct {
         };
     }
 
+    /// Release resources owned by this instance.
     pub fn deinit(self: *DenseUnionBuilder) void {
         self.type_ids.deinit();
         self.offsets.deinit();
     }
 
+    /// Execute ensureCapacity logic for this type.
     fn ensureCapacity(self: *DenseUnionBuilder, needed_len: usize) !void {
         if (needed_len > self.type_ids.len()) try self.type_ids.resize(needed_len);
         if (needed_len * @sizeOf(i32) > self.offsets.len()) try self.offsets.resize(needed_len * @sizeOf(i32));
     }
 
+    /// Append one logical value into the builder.
     pub fn append(self: *DenseUnionBuilder, type_id: i8, child_offset: i32) !void {
         if (self.state == .finished) return BuilderError.AlreadyFinished;
         if (child_offset < 0) return BuilderError.InvalidChildOffset;
@@ -412,6 +450,7 @@ pub const DenseUnionBuilder = struct {
         self.len = next_len;
     }
 
+    /// Finalize builder state and return an immutable array reference.
     pub fn finish(self: *DenseUnionBuilder, children: []const ArrayRef) !ArrayRef {
         if (self.state == .finished) return BuilderError.AlreadyFinished;
         if (children.len != self.union_type.fields.len) return BuilderError.InvalidChildCount;
@@ -460,6 +499,7 @@ pub const RunEndEncodedBuilder = struct {
 
     const BuilderError = error{ AlreadyFinished, NotFinished, InvalidRunEndType, InvalidRunEnd, InvalidChildLength, Overflow };
 
+    /// Initialize and return a new instance.
     pub fn init(allocator: std.mem.Allocator, run_end_type: IntType, value_type: *const DataType, capacity: usize) !RunEndEncodedBuilder {
         if (run_end_type.bit_width != 8 and run_end_type.bit_width != 16 and run_end_type.bit_width != 32 and run_end_type.bit_width != 64) {
             return BuilderError.InvalidRunEndType;
@@ -472,16 +512,19 @@ pub const RunEndEncodedBuilder = struct {
         };
     }
 
+    /// Release resources owned by this instance.
     pub fn deinit(self: *RunEndEncodedBuilder) void {
         self.run_ends.deinit();
     }
 
+    /// Execute ensureCapacity logic for this type.
     fn ensureCapacity(self: *RunEndEncodedBuilder, needed_runs: usize) !void {
         const bytes = needed_runs * (@as(usize, self.run_end_type.bit_width) / 8);
         if (bytes <= self.run_ends.len()) return;
         try self.run_ends.resize(bytes);
     }
 
+    /// Execute appendRunEnd logic for this type.
     pub fn appendRunEnd(self: *RunEndEncodedBuilder, run_end: i64) !void {
         if (self.state == .finished) return BuilderError.AlreadyFinished;
         if (run_end <= 0) return BuilderError.InvalidRunEnd;
@@ -529,6 +572,7 @@ pub const RunEndEncodedBuilder = struct {
         self.run_count = next_runs;
     }
 
+    /// Execute getRunEnd logic for this type.
     fn getRunEnd(self: *RunEndEncodedBuilder, index: usize) i64 {
         return switch (self.run_end_type.bit_width) {
             8 => if (self.run_end_type.signed)
@@ -551,6 +595,7 @@ pub const RunEndEncodedBuilder = struct {
         };
     }
 
+    /// Finalize builder state and return an immutable array reference.
     pub fn finish(self: *RunEndEncodedBuilder, values: ArrayRef) !ArrayRef {
         if (self.state == .finished) return BuilderError.AlreadyFinished;
         if (!std.meta.eql(values.data().data_type, self.value_type.*)) return BuilderError.InvalidChildLength;

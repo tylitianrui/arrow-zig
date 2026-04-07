@@ -6,6 +6,8 @@ const builder_state = @import("builder_state.zig");
 const datatype = @import("../datatype.zig");
 const array_data = @import("array_data.zig");
 
+// Bit-packed boolean array view and builder.
+
 pub const SharedBuffer = buffer.SharedBuffer;
 pub const OwnedBuffer = buffer.OwnedBuffer;
 pub const ArrayData = array_data.ArrayData;
@@ -20,14 +22,17 @@ pub const BooleanArray = struct {
     data: *const ArrayData,
     const Self = @This();
 
+    /// Return the logical length.
     pub fn len(self: Self) usize {
         return self.data.length;
     }
 
+    /// Check whether the element at index is null.
     pub fn isNull(self: Self, i: usize) bool {
         return self.data.isNull(i);
     }
 
+    /// Return the logical value view at the requested index.
     pub fn value(self: Self, i: usize) bool {
         std.debug.assert(i < self.data.length);
         std.debug.assert(self.data.buffers.len >= 2);
@@ -35,6 +40,7 @@ pub const BooleanArray = struct {
     }
 };
 
+/// Execute initValidityAllValid logic for this type.
 fn initValidityAllValid(allocator: std.mem.Allocator, bit_len: usize) !OwnedBuffer {
     const used_bytes = bitmap.byteLength(bit_len);
     var buf = try OwnedBuffer.init(allocator, used_bytes);
@@ -49,6 +55,7 @@ fn initValidityAllValid(allocator: std.mem.Allocator, bit_len: usize) !OwnedBuff
     return buf;
 }
 
+/// Execute ensureBitmapCapacity logic for this type.
 fn ensureBitmapCapacity(buf: *OwnedBuffer, bit_len: usize) !void {
     const needed = bitmap.byteLength(bit_len);
     if (needed <= buf.len()) return;
@@ -69,6 +76,7 @@ pub const BooleanBuilder = struct {
 
     const BuilderError = error{ AlreadyFinished, NotFinished };
 
+    /// Initialize and return a new instance.
     pub fn init(allocator: std.mem.Allocator, capacity: usize) !Self {
         return .{
             .allocator = allocator,
@@ -76,11 +84,13 @@ pub const BooleanBuilder = struct {
         };
     }
 
+    /// Release resources owned by this instance.
     pub fn deinit(self: *Self) void {
         self.values.deinit();
         if (self.validity) |*valid| valid.deinit();
     }
 
+    /// Reset state while retaining reusable capacity when possible.
     pub fn reset(self: *Self) BuilderError!void {
         if (self.state != .finished) return BuilderError.NotFinished;
         self.len = 0;
@@ -88,6 +98,7 @@ pub const BooleanBuilder = struct {
         self.state = .ready;
     }
 
+    /// Clear state and release reusable buffers when required.
     pub fn clear(self: *Self) BuilderError!void {
         if (self.state != .finished) return BuilderError.NotFinished;
         self.values.deinit();
@@ -98,12 +109,14 @@ pub const BooleanBuilder = struct {
         self.state = .ready;
     }
 
+    /// Execute ensureValuesCapacity logic for this type.
     fn ensureValuesCapacity(self: *Self, new_len: usize) !void {
         const needed = bitmap.byteLength(new_len);
         if (needed <= self.values.len()) return;
         try self.values.resize(needed);
     }
 
+    /// Execute ensureValidityForNull logic for this type.
     fn ensureValidityForNull(self: *Self, new_len: usize) !void {
         if (self.validity == null) {
             var buf = try initValidityAllValid(self.allocator, new_len);
@@ -118,6 +131,7 @@ pub const BooleanBuilder = struct {
         self.null_count += 1;
     }
 
+    /// Execute setValidBit logic for this type.
     fn setValidBit(self: *Self, index: usize) !void {
         if (self.validity == null) return;
         var buf = &self.validity.?;
@@ -125,6 +139,7 @@ pub const BooleanBuilder = struct {
         bitmap.setBit(buf.data[0..bitmap.byteLength(index + 1)], index);
     }
 
+    /// Append one logical value into the builder.
     pub fn append(self: *Self, value: bool) !void {
         if (self.state == .finished) return BuilderError.AlreadyFinished;
         const next_len = self.len + 1;
@@ -138,6 +153,7 @@ pub const BooleanBuilder = struct {
         self.len = next_len;
     }
 
+    /// Append a null entry into the builder.
     pub fn appendNull(self: *Self) !void {
         if (self.state == .finished) return BuilderError.AlreadyFinished;
         const next_len = self.len + 1;
@@ -146,6 +162,7 @@ pub const BooleanBuilder = struct {
         self.len = next_len;
     }
 
+    /// Finalize builder state and return an immutable array reference.
     pub fn finish(self: *Self) !ArrayRef {
         if (self.state == .finished) return BuilderError.AlreadyFinished;
         const validity_buf = if (self.validity) |*buf| try buf.toShared(bitmap.byteLength(self.len)) else SharedBuffer.empty;
@@ -167,6 +184,7 @@ pub const BooleanBuilder = struct {
         return ArrayRef.fromOwnedUnsafe(self.allocator, data);
     }
 
+    /// Finalize output and then reset builder state for reuse.
     pub fn finishReset(self: *Self) !ArrayRef {
         const finished_ref = try self.finish();
         try self.reset();

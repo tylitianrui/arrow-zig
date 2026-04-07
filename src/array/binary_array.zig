@@ -7,6 +7,8 @@ const builder_state = @import("builder_state.zig");
 const datatype = @import("../datatype.zig");
 const array_data = @import("array_data.zig");
 
+// Binary and LargeBinary array views/builders backed by offset buffers.
+
 pub const SharedBuffer = buffer.SharedBuffer;
 pub const OwnedBuffer = buffer.OwnedBuffer;
 pub const ArrayData = array_data.ArrayData;
@@ -20,14 +22,17 @@ const LARGE_BINARY_TYPE = DataType{ .large_binary = {} };
 pub const BinaryArray = struct {
     data: *const ArrayData,
 
+    /// Return the logical length.
     pub fn len(self: BinaryArray) usize {
         return self.data.length;
     }
 
+    /// Check whether the element at index is null.
     pub fn isNull(self: BinaryArray, i: usize) bool {
         return self.data.isNull(i);
     }
 
+    /// Return the logical value view at the requested index.
     pub fn value(self: BinaryArray, i: usize) []const u8 {
         std.debug.assert(i < self.data.length);
         std.debug.assert(self.data.buffers.len >= 3);
@@ -42,14 +47,17 @@ pub const BinaryArray = struct {
 pub const LargeBinaryArray = struct {
     data: *const ArrayData,
 
+    /// Return the logical length.
     pub fn len(self: LargeBinaryArray) usize {
         return self.data.length;
     }
 
+    /// Check whether the element at index is null.
     pub fn isNull(self: LargeBinaryArray, i: usize) bool {
         return self.data.isNull(i);
     }
 
+    /// Return the logical value view at the requested index.
     pub fn value(self: LargeBinaryArray, i: usize) []const u8 {
         std.debug.assert(i < self.data.length);
         std.debug.assert(self.data.buffers.len >= 3);
@@ -76,6 +84,7 @@ pub const BinaryBuilder = struct {
     data_len: usize = 0,
     state: BuilderState = .ready,
 
+    /// Initialize and return a new instance.
     pub fn init(allocator: std.mem.Allocator, capacity: usize, data_capacity: usize) !BinaryBuilder {
         const offsets = try OwnedBuffer.init(allocator, (capacity + 1) * @sizeOf(i32));
         const offsets_slice = std.mem.bytesAsSlice(i32, offsets.data);
@@ -87,12 +96,14 @@ pub const BinaryBuilder = struct {
         };
     }
 
+    /// Release resources owned by this instance.
     pub fn deinit(self: *BinaryBuilder) void {
         self.offsets.deinit();
         self.data.deinit();
         if (self.validity) |*valid| valid.deinit();
     }
 
+    /// Reset state while retaining reusable capacity when possible.
     pub fn reset(self: *BinaryBuilder) BuilderError!void {
         if (self.state != .finished) return BuilderError.NotFinished;
         if (!self.offsets.isEmpty()) {
@@ -105,6 +116,7 @@ pub const BinaryBuilder = struct {
         self.state = .ready;
     }
 
+    /// Clear state and release reusable buffers when required.
     pub fn clear(self: *BinaryBuilder) BuilderError!void {
         if (self.state != .finished) return BuilderError.NotFinished;
         self.offsets.deinit();
@@ -117,6 +129,7 @@ pub const BinaryBuilder = struct {
         self.state = .ready;
     }
 
+    /// Execute ensureOffsetsCapacity logic for this type.
     fn ensureOffsetsCapacity(self: *BinaryBuilder, needed_len: usize) !void {
         const capacity = self.offsets.len() / @sizeOf(i32);
         if (needed_len <= capacity) return;
@@ -128,11 +141,13 @@ pub const BinaryBuilder = struct {
         }
     }
 
+    /// Execute ensureDataCapacity logic for this type.
     fn ensureDataCapacity(self: *BinaryBuilder, needed_len: usize) !void {
         if (needed_len <= self.data.len()) return;
         try self.data.resize(needed_len);
     }
 
+    /// Execute ensureValidityForNull logic for this type.
     fn ensureValidityForNull(self: *BinaryBuilder, new_len: usize) !void {
         if (self.validity == null) {
             var buf = try initValidityAllValid(self.allocator, new_len);
@@ -147,6 +162,7 @@ pub const BinaryBuilder = struct {
         self.null_count += 1;
     }
 
+    /// Execute setValidBit logic for this type.
     fn setValidBit(self: *BinaryBuilder, index: usize) !void {
         if (self.validity == null) return;
         var buf = &self.validity.?;
@@ -156,6 +172,7 @@ pub const BinaryBuilder = struct {
 
     const BuilderError = error{ AlreadyFinished, NotFinished };
 
+    /// Append one logical value into the builder.
     pub fn append(self: *BinaryBuilder, value: []const u8) !void {
         if (self.state == .finished) return BuilderError.AlreadyFinished;
         const next_len = self.len + 1;
@@ -170,6 +187,7 @@ pub const BinaryBuilder = struct {
         self.len = next_len;
     }
 
+    /// Append a null entry into the builder.
     pub fn appendNull(self: *BinaryBuilder) !void {
         if (self.state == .finished) return BuilderError.AlreadyFinished;
         const next_len = self.len + 1;
@@ -180,6 +198,7 @@ pub const BinaryBuilder = struct {
         self.len = next_len;
     }
 
+    /// Finalize builder state and return an immutable array reference.
     pub fn finish(self: *BinaryBuilder) !ArrayRef {
         if (self.state == .finished) return BuilderError.AlreadyFinished;
         const validity_buf = if (self.validity) |*buf| try buf.toShared(bitmap.byteLength(self.len)) else SharedBuffer.empty;
@@ -203,12 +222,14 @@ pub const BinaryBuilder = struct {
         return ArrayRef.fromOwnedUnsafe(self.allocator, data);
     }
 
+    /// Finalize output and then reset builder state for reuse.
     pub fn finishReset(self: *BinaryBuilder) !ArrayRef {
         const finished_ref = try self.finish();
         try self.reset();
         return finished_ref;
     }
 
+    /// Finalize output and then clear builder state and buffers.
     pub fn finishClear(self: *BinaryBuilder) !ArrayRef {
         const finished_ref = try self.finish();
         try self.clear();
@@ -227,6 +248,7 @@ pub const LargeBinaryBuilder = struct {
     data_len: usize = 0,
     state: BuilderState = .ready,
 
+    /// Initialize and return a new instance.
     pub fn init(allocator: std.mem.Allocator, capacity: usize, data_capacity: usize) !LargeBinaryBuilder {
         const offsets = try OwnedBuffer.init(allocator, (capacity + 1) * @sizeOf(i64));
         const offsets_slice = std.mem.bytesAsSlice(i64, offsets.data);
@@ -238,12 +260,14 @@ pub const LargeBinaryBuilder = struct {
         };
     }
 
+    /// Release resources owned by this instance.
     pub fn deinit(self: *LargeBinaryBuilder) void {
         self.offsets.deinit();
         self.data.deinit();
         if (self.validity) |*valid| valid.deinit();
     }
 
+    /// Reset state while retaining reusable capacity when possible.
     pub fn reset(self: *LargeBinaryBuilder) BuilderError!void {
         if (self.state != .finished) return BuilderError.NotFinished;
         if (!self.offsets.isEmpty()) {
@@ -256,6 +280,7 @@ pub const LargeBinaryBuilder = struct {
         self.state = .ready;
     }
 
+    /// Clear state and release reusable buffers when required.
     pub fn clear(self: *LargeBinaryBuilder) BuilderError!void {
         if (self.state != .finished) return BuilderError.NotFinished;
         self.offsets.deinit();
@@ -268,6 +293,7 @@ pub const LargeBinaryBuilder = struct {
         self.state = .ready;
     }
 
+    /// Execute ensureOffsetsCapacity logic for this type.
     fn ensureOffsetsCapacity(self: *LargeBinaryBuilder, needed_len: usize) !void {
         const capacity = self.offsets.len() / @sizeOf(i64);
         if (needed_len <= capacity) return;
@@ -279,11 +305,13 @@ pub const LargeBinaryBuilder = struct {
         }
     }
 
+    /// Execute ensureDataCapacity logic for this type.
     fn ensureDataCapacity(self: *LargeBinaryBuilder, needed_len: usize) !void {
         if (needed_len <= self.data.len()) return;
         try self.data.resize(needed_len);
     }
 
+    /// Execute ensureValidityForNull logic for this type.
     fn ensureValidityForNull(self: *LargeBinaryBuilder, new_len: usize) !void {
         if (self.validity == null) {
             var buf = try initValidityAllValid(self.allocator, new_len);
@@ -298,6 +326,7 @@ pub const LargeBinaryBuilder = struct {
         self.null_count += 1;
     }
 
+    /// Execute setValidBit logic for this type.
     fn setValidBit(self: *LargeBinaryBuilder, index: usize) !void {
         if (self.validity == null) return;
         var buf = &self.validity.?;
@@ -307,6 +336,7 @@ pub const LargeBinaryBuilder = struct {
 
     const BuilderError = error{ AlreadyFinished, NotFinished, OffsetOverflow };
 
+    /// Append one logical value into the builder.
     pub fn append(self: *LargeBinaryBuilder, value: []const u8) !void {
         if (self.state == .finished) return BuilderError.AlreadyFinished;
         const next_len = self.len + 1;
@@ -322,6 +352,7 @@ pub const LargeBinaryBuilder = struct {
         self.len = next_len;
     }
 
+    /// Append a null entry into the builder.
     pub fn appendNull(self: *LargeBinaryBuilder) !void {
         if (self.state == .finished) return BuilderError.AlreadyFinished;
         const next_len = self.len + 1;
@@ -333,6 +364,7 @@ pub const LargeBinaryBuilder = struct {
         self.len = next_len;
     }
 
+    /// Finalize builder state and return an immutable array reference.
     pub fn finish(self: *LargeBinaryBuilder) !ArrayRef {
         if (self.state == .finished) return BuilderError.AlreadyFinished;
         const validity_buf = if (self.validity) |*buf| try buf.toShared(bitmap.byteLength(self.len)) else SharedBuffer.empty;
@@ -356,12 +388,14 @@ pub const LargeBinaryBuilder = struct {
         return ArrayRef.fromOwnedUnsafe(self.allocator, data);
     }
 
+    /// Finalize output and then reset builder state for reuse.
     pub fn finishReset(self: *LargeBinaryBuilder) !ArrayRef {
         const finished_ref = try self.finish();
         try self.reset();
         return finished_ref;
     }
 
+    /// Finalize output and then clear builder state and buffers.
     pub fn finishClear(self: *LargeBinaryBuilder) !ArrayRef {
         const finished_ref = try self.finish();
         try self.clear();

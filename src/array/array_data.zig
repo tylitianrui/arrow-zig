@@ -4,6 +4,8 @@ const buffer = @import("../buffer.zig");
 const array_ref = @import("array_ref.zig");
 const datatype = @import("../datatype.zig");
 
+// Raw Arrow layout container with validation rules for buffers and children.
+
 pub const SharedBuffer = buffer.SharedBuffer;
 pub const ValidityBitmap = bitmap.ValidityBitmap;
 pub const DataType = datatype.DataType;
@@ -54,12 +56,14 @@ pub const ArrayData = struct {
 
     const Self = @This();
 
+    /// Execute validity logic for this type.
     pub fn validity(self: Self) ?ValidityBitmap {
         if (self.buffers.len == 0) return null;
         if (self.buffers[0].isEmpty()) return null;
         return ValidityBitmap.fromBuffer(self.buffers[0], self.length + self.offset);
     }
 
+    /// Check whether the element at index is null.
     pub fn isNull(self: Self, i: usize) bool {
         std.debug.assert(i < self.length);
         if (self.null_count) |count| {
@@ -69,24 +73,29 @@ pub const ArrayData = struct {
         return !validity_bitmap.isValid(self.offset + i);
     }
 
+    /// Check whether the element at index is valid.
     pub fn isValid(self: Self, i: usize) bool {
         return !self.isNull(i);
     }
 
+    /// Execute hasNulls logic for this type.
     pub fn hasNulls(self: Self) bool {
         if (self.null_count) |count| return count != 0;
         const validity_bitmap = self.validity() orelse return false;
         return validity_bitmap.countNulls() > 0;
     }
 
+    /// Execute setNullCountUnknown logic for this type.
     pub fn setNullCountUnknown(self: *Self) void {
         self.null_count = null;
     }
 
+    /// Execute setNullCountKnown logic for this type.
     pub fn setNullCountKnown(self: *Self, count: usize) void {
         self.null_count = count;
     }
 
+    /// Create a logical slice view over the current value.
     pub fn slice(self: Self, offset: usize, length: usize) Self {
         std.debug.assert(offset <= self.length);
         std.debug.assert(offset + length <= self.length);
@@ -102,6 +111,7 @@ pub const ArrayData = struct {
         };
     }
 
+    /// Execute nullCount logic for this type.
     pub fn nullCount(self: *Self) usize {
         if (self.null_count) |count| return count;
         const validity_bitmap = self.validity() orelse {
@@ -117,6 +127,7 @@ pub const ArrayData = struct {
         return count;
     }
 
+    /// Execute fixedWidthByteSize logic for this type.
     fn fixedWidthByteSize(dt: DataType) ?usize {
         return switch (dt) {
             .bool => 1,
@@ -145,6 +156,7 @@ pub const ArrayData = struct {
         };
     }
 
+    /// Execute offsetByteWidth logic for this type.
     fn offsetByteWidth(dt: DataType) ?usize {
         return switch (dt) {
             .string, .binary, .list, .list_view, .map => 4,
@@ -153,6 +165,7 @@ pub const ArrayData = struct {
         };
     }
 
+    /// Execute validateOffsetsI32 logic for this type.
     fn validateOffsetsI32(offsets: []const i32, total_len: usize, data_len: usize) ValidationError!void {
         if (offsets.len < total_len + 1) return error.BufferTooSmall;
         var prev: i32 = offsets[0];
@@ -180,6 +193,7 @@ pub const ArrayData = struct {
         }
     }
 
+    /// Execute validateOffsetsI64 logic for this type.
     fn validateOffsetsI64(offsets: []const i64, total_len: usize, data_len: usize) ValidationError!void {
         if (offsets.len < total_len + 1) return error.BufferTooSmall;
         var prev: i64 = offsets[0];
@@ -209,6 +223,7 @@ pub const ArrayData = struct {
         if (prev < @as(i64, @intCast(total_len))) return error.InvalidOffsets;
     }
 
+    /// Execute validateRunEndsUnsigned logic for this type.
     fn validateRunEndsUnsigned(comptime T: type, run_ends: []const T, total_len: usize) ValidationError!void {
         if (total_len == 0) {
             if (run_ends.len != 0) return error.InvalidOffsets;
@@ -238,6 +253,7 @@ pub const ArrayData = struct {
         }
     }
 
+    /// Execute validateLayout logic for this type.
     pub fn validateLayout(self: Self) ValidationError!void {
         if (self.null_count) |count| {
             if (count != 0 and (self.buffers.len == 0 or self.buffers[0].isEmpty())) return error.InvalidNullCount;
@@ -367,6 +383,7 @@ pub const ArrayData = struct {
         }
     }
 
+    /// Execute validateFull logic for this type.
     pub fn validateFull(self: Self) ValidationError!void {
         try self.validateLayout();
 

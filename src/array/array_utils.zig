@@ -2,8 +2,11 @@ const std = @import("std");
 const bitmap = @import("../bitmap.zig");
 const buffer = @import("../buffer.zig");
 
+// Shared helper routines used by multiple array builders.
+
 pub const OwnedBuffer = buffer.OwnedBuffer;
 
+/// Execute initValidityAllValid logic for this type.
 pub fn initValidityAllValid(allocator: std.mem.Allocator, bit_len: usize) !OwnedBuffer {
     const used_bytes = bitmap.byteLength(bit_len);
     var buf = try OwnedBuffer.init(allocator, used_bytes);
@@ -18,6 +21,7 @@ pub fn initValidityAllValid(allocator: std.mem.Allocator, bit_len: usize) !Owned
     return buf;
 }
 
+/// Execute ensureBitmapCapacity logic for this type.
 pub fn ensureBitmapCapacity(buf: *OwnedBuffer, bit_len: usize) !void {
     const needed = bitmap.byteLength(bit_len);
     if (needed <= buf.len()) return;

@@ -7,6 +7,7 @@ pub fn byteLength(bit_length: usize) usize {
     return (bit_length + 7) >> 3;
 }
 
+/// Execute bitMask logic for this type.
 fn bitMask(bit_index: usize) u8 {
     return @as(u8, 1) << @as(u3, @intCast(bit_index & 7));
 }
@@ -56,6 +57,7 @@ pub fn countUnsetBit(data: []const u8, bit_len: usize) usize {
     return bit_len - countSetBit(data, bit_len);
 }
 
+/// Execute clearTrailingBits logic for this type.
 fn clearTrailingBits(bytes: []u8, len: usize, valid: bool) void {
     if (len == 0 or bytes.len == 0) return;
 
@@ -112,6 +114,7 @@ pub const MutableValidityBitmap = struct {
         return initFilled(allocator, bit_len, false);
     }
 
+    /// Execute initFilled logic for this type.
     fn initFilled(allocator: std.mem.Allocator, bit_len: usize, valid: bool) !MutableValidityBitmap {
         const used_bytes = byteLength(bit_len);
         var buf = try OwnedBuffer.init(allocator, used_bytes);

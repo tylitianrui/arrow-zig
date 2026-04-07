@@ -1,6 +1,8 @@
 const std = @import("std");
 const datatype = @import("datatype.zig");
 
+// Lightweight schema container used by arrays and record batches.
+
 pub const Endianness = datatype.Endianness;
 pub const Field = datatype.Field;
 pub const KeyValue = datatype.KeyValue;

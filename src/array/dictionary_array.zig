@@ -7,6 +7,8 @@ const builder_state = @import("builder_state.zig");
 const datatype = @import("../datatype.zig");
 const array_data = @import("array_data.zig");
 
+// Dictionary-encoded array view and builder for integer index types.
+
 pub const SharedBuffer = buffer.SharedBuffer;
 pub const OwnedBuffer = buffer.OwnedBuffer;
 pub const ArrayData = array_data.ArrayData;
@@ -21,19 +23,23 @@ const ensureBitmapCapacity = array_utils.ensureBitmapCapacity;
 pub const DictionaryArray = struct {
     data: *const ArrayData,
 
+    /// Return the logical length.
     pub fn len(self: DictionaryArray) usize {
         return self.data.length;
     }
 
+    /// Check whether the element at index is null.
     pub fn isNull(self: DictionaryArray, i: usize) bool {
         return self.data.isNull(i);
     }
 
+    /// Execute dictionaryRef logic for this type.
     pub fn dictionaryRef(self: DictionaryArray) *const ArrayRef {
         std.debug.assert(self.data.dictionary != null);
         return &self.data.dictionary.?;
     }
 
+    /// Execute index logic for this type.
     pub fn index(self: DictionaryArray, i: usize) i64 {
         std.debug.assert(i < self.data.length);
         std.debug.assert(self.data.buffers.len >= 2);
@@ -82,6 +88,7 @@ pub const DictionaryBuilder = struct {
         InvalidDictionaryType,
     };
 
+    /// Initialize and return a new instance.
     pub fn init(allocator: std.mem.Allocator, index_type: IntType, value_type: *const DataType, capacity: usize) !DictionaryBuilder {
         if (index_type.bit_width != 8 and index_type.bit_width != 16 and index_type.bit_width != 32 and index_type.bit_width != 64) {
             return BuilderError.InvalidIndexType;
@@ -95,11 +102,13 @@ pub const DictionaryBuilder = struct {
         };
     }
 
+    /// Release resources owned by this instance.
     pub fn deinit(self: *DictionaryBuilder) void {
         self.indices.deinit();
         if (self.validity) |*valid| valid.deinit();
     }
 
+    /// Reset state while retaining reusable capacity when possible.
     pub fn reset(self: *DictionaryBuilder) BuilderError!void {
         if (self.state != .finished) return BuilderError.NotFinished;
         self.len = 0;
@@ -107,6 +116,7 @@ pub const DictionaryBuilder = struct {
         self.state = .ready;
     }
 
+    /// Clear state and release reusable buffers when required.
     pub fn clear(self: *DictionaryBuilder) BuilderError!void {
         if (self.state != .finished) return BuilderError.NotFinished;
         self.indices.deinit();
@@ -117,6 +127,7 @@ pub const DictionaryBuilder = struct {
         self.state = .ready;
     }
 
+    /// Execute ensureIndicesCapacity logic for this type.
     fn ensureIndicesCapacity(self: *DictionaryBuilder, needed_len: usize) !void {
         const byte_width = @as(usize, self.index_type.bit_width) / 8;
         const needed_bytes = needed_len * byte_width;
@@ -124,6 +135,7 @@ pub const DictionaryBuilder = struct {
         try self.indices.resize(needed_bytes);
     }
 
+    /// Execute ensureValidityForNull logic for this type.
     fn ensureValidityForNull(self: *DictionaryBuilder, new_len: usize) !void {
         if (self.validity == null) {
             var buf = try initValidityAllValid(self.allocator, new_len);
@@ -138,6 +150,7 @@ pub const DictionaryBuilder = struct {
         self.null_count += 1;
     }
 
+    /// Execute setValidBit logic for this type.
     fn setValidBit(self: *DictionaryBuilder, index: usize) !void {
         if (self.validity == null) return;
         var buf = &self.validity.?;
@@ -145,6 +158,7 @@ pub const DictionaryBuilder = struct {
         bitmap.setBit(buf.data[0..bitmap.byteLength(index + 1)], index);
     }
 
+    /// Execute setIndex logic for this type.
     fn setIndex(self: *DictionaryBuilder, pos: usize, index: i64) BuilderError!void {
         switch (self.index_type.bit_width) {
             8 => if (self.index_type.signed) {
@@ -181,6 +195,7 @@ pub const DictionaryBuilder = struct {
         }
     }
 
+    /// Execute appendIndex logic for this type.
     pub fn appendIndex(self: *DictionaryBuilder, index: i64) !void {
         if (self.state == .finished) return BuilderError.AlreadyFinished;
         const next_len = self.len + 1;
@@ -190,6 +205,7 @@ pub const DictionaryBuilder = struct {
         self.len = next_len;
     }
 
+    /// Append a null entry into the builder.
     pub fn appendNull(self: *DictionaryBuilder) !void {
         if (self.state == .finished) return BuilderError.AlreadyFinished;
         const next_len = self.len + 1;
@@ -199,6 +215,7 @@ pub const DictionaryBuilder = struct {
         self.len = next_len;
     }
 
+    /// Finalize builder state and return an immutable array reference.
     pub fn finish(self: *DictionaryBuilder, dictionary: ArrayRef) !ArrayRef {
         if (self.state == .finished) return BuilderError.AlreadyFinished;
         if (!std.meta.eql(dictionary.data().data_type, self.value_type.*)) return BuilderError.InvalidDictionaryType;
@@ -223,12 +240,14 @@ pub const DictionaryBuilder = struct {
         return ArrayRef.fromOwnedUnsafe(self.allocator, data);
     }
 
+    /// Finalize output and then reset builder state for reuse.
     pub fn finishReset(self: *DictionaryBuilder, dictionary: ArrayRef) !ArrayRef {
         const out = try self.finish(dictionary);
         try self.reset();
         return out;
     }
 
+    /// Finalize output and then clear builder state and buffers.
     pub fn finishClear(self: *DictionaryBuilder, dictionary: ArrayRef) !ArrayRef {
         const out = try self.finish(dictionary);
         try self.clear();

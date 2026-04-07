@@ -1,6 +1,8 @@
 const datatype = @import("../datatype.zig");
 const buffer = @import("../buffer.zig");
 
+// Public aggregation module that re-exports all array views/builders.
+
 pub const SharedBuffer = buffer.SharedBuffer;
 pub const OwnedBuffer = buffer.OwnedBuffer;
 

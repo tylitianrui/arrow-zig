@@ -35,14 +35,17 @@ pub const SharedBuffer = struct {
 
     pub const empty: SharedBuffer = .{ .storage = null, .data = &.{} };
 
+    /// Initialize and return a new instance.
     pub fn init(data: []const u8) SharedBuffer {
         return .{ .storage = null, .data = data };
     }
 
+    /// Execute fromSlice logic for this type.
     pub fn fromSlice(data: []const u8) SharedBuffer {
         return .{ .storage = null, .data = data };
     }
 
+    /// Increment shared ownership and return another handle.
     pub fn retain(self: SharedBuffer) SharedBuffer {
         if (self.storage) |storage| {
             _ = storage.ref_count.fetchAdd(1, .monotonic);
@@ -50,6 +53,7 @@ pub const SharedBuffer = struct {
         return self;
     }
 
+    /// Release one ownership reference and cleanup if this is the last handle.
     pub fn release(self: *SharedBuffer) void {
         if (self.storage) |storage| {
             if (storage.ref_count.fetchSub(1, .acq_rel) == 1) {
@@ -60,14 +64,17 @@ pub const SharedBuffer = struct {
         self.data = &.{};
     }
 
+    /// Return the logical length.
     pub fn len(self: SharedBuffer) usize {
         return self.data.len;
     }
 
+    /// Execute isEmpty logic for this type.
     pub fn isEmpty(self: SharedBuffer) bool {
         return self.data.len == 0;
     }
 
+    /// Create a logical slice view over the current value.
     pub fn slice(self: SharedBuffer, start: usize, end: usize) SharedBuffer {
         std.debug.assert(start <= end);
         std.debug.assert(end <= self.data.len);
@@ -78,6 +85,7 @@ pub const SharedBuffer = struct {
         return out;
     }
 
+    /// Execute typedSlice logic for this type.
     pub fn typedSlice(self: SharedBuffer, comptime T: type) []const T {
         const aligned: []align(ALIGNMENT) const u8 = @alignCast(self.data);
         return std.mem.bytesAsSlice(T, aligned);
@@ -89,6 +97,7 @@ pub const OwnedBuffer = struct {
     data: []align(ALIGNMENT) u8,
     allocator: std.mem.Allocator,
 
+    /// Initialize and return a new instance.
     pub fn init(allocator: std.mem.Allocator, capacity: usize) !OwnedBuffer {
         const actualCapacity = alignedSize(if (capacity == 0) ALIGNMENT else capacity);
         const data = try allocator.alignedAlloc(u8, std.mem.Alignment.fromByteUnits(ALIGNMENT), actualCapacity);
@@ -96,20 +105,24 @@ pub const OwnedBuffer = struct {
         return .{ .data = data, .allocator = allocator };
     }
 
+    /// Release resources owned by this instance.
     pub fn deinit(self: *OwnedBuffer) void {
         if (self.data.len == 0) return;
         self.allocator.free(self.data);
         self.data = empty_storage[0..];
     }
 
+    /// Return the logical length.
     pub fn len(self: OwnedBuffer) usize {
         return self.data.len;
     }
 
+    /// Execute isEmpty logic for this type.
     pub fn isEmpty(self: OwnedBuffer) bool {
         return self.data.len == 0;
     }
 
+    /// Execute toShared logic for this type.
     pub fn toShared(self: *OwnedBuffer, used: usize) !SharedBuffer {
         const storage = try self.allocator.create(BufferStorage);
         storage.* = .{
@@ -123,10 +136,12 @@ pub const OwnedBuffer = struct {
         return shared;
     }
 
+    /// Execute typedSlice logic for this type.
     pub fn typedSlice(self: OwnedBuffer, comptime T: type) []T {
         return std.mem.bytesAsSlice(T, self.data);
     }
 
+    /// Execute resize logic for this type.
     pub fn resize(self: *OwnedBuffer, newSize: usize) !void {
         const actualSize = alignedSize(newSize);
         const newData = try self.allocator.alignedAlloc(u8, std.mem.Alignment.fromByteUnits(ALIGNMENT), actualSize);

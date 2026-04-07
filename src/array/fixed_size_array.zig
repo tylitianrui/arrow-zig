@@ -7,6 +7,8 @@ const builder_state = @import("builder_state.zig");
 const datatype = @import("../datatype.zig");
 const array_data = @import("array_data.zig");
 
+// FixedSizeBinary and FixedSizeList array views/builders.
+
 pub const SharedBuffer = buffer.SharedBuffer;
 pub const OwnedBuffer = buffer.OwnedBuffer;
 pub const ArrayData = array_data.ArrayData;
@@ -21,18 +23,22 @@ const ensureBitmapCapacity = array_utils.ensureBitmapCapacity;
 pub const FixedSizeBinaryArray = struct {
     data: *const ArrayData,
 
+    /// Return the logical length.
     pub fn len(self: FixedSizeBinaryArray) usize {
         return self.data.length;
     }
 
+    /// Check whether the element at index is null.
     pub fn isNull(self: FixedSizeBinaryArray, i: usize) bool {
         return self.data.isNull(i);
     }
 
+    /// Execute byteWidth logic for this type.
     pub fn byteWidth(self: FixedSizeBinaryArray) usize {
         return @intCast(self.data.data_type.fixed_size_binary.byte_width);
     }
 
+    /// Return the logical value view at the requested index.
     pub fn value(self: FixedSizeBinaryArray, i: usize) []const u8 {
         std.debug.assert(i < self.data.length);
         std.debug.assert(self.data.buffers.len >= 2);
@@ -56,6 +62,7 @@ pub const FixedSizeBinaryBuilder = struct {
 
     const BuilderError = error{ AlreadyFinished, NotFinished, InvalidByteWidth, InvalidValueWidth };
 
+    /// Initialize and return a new instance.
     pub fn init(allocator: std.mem.Allocator, byte_width: usize, capacity: usize) !FixedSizeBinaryBuilder {
         if (byte_width == 0) return BuilderError.InvalidByteWidth;
         return .{
@@ -65,11 +72,13 @@ pub const FixedSizeBinaryBuilder = struct {
         };
     }
 
+    /// Release resources owned by this instance.
     pub fn deinit(self: *FixedSizeBinaryBuilder) void {
         self.data.deinit();
         if (self.validity) |*valid| valid.deinit();
     }
 
+    /// Reset state while retaining reusable capacity when possible.
     pub fn reset(self: *FixedSizeBinaryBuilder) BuilderError!void {
         if (self.state != .finished) return BuilderError.NotFinished;
         self.len = 0;
@@ -78,6 +87,7 @@ pub const FixedSizeBinaryBuilder = struct {
         self.state = .ready;
     }
 
+    /// Clear state and release reusable buffers when required.
     pub fn clear(self: *FixedSizeBinaryBuilder) BuilderError!void {
         if (self.state != .finished) return BuilderError.NotFinished;
         self.data.deinit();
@@ -89,11 +99,13 @@ pub const FixedSizeBinaryBuilder = struct {
         self.state = .ready;
     }
 
+    /// Execute ensureDataCapacity logic for this type.
     fn ensureDataCapacity(self: *FixedSizeBinaryBuilder, needed_len: usize) !void {
         if (needed_len <= self.data.len()) return;
         try self.data.resize(needed_len);
     }
 
+    /// Execute ensureValidityForNull logic for this type.
     fn ensureValidityForNull(self: *FixedSizeBinaryBuilder, new_len: usize) !void {
         if (self.validity == null) {
             var buf = try initValidityAllValid(self.allocator, new_len);
@@ -108,6 +120,7 @@ pub const FixedSizeBinaryBuilder = struct {
         self.null_count += 1;
     }
 
+    /// Execute setValidBit logic for this type.
     fn setValidBit(self: *FixedSizeBinaryBuilder, index: usize) !void {
         if (self.validity == null) return;
         var buf = &self.validity.?;
@@ -115,6 +128,7 @@ pub const FixedSizeBinaryBuilder = struct {
         bitmap.setBit(buf.data[0..bitmap.byteLength(index + 1)], index);
     }
 
+    /// Append one logical value into the builder.
     pub fn append(self: *FixedSizeBinaryBuilder, value: []const u8) !void {
         if (self.state == .finished) return BuilderError.AlreadyFinished;
         if (value.len != self.byte_width) return BuilderError.InvalidValueWidth;
@@ -129,6 +143,7 @@ pub const FixedSizeBinaryBuilder = struct {
         self.data_len = next_data_len;
     }
 
+    /// Append a null entry into the builder.
     pub fn appendNull(self: *FixedSizeBinaryBuilder) !void {
         if (self.state == .finished) return BuilderError.AlreadyFinished;
 
@@ -142,6 +157,7 @@ pub const FixedSizeBinaryBuilder = struct {
         self.data_len = next_data_len;
     }
 
+    /// Finalize builder state and return an immutable array reference.
     pub fn finish(self: *FixedSizeBinaryBuilder) !ArrayRef {
         if (self.state == .finished) return BuilderError.AlreadyFinished;
         const validity_buf = if (self.validity) |*buf| try buf.toShared(bitmap.byteLength(self.len)) else SharedBuffer.empty;
@@ -163,12 +179,14 @@ pub const FixedSizeBinaryBuilder = struct {
         return ArrayRef.fromOwnedUnsafe(self.allocator, data);
     }
 
+    /// Finalize output and then reset builder state for reuse.
     pub fn finishReset(self: *FixedSizeBinaryBuilder) !ArrayRef {
         const out = try self.finish();
         try self.reset();
         return out;
     }
 
+    /// Finalize output and then clear builder state and buffers.
     pub fn finishClear(self: *FixedSizeBinaryBuilder) !ArrayRef {
         const out = try self.finish();
         try self.clear();
@@ -179,23 +197,28 @@ pub const FixedSizeBinaryBuilder = struct {
 pub const FixedSizeListArray = struct {
     data: *const ArrayData,
 
+    /// Return the logical length.
     pub fn len(self: FixedSizeListArray) usize {
         return self.data.length;
     }
 
+    /// Check whether the element at index is null.
     pub fn isNull(self: FixedSizeListArray, i: usize) bool {
         return self.data.isNull(i);
     }
 
+    /// Execute valuesRef logic for this type.
     pub fn valuesRef(self: FixedSizeListArray) *const ArrayRef {
         std.debug.assert(self.data.children.len == 1);
         return &self.data.children[0];
     }
 
+    /// Execute listSize logic for this type.
     pub fn listSize(self: FixedSizeListArray) usize {
         return @intCast(self.data.data_type.fixed_size_list.list_size);
     }
 
+    /// Return the logical value view at the requested index.
     pub fn value(self: FixedSizeListArray, i: usize) !ArrayRef {
         std.debug.assert(i < self.data.length);
         std.debug.assert(self.data.children.len == 1);
@@ -219,6 +242,7 @@ pub const FixedSizeListBuilder = struct {
 
     const BuilderError = error{ AlreadyFinished, NotFinished, InvalidListSize, InvalidChildLength, Overflow };
 
+    /// Initialize and return a new instance.
     pub fn init(allocator: std.mem.Allocator, value_field: Field, list_size: usize) !FixedSizeListBuilder {
         if (@as(i64, @intCast(list_size)) < 0) return BuilderError.InvalidListSize;
         return .{
@@ -228,10 +252,12 @@ pub const FixedSizeListBuilder = struct {
         };
     }
 
+    /// Release resources owned by this instance.
     pub fn deinit(self: *FixedSizeListBuilder) void {
         if (self.validity) |*valid| valid.deinit();
     }
 
+    /// Reset state while retaining reusable capacity when possible.
     pub fn reset(self: *FixedSizeListBuilder) BuilderError!void {
         if (self.state != .finished) return BuilderError.NotFinished;
         self.len = 0;
@@ -240,6 +266,7 @@ pub const FixedSizeListBuilder = struct {
         self.state = .ready;
     }
 
+    /// Clear state and release reusable buffers when required.
     pub fn clear(self: *FixedSizeListBuilder) BuilderError!void {
         if (self.state != .finished) return BuilderError.NotFinished;
         if (self.validity) |*valid| valid.deinit();
@@ -250,6 +277,7 @@ pub const FixedSizeListBuilder = struct {
         self.state = .ready;
     }
 
+    /// Execute ensureValidityForNull logic for this type.
     fn ensureValidityForNull(self: *FixedSizeListBuilder, new_len: usize) !void {
         if (self.validity == null) {
             var buf = try initValidityAllValid(self.allocator, new_len);
@@ -264,6 +292,7 @@ pub const FixedSizeListBuilder = struct {
         self.null_count += 1;
     }
 
+    /// Execute setValidBit logic for this type.
     fn setValidBit(self: *FixedSizeListBuilder, index: usize) !void {
         if (self.validity == null) return;
         var buf = &self.validity.?;
@@ -271,11 +300,13 @@ pub const FixedSizeListBuilder = struct {
         bitmap.setBit(buf.data[0..bitmap.byteLength(index + 1)], index);
     }
 
+    /// Execute bumpValuesLen logic for this type.
     fn bumpValuesLen(self: *FixedSizeListBuilder) BuilderError!void {
         const added = std.math.mul(usize, 1, self.list_size) catch return BuilderError.Overflow;
         self.values_len = std.math.add(usize, self.values_len, added) catch return BuilderError.Overflow;
     }
 
+    /// Append a non-null entry into the builder.
     pub fn appendValid(self: *FixedSizeListBuilder) !void {
         if (self.state == .finished) return BuilderError.AlreadyFinished;
         const next_len = self.len + 1;
@@ -284,6 +315,7 @@ pub const FixedSizeListBuilder = struct {
         try self.bumpValuesLen();
     }
 
+    /// Append a null entry into the builder.
     pub fn appendNull(self: *FixedSizeListBuilder) !void {
         if (self.state == .finished) return BuilderError.AlreadyFinished;
         const next_len = self.len + 1;
@@ -292,6 +324,7 @@ pub const FixedSizeListBuilder = struct {
         try self.bumpValuesLen();
     }
 
+    /// Finalize builder state and return an immutable array reference.
     pub fn finish(self: *FixedSizeListBuilder, values: ArrayRef) !ArrayRef {
         if (self.state == .finished) return BuilderError.AlreadyFinished;
         if (values.data().length != self.values_len) return BuilderError.InvalidChildLength;
@@ -317,12 +350,14 @@ pub const FixedSizeListBuilder = struct {
         return ArrayRef.fromOwnedUnsafe(self.allocator, data);
     }
 
+    /// Finalize output and then reset builder state for reuse.
     pub fn finishReset(self: *FixedSizeListBuilder, values: ArrayRef) !ArrayRef {
         const out = try self.finish(values);
         try self.reset();
         return out;
     }
 
+    /// Finalize output and then clear builder state and buffers.
     pub fn finishClear(self: *FixedSizeListBuilder, values: ArrayRef) !ArrayRef {
         const out = try self.finish(values);
         try self.clear();

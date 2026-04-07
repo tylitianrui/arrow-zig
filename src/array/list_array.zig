@@ -7,6 +7,8 @@ const builder_state = @import("builder_state.zig");
 const datatype = @import("../datatype.zig");
 const array_data = @import("array_data.zig");
 
+// List and LargeList array views/builders with offset-based child slicing.
+
 pub const SharedBuffer = buffer.SharedBuffer;
 pub const OwnedBuffer = buffer.OwnedBuffer;
 pub const ArrayData = array_data.ArrayData;
@@ -21,19 +23,23 @@ const ensureBitmapCapacity = array_utils.ensureBitmapCapacity;
 pub const ListArray = struct {
     data: *const ArrayData,
 
+    /// Return the logical length.
     pub fn len(self: ListArray) usize {
         return self.data.length;
     }
 
+    /// Check whether the element at index is null.
     pub fn isNull(self: ListArray, i: usize) bool {
         return self.data.isNull(i);
     }
 
+    /// Execute valuesRef logic for this type.
     pub fn valuesRef(self: ListArray) *const ArrayRef {
         std.debug.assert(self.data.children.len == 1);
         return &self.data.children[0];
     }
 
+    /// Return the logical value view at the requested index.
     pub fn value(self: ListArray, i: usize) !ArrayRef {
         std.debug.assert(i < self.data.length);
         std.debug.assert(self.data.buffers.len >= 2);
@@ -50,19 +56,23 @@ pub const ListArray = struct {
 pub const LargeListArray = struct {
     data: *const ArrayData,
 
+    /// Return the logical length.
     pub fn len(self: LargeListArray) usize {
         return self.data.length;
     }
 
+    /// Check whether the element at index is null.
     pub fn isNull(self: LargeListArray, i: usize) bool {
         return self.data.isNull(i);
     }
 
+    /// Execute valuesRef logic for this type.
     pub fn valuesRef(self: LargeListArray) *const ArrayRef {
         std.debug.assert(self.data.children.len == 1);
         return &self.data.children[0];
     }
 
+    /// Return the logical value view at the requested index.
     pub fn value(self: LargeListArray, i: usize) !ArrayRef {
         std.debug.assert(i < self.data.length);
         std.debug.assert(self.data.buffers.len >= 2);
@@ -76,6 +86,7 @@ pub const LargeListArray = struct {
     }
 };
 
+/// Execute GenericListBuilder logic for this type.
 pub fn GenericListBuilder(comptime OffsetsT: type) type {
     return struct {
         allocator: std.mem.Allocator,
@@ -91,6 +102,7 @@ pub fn GenericListBuilder(comptime OffsetsT: type) type {
         const Self = @This();
         const BuilderError = error{ AlreadyFinished, NotFinished, OffsetOverflow, InvalidChildLength };
 
+        /// Execute listDataType logic for this type.
         fn listDataType(value_field: Field) DataType {
             if (OffsetsT == i32) {
                 return DataType{ .list = .{ .value_field = value_field } };
@@ -101,6 +113,7 @@ pub fn GenericListBuilder(comptime OffsetsT: type) type {
             @compileError("GenericListBuilder only supports i32 or i64 offsets");
         }
 
+        /// Initialize and return a new instance.
         pub fn init(allocator: std.mem.Allocator, capacity: usize, value_field: Field) !Self {
             const offsets = try OwnedBuffer.init(allocator, (capacity + 1) * @sizeOf(OffsetsT));
             const offsets_slice = std.mem.bytesAsSlice(OffsetsT, offsets.data);
@@ -112,11 +125,13 @@ pub fn GenericListBuilder(comptime OffsetsT: type) type {
             };
         }
 
+        /// Release resources owned by this instance.
         pub fn deinit(self: *Self) void {
             self.offsets.deinit();
             if (self.validity) |*valid| valid.deinit();
         }
 
+        /// Reset state while retaining reusable capacity when possible.
         pub fn reset(self: *Self) BuilderError!void {
             if (self.state != .finished) return BuilderError.NotFinished;
             if (!self.offsets.isEmpty()) {
@@ -129,6 +144,7 @@ pub fn GenericListBuilder(comptime OffsetsT: type) type {
             self.state = .ready;
         }
 
+        /// Clear state and release reusable buffers when required.
         pub fn clear(self: *Self) BuilderError!void {
             if (self.state != .finished) return BuilderError.NotFinished;
             self.offsets.deinit();
@@ -140,6 +156,7 @@ pub fn GenericListBuilder(comptime OffsetsT: type) type {
             self.state = .ready;
         }
 
+        /// Ensure there is enough capacity for upcoming appends.
         pub fn reserve(self: *Self, additional: usize) !void {
             try self.ensureOffsetsCapacity(self.len + additional + 1);
             if (self.validity) |*valid| {
@@ -147,6 +164,7 @@ pub fn GenericListBuilder(comptime OffsetsT: type) type {
             }
         }
 
+        /// Execute ensureOffsetsCapacity logic for this type.
         fn ensureOffsetsCapacity(self: *Self, needed_len: usize) !void {
             const capacity = self.offsets.len() / @sizeOf(OffsetsT);
             if (needed_len <= capacity) return;
@@ -158,6 +176,7 @@ pub fn GenericListBuilder(comptime OffsetsT: type) type {
             }
         }
 
+        /// Execute ensureValidityForNull logic for this type.
         fn ensureValidityForNull(self: *Self, new_len: usize) !void {
             if (self.validity == null) {
                 var buf = try initValidityAllValid(self.allocator, new_len);
@@ -172,6 +191,7 @@ pub fn GenericListBuilder(comptime OffsetsT: type) type {
             self.null_count += 1;
         }
 
+        /// Execute setValidBit logic for this type.
         fn setValidBit(self: *Self, index: usize) !void {
             if (self.validity == null) return;
             var buf = &self.validity.?;
@@ -179,6 +199,7 @@ pub fn GenericListBuilder(comptime OffsetsT: type) type {
             bitmap.setBit(buf.data[0..bitmap.byteLength(index + 1)], index);
         }
 
+        /// Execute appendLen logic for this type.
         pub fn appendLen(self: *Self, value_len: usize) !void {
             if (self.state == .finished) return BuilderError.AlreadyFinished;
             const next_len = self.len + 1;
@@ -194,6 +215,7 @@ pub fn GenericListBuilder(comptime OffsetsT: type) type {
             self.values_len = next_offset;
         }
 
+        /// Execute appendLens logic for this type.
         pub fn appendLens(self: *Self, lengths: []const usize) !void {
             if (self.state == .finished) return BuilderError.AlreadyFinished;
             if (lengths.len == 0) return;
@@ -223,6 +245,7 @@ pub fn GenericListBuilder(comptime OffsetsT: type) type {
             self.len = next_len;
         }
 
+        /// Append a null entry into the builder.
         pub fn appendNull(self: *Self) !void {
             if (self.state == .finished) return BuilderError.AlreadyFinished;
             const next_len = self.len + 1;
@@ -233,6 +256,7 @@ pub fn GenericListBuilder(comptime OffsetsT: type) type {
             self.len = next_len;
         }
 
+        /// Execute appendNulls logic for this type.
         pub fn appendNulls(self: *Self, count: usize) !void {
             if (self.state == .finished) return BuilderError.AlreadyFinished;
             if (count == 0) return;
@@ -260,6 +284,7 @@ pub fn GenericListBuilder(comptime OffsetsT: type) type {
             self.len = next_len;
         }
 
+        /// Finalize builder state and return an immutable array reference.
         pub fn finish(self: *Self, values: ArrayRef) !ArrayRef {
             if (self.state == .finished) return BuilderError.AlreadyFinished;
             if (values.data().length != self.values_len) return BuilderError.InvalidChildLength;
@@ -303,6 +328,7 @@ pub fn GenericListBuilder(comptime OffsetsT: type) type {
             return finished_ref;
         }
 
+        /// Finalize output and then reset builder state for reuse.
         pub fn finishReset(self: *Self, values: ArrayRef) !ArrayRef {
             const ref = try self.finish(values);
             try self.reset();

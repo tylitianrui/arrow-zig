@@ -2,6 +2,8 @@ const std = @import("std");
 const schema_mod = @import("schema.zig");
 const array = @import("array/array.zig");
 
+// Tabular wrapper around aligned Arrow columns plus a schema contract.
+
 pub const Schema = schema_mod.Schema;
 pub const Field = schema_mod.Field;
 pub const ArrayRef = array.ArrayRef;
@@ -32,6 +34,7 @@ pub const RecordBatch = struct {
 
     const Self = @This();
 
+    /// Initialize and return a new instance.
     pub fn init(allocator: std.mem.Allocator, schema: Schema, columns: []const ArrayRef) !Self {
         if (schema.fields.len != columns.len) return RecordBatchError.InvalidColumnCount;
 
@@ -58,6 +61,7 @@ pub const RecordBatch = struct {
         };
     }
 
+    /// Release resources owned by this instance.
     pub fn deinit(self: *Self) void {
         for (self.columns) |col_ref| {
             var owned = col_ref;
@@ -66,19 +70,23 @@ pub const RecordBatch = struct {
         self.allocator.free(self.columns);
     }
 
+    /// Execute numRows logic for this type.
     pub fn numRows(self: Self) usize {
         return self.num_rows;
     }
 
+    /// Execute numColumns logic for this type.
     pub fn numColumns(self: Self) usize {
         return self.columns.len;
     }
 
+    /// Execute column logic for this type.
     pub fn column(self: *const Self, index: usize) *const ArrayRef {
         std.debug.assert(index < self.columns.len);
         return &self.columns[index];
     }
 
+    /// Execute columnByName logic for this type.
     pub fn columnByName(self: *const Self, name: []const u8) ?*const ArrayRef {
         for (self.schema.fields, 0..) |field, i| {
             if (std.mem.eql(u8, field.name, name)) return &self.columns[i];
@@ -86,6 +94,7 @@ pub const RecordBatch = struct {
         return null;
     }
 
+    /// Create a logical slice view over the current value.
     pub fn slice(self: *const Self, offset: usize, length: usize) !Self {
         if (offset > self.num_rows or offset + length > self.num_rows) return RecordBatchError.SliceOutOfBounds;
 
@@ -121,6 +130,7 @@ pub const RecordBatchBuilder = struct {
 
     const Self = @This();
 
+    /// Initialize and return a new instance.
     pub fn init(allocator: std.mem.Allocator, schema: Schema) !Self {
         const slots = try allocator.alloc(?ArrayRef, schema.fields.len);
         @memset(slots, null);
@@ -131,11 +141,13 @@ pub const RecordBatchBuilder = struct {
         };
     }
 
+    /// Release resources owned by this instance.
     pub fn deinit(self: *Self) void {
         self.releaseColumns();
         self.allocator.free(self.columns);
     }
 
+    /// Execute releaseColumns logic for this type.
     fn releaseColumns(self: *Self) void {
         for (self.columns, 0..) |slot, i| {
             if (slot) |col_ref| {
@@ -146,6 +158,7 @@ pub const RecordBatchBuilder = struct {
         }
     }
 
+    /// Execute setColumn logic for this type.
     pub fn setColumn(self: *Self, index: usize, column_ref: ArrayRef) RecordBatchBuilderError!void {
         if (self.finished) return RecordBatchBuilderError.AlreadyFinished;
         if (index >= self.columns.len) return RecordBatchBuilderError.InvalidColumnIndex;
@@ -153,6 +166,7 @@ pub const RecordBatchBuilder = struct {
         self.columns[index] = column_ref.retain();
     }
 
+    /// Execute setColumnByName logic for this type.
     pub fn setColumnByName(self: *Self, name: []const u8, column_ref: ArrayRef) RecordBatchBuilderError!void {
         if (self.finished) return RecordBatchBuilderError.AlreadyFinished;
         for (self.schema.fields, 0..) |field, i| {
@@ -161,6 +175,7 @@ pub const RecordBatchBuilder = struct {
         return RecordBatchBuilderError.UnknownField;
     }
 
+    /// Finalize builder state and return an immutable array reference.
     pub fn finish(self: *Self) !RecordBatch {
         if (self.finished) return RecordBatchBuilderError.AlreadyFinished;
 
@@ -180,12 +195,14 @@ pub const RecordBatchBuilder = struct {
         return batch;
     }
 
+    /// Reset state while retaining reusable capacity when possible.
     pub fn reset(self: *Self) RecordBatchBuilderError!void {
         // Reset keeps capacity and can be called in any state.
         self.releaseColumns();
         self.finished = false;
     }
 
+    /// Clear state and release reusable buffers when required.
     pub fn clear(self: *Self) RecordBatchBuilderError!void {
         // Clear is a hard cleanup operation and is allowed even before finish.
         self.releaseColumns();

@@ -3,23 +3,31 @@ const array_data = @import("array_data.zig");
 const buffer = @import("../buffer.zig");
 const datatype = @import("../datatype.zig");
 
+// Shared ownership handle for ArrayData with retain/release semantics.
+
 pub const ArrayData = array_data.ArrayData;
 pub const SharedBuffer = buffer.SharedBuffer;
 
 const ArrayNode = struct {
+    // Allocator used to free this node and all owned containers.
     allocator: std.mem.Allocator,
+    // Shared reference count for ArrayRef clones.
     ref_count: std.atomic.Value(u32),
+    // Owned array payload (buffers/children/dictionary containers).
     data: ArrayData,
 };
 
 pub const ArrayRef = struct {
+    // Pointer to shared array node.
     node: *ArrayNode,
 
+    /// Increment reference count and return another handle to the same array.
     pub fn retain(self: ArrayRef) ArrayRef {
         _ = self.node.ref_count.fetchAdd(1, .monotonic);
         return self;
     }
 
+    /// Release one handle; destroy node when last reference is dropped.
     pub fn release(self: *ArrayRef) void {
         if (self.node.ref_count.fetchSub(1, .acq_rel) != 1) return;
         const allocator = self.node.allocator;
@@ -44,10 +52,17 @@ pub const ArrayRef = struct {
         allocator.destroy(self.node);
     }
 
+    /// Borrow immutable access to the underlying array layout.
     pub fn data(self: ArrayRef) *const ArrayData {
         return &self.node.data;
     }
 
+    /// Create a sliced ArrayRef while preserving ownership correctness.
+    ///
+    /// The slice semantics are type-aware:
+    /// - list/map keep child in parent coordinate space (offset-driven view)
+    /// - struct slices children to keep element alignment
+    /// - dictionary keeps child/dictionary shared
     pub fn slice(self: ArrayRef, offset: usize, length: usize) !ArrayRef {
         var sliced = self.node.data.slice(offset, length);
         const allocator = self.node.allocator;
@@ -80,14 +95,15 @@ pub const ArrayRef = struct {
 
         switch (sliced.data_type) {
             .list, .large_list, .map => {
-                // Keep child shared for now.
-                // Parent slice remains shallow: offsets are interpreted in the original child coordinate space.
+                // Keep child shared: offsets buffer defines logical subranges.
+                // Child is not physically re-sliced for list/map shallow slices.
 
                 const child = self.node.data.children[0];
                 children[0] = child.retain();
                 child_count = 1;
             },
             .struct_ => {
+                // Struct requires child-wise slicing to keep row alignment.
                 const total_offset = self.node.data.offset + offset;
                 var i: usize = 0;
                 while (i < sliced.children.len) : (i += 1) {
@@ -96,6 +112,7 @@ pub const ArrayRef = struct {
                 }
             },
             .dictionary => {
+                // Dictionary arrays keep the same dictionary and shared children.
                 var i: usize = 0;
                 while (i < sliced.children.len) : (i += 1) {
                     children[i] = sliced.children[i].retain();
@@ -103,6 +120,7 @@ pub const ArrayRef = struct {
                 }
             },
             else => {
+                // Default shallow slice for primitive and most nested representations.
                 var i: usize = 0;
                 while (i < sliced.children.len) : (i += 1) {
                     children[i] = sliced.children[i].retain();

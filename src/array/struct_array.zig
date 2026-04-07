@@ -1,5 +1,7 @@
 const std = @import("std");
 
+// Struct array view and builder with optional child-builder coordination.
+
 const BuilderError = error{
     AlreadyFinished,
     NotFinished,
@@ -33,9 +35,13 @@ pub const Field = datatype.Field;
 pub const BuilderState = builder_state.BuilderState;
 
 pub const ChildBuilder = struct {
+    // Opaque pointer to concrete child builder instance.
     ctx: *anyopaque,
+    // Finalize child values into an ArrayRef; failures are mapped to stable errors.
     finishFn: *const fn (*anyopaque) ChildBuilderError!ArrayRef,
+    // Current logical length of child builder output.
     lenFn: *const fn (*anyopaque) usize,
+    // Optional lifecycle hooks used by finishFromChildrenReset/Clear and recycle().
     resetFn: ?*const fn (*anyopaque) ChildBuilderError!void = null,
     clearFn: ?*const fn (*anyopaque) ChildBuilderError!void = null,
 };
@@ -53,23 +59,28 @@ const ensureBitmapCapacity = array_utils.ensureBitmapCapacity;
 pub const StructArray = struct {
     data: *const ArrayData,
 
+    /// Return the logical length.
     pub fn len(self: StructArray) usize {
         return self.data.length;
     }
 
+    /// Check whether the element at index is null.
     pub fn isNull(self: StructArray, i: usize) bool {
         return self.data.isNull(i);
     }
 
+    /// Execute fieldCount logic for this type.
     pub fn fieldCount(self: StructArray) usize {
         return self.data.children.len;
     }
 
+    /// Execute fieldRef logic for this type.
     pub fn fieldRef(self: StructArray, index: usize) *const ArrayRef {
         std.debug.assert(index < self.data.children.len);
         return &self.data.children[index];
     }
 
+    /// Execute field logic for this type.
     pub fn field(self: StructArray, index: usize) !ArrayRef {
         std.debug.assert(index < self.data.children.len);
         const child = self.data.children[index];
@@ -83,7 +94,9 @@ pub const StructArray = struct {
 
 pub const StructBuilder = struct {
     allocator: std.mem.Allocator,
+    // Struct field schema and ordering contract.
     fields: []const Field,
+    // Optional child-builder bridge for coordinated finish/reset/clear flows.
     child_builders: ?[]const ChildBuilder = null,
     validity: ?OwnedBuffer = null,
     buffers: [1]SharedBuffer = undefined,
@@ -91,6 +104,7 @@ pub const StructBuilder = struct {
     null_count: usize = 0,
     state: BuilderState = .ready,
 
+    /// Execute resetChildren logic for this type.
     fn resetChildren(self: *StructBuilder) FromChildrenError!void {
         if (self.child_builders == null) return;
         const builders = self.child_builders.?;
@@ -103,6 +117,7 @@ pub const StructBuilder = struct {
         }
     }
 
+    /// Execute clearChildren logic for this type.
     fn clearChildren(self: *StructBuilder) FromChildrenError!void {
         if (self.child_builders == null) return;
         const builders = self.child_builders.?;
@@ -115,6 +130,7 @@ pub const StructBuilder = struct {
         }
     }
 
+    /// Execute materializeChildren logic for this type.
     fn materializeChildren(self: *StructBuilder, builders: []const ChildBuilder) FromChildrenError![]ArrayRef {
         if (builders.len != self.fields.len) return BuilderError.InvalidChildCount;
 
@@ -137,6 +153,7 @@ pub const StructBuilder = struct {
         return children;
     }
 
+    /// Execute releaseMaterializedChildren logic for this type.
     fn releaseMaterializedChildren(self: *StructBuilder, children: []ArrayRef) void {
         var i: usize = 0;
         while (i < children.len) : (i += 1) {
@@ -145,6 +162,7 @@ pub const StructBuilder = struct {
         self.allocator.free(children);
     }
 
+    /// Execute recycle logic for this type.
     fn recycle(self: *StructBuilder, action: RecycleAction) FromChildrenError!void {
         // Any-state recycle: caller can always reset/clear the parent builder.
         // Child coordination is only attempted for finished batches so we don't
@@ -170,31 +188,38 @@ pub const StructBuilder = struct {
         self.state = .ready;
     }
 
+    /// Initialize and return a new instance.
     pub fn init(allocator: std.mem.Allocator, fields: []const Field) StructBuilder {
         return .{ .allocator = allocator, .fields = fields };
     }
 
+    /// Execute initWithChildren logic for this type.
     pub fn initWithChildren(allocator: std.mem.Allocator, fields: []const Field, child_builders: []const ChildBuilder) StructBuilder {
         return .{ .allocator = allocator, .fields = fields, .child_builders = child_builders };
     }
 
+    /// Release resources owned by this instance.
     pub fn deinit(self: *StructBuilder) void {
         if (self.validity) |*valid| valid.deinit();
     }
 
+    /// Reset state while retaining reusable capacity when possible.
     pub fn reset(self: *StructBuilder) FromChildrenError!void {
         try self.recycle(.reset);
     }
 
+    /// Clear state and release reusable buffers when required.
     pub fn clear(self: *StructBuilder) FromChildrenError!void {
         try self.recycle(.clear);
     }
 
+    /// Ensure there is enough capacity for upcoming appends.
     pub fn reserve(self: *StructBuilder, additional: usize) !void {
         if (self.validity == null) return;
         try ensureBitmapCapacity(&self.validity.?, self.len + additional);
     }
 
+    /// Execute ensureValidityForNull logic for this type.
     fn ensureValidityForNull(self: *StructBuilder, new_len: usize) !void {
         if (self.validity == null) {
             var buf = try initValidityAllValid(self.allocator, new_len);
@@ -209,6 +234,7 @@ pub const StructBuilder = struct {
         self.null_count += 1;
     }
 
+    /// Execute setValidBit logic for this type.
     fn setValidBit(self: *StructBuilder, index: usize) !void {
         if (self.validity == null) return;
         var buf = &self.validity.?;
@@ -216,6 +242,7 @@ pub const StructBuilder = struct {
         bitmap.setBit(buf.data[0..bitmap.byteLength(index + 1)], index);
     }
 
+    /// Append a non-null entry into the builder.
     pub fn appendValid(self: *StructBuilder) !void {
         if (self.state == .finished) return BuilderError.AlreadyFinished;
         const next_len = self.len + 1;
@@ -223,10 +250,12 @@ pub const StructBuilder = struct {
         self.len = next_len;
     }
 
+    /// Execute appendPresent logic for this type.
     pub fn appendPresent(self: *StructBuilder) !void {
         try self.appendValid();
     }
 
+    /// Append a null entry into the builder.
     pub fn appendNull(self: *StructBuilder) !void {
         if (self.state == .finished) return BuilderError.AlreadyFinished;
         const next_len = self.len + 1;
@@ -234,6 +263,7 @@ pub const StructBuilder = struct {
         self.len = next_len;
     }
 
+    /// Execute appendMany logic for this type.
     pub fn appendMany(self: *StructBuilder, present: []const bool) !void {
         if (self.state == .finished) return BuilderError.AlreadyFinished;
         for (present) |is_present| {
@@ -245,6 +275,7 @@ pub const StructBuilder = struct {
         }
     }
 
+    /// Finalize builder state and return an immutable array reference.
     pub fn finish(self: *StructBuilder, children: []const ArrayRef) StructBuilderError!ArrayRef {
         if (self.state == .finished) return BuilderError.AlreadyFinished;
         if (children.len != self.fields.len) return BuilderError.InvalidChildCount;
@@ -298,6 +329,7 @@ pub const StructBuilder = struct {
         return array_ref_out;
     }
 
+    /// Execute finishFromChildren logic for this type.
     pub fn finishFromChildren(self: *StructBuilder) FromChildrenError!ArrayRef {
         if (self.child_builders == null) return BuilderError.MissingChildBuilders;
         const builders = self.child_builders.?;
@@ -307,6 +339,7 @@ pub const StructBuilder = struct {
         return self.finish(children);
     }
 
+    /// Execute finishFromChildrenReset logic for this type.
     pub fn finishFromChildrenReset(self: *StructBuilder) FromChildrenError!ArrayRef {
         if (self.child_builders == null) return BuilderError.MissingChildBuilders;
         const builders = self.child_builders.?;
@@ -325,6 +358,7 @@ pub const StructBuilder = struct {
         return array_ref_out;
     }
 
+    /// Execute finishFromChildrenClear logic for this type.
     pub fn finishFromChildrenClear(self: *StructBuilder) FromChildrenError!ArrayRef {
         if (self.child_builders == null) return BuilderError.MissingChildBuilders;
         const builders = self.child_builders.?;
@@ -343,12 +377,14 @@ pub const StructBuilder = struct {
         return array_ref_out;
     }
 
+    /// Finalize output and then reset builder state for reuse.
     pub fn finishReset(self: *StructBuilder, children: []const ArrayRef) FromChildrenError!ArrayRef {
         const array_ref_out = try self.finish(children);
         try self.reset();
         return array_ref_out;
     }
 
+    /// Finalize output and then clear builder state and buffers.
     pub fn finishClear(self: *StructBuilder, children: []const ArrayRef) FromChildrenError!ArrayRef {
         const array_ref_out = try self.finish(children);
         try self.clear();
@@ -527,12 +563,14 @@ test "struct builder finishFromChildren builds" {
         .{
             .ctx = &child_builder,
             .finishFn = struct {
+                /// Finalize builder state and return an immutable array reference.
                 fn finish(ctx: *anyopaque) ChildBuilderError!ArrayRef {
                     const ptr: *IntBuilder = @ptrCast(@alignCast(ctx));
                     return ptr.finish() catch ChildBuilderError.FinishFailed;
                 }
             }.finish,
             .lenFn = struct {
+                /// Return the logical length.
                 fn len(ctx: *anyopaque) usize {
                     const ptr: *IntBuilder = @ptrCast(@alignCast(ctx));
                     return ptr.len;
@@ -568,11 +606,13 @@ test "struct builder finishFromChildren maps child finish failures" {
         .{
             .ctx = &child_builder,
             .finishFn = struct {
+                /// Finalize builder state and return an immutable array reference.
                 fn finish(_: *anyopaque) ChildBuilderError!ArrayRef {
                     return ChildBuilderError.FinishFailed;
                 }
             }.finish,
             .lenFn = struct {
+                /// Return the logical length.
                 fn len(ctx: *anyopaque) usize {
                     const ptr: *IntBuilder = @ptrCast(@alignCast(ctx));
                     return ptr.len;
@@ -605,17 +645,20 @@ test "struct builder finishFromChildrenReset maps child finish failures" {
         .{
             .ctx = &child_builder,
             .finishFn = struct {
+                /// Finalize builder state and return an immutable array reference.
                 fn finish(_: *anyopaque) ChildBuilderError!ArrayRef {
                     return ChildBuilderError.FinishFailed;
                 }
             }.finish,
             .lenFn = struct {
+                /// Return the logical length.
                 fn len(ctx: *anyopaque) usize {
                     const ptr: *IntBuilder = @ptrCast(@alignCast(ctx));
                     return ptr.len;
                 }
             }.len,
             .resetFn = struct {
+                /// Reset state while retaining reusable capacity when possible.
                 fn reset(ctx: *anyopaque) ChildBuilderError!void {
                     const ptr: *IntBuilder = @ptrCast(@alignCast(ctx));
                     ptr.reset() catch return ChildBuilderError.ResetFailed;
@@ -649,17 +692,20 @@ test "struct builder finishFromChildrenClear maps child finish failures" {
         .{
             .ctx = &child_builder,
             .finishFn = struct {
+                /// Finalize builder state and return an immutable array reference.
                 fn finish(_: *anyopaque) ChildBuilderError!ArrayRef {
                     return ChildBuilderError.FinishFailed;
                 }
             }.finish,
             .lenFn = struct {
+                /// Return the logical length.
                 fn len(ctx: *anyopaque) usize {
                     const ptr: *IntBuilder = @ptrCast(@alignCast(ctx));
                     return ptr.len;
                 }
             }.len,
             .clearFn = struct {
+                /// Clear state and release reusable buffers when required.
                 fn clear(ctx: *anyopaque) ChildBuilderError!void {
                     const ptr: *IntBuilder = @ptrCast(@alignCast(ctx));
                     ptr.clear() catch return ChildBuilderError.ClearFailed;
@@ -694,24 +740,28 @@ test "struct builder finishFromChildrenReset resets child builders" {
         .{
             .ctx = &child_builder,
             .finishFn = struct {
+                /// Finalize builder state and return an immutable array reference.
                 fn finish(ctx: *anyopaque) ChildBuilderError!ArrayRef {
                     const ptr: *IntBuilder = @ptrCast(@alignCast(ctx));
                     return ptr.finish() catch ChildBuilderError.FinishFailed;
                 }
             }.finish,
             .lenFn = struct {
+                /// Return the logical length.
                 fn len(ctx: *anyopaque) usize {
                     const ptr: *IntBuilder = @ptrCast(@alignCast(ctx));
                     return ptr.len;
                 }
             }.len,
             .resetFn = struct {
+                /// Reset state while retaining reusable capacity when possible.
                 fn reset(ctx: *anyopaque) ChildBuilderError!void {
                     const ptr: *IntBuilder = @ptrCast(@alignCast(ctx));
                     ptr.reset() catch return ChildBuilderError.ResetFailed;
                 }
             }.reset,
             .clearFn = struct {
+                /// Clear state and release reusable buffers when required.
                 fn clear(ctx: *anyopaque) ChildBuilderError!void {
                     const ptr: *IntBuilder = @ptrCast(@alignCast(ctx));
                     ptr.clear() catch return ChildBuilderError.ClearFailed;
@@ -747,24 +797,28 @@ test "struct builder reset reuses builders when children configured" {
         .{
             .ctx = &child_builder,
             .finishFn = struct {
+                /// Finalize builder state and return an immutable array reference.
                 fn finish(ctx: *anyopaque) ChildBuilderError!ArrayRef {
                     const ptr: *IntBuilder = @ptrCast(@alignCast(ctx));
                     return ptr.finish() catch ChildBuilderError.FinishFailed;
                 }
             }.finish,
             .lenFn = struct {
+                /// Return the logical length.
                 fn len(ctx: *anyopaque) usize {
                     const ptr: *IntBuilder = @ptrCast(@alignCast(ctx));
                     return ptr.len;
                 }
             }.len,
             .resetFn = struct {
+                /// Reset state while retaining reusable capacity when possible.
                 fn reset(ctx: *anyopaque) ChildBuilderError!void {
                     const ptr: *IntBuilder = @ptrCast(@alignCast(ctx));
                     ptr.reset() catch return ChildBuilderError.ResetFailed;
                 }
             }.reset,
             .clearFn = struct {
+                /// Clear state and release reusable buffers when required.
                 fn clear(ctx: *anyopaque) ChildBuilderError!void {
                     const ptr: *IntBuilder = @ptrCast(@alignCast(ctx));
                     ptr.clear() catch return ChildBuilderError.ClearFailed;
@@ -801,24 +855,28 @@ test "struct builder clear frees validity and clears children when configured" {
         .{
             .ctx = &child_builder,
             .finishFn = struct {
+                /// Finalize builder state and return an immutable array reference.
                 fn finish(ctx: *anyopaque) ChildBuilderError!ArrayRef {
                     const ptr: *IntBuilder = @ptrCast(@alignCast(ctx));
                     return ptr.finish() catch ChildBuilderError.FinishFailed;
                 }
             }.finish,
             .lenFn = struct {
+                /// Return the logical length.
                 fn len(ctx: *anyopaque) usize {
                     const ptr: *IntBuilder = @ptrCast(@alignCast(ctx));
                     return ptr.len;
                 }
             }.len,
             .resetFn = struct {
+                /// Reset state while retaining reusable capacity when possible.
                 fn reset(ctx: *anyopaque) ChildBuilderError!void {
                     const ptr: *IntBuilder = @ptrCast(@alignCast(ctx));
                     ptr.reset() catch return ChildBuilderError.ResetFailed;
                 }
             }.reset,
             .clearFn = struct {
+                /// Clear state and release reusable buffers when required.
                 fn clear(ctx: *anyopaque) ChildBuilderError!void {
                     const ptr: *IntBuilder = @ptrCast(@alignCast(ctx));
                     ptr.clear() catch return ChildBuilderError.ClearFailed;
@@ -857,24 +915,28 @@ test "struct builder finishFromChildrenClear clears after finish" {
         .{
             .ctx = &child_builder,
             .finishFn = struct {
+                /// Finalize builder state and return an immutable array reference.
                 fn finish(ctx: *anyopaque) ChildBuilderError!ArrayRef {
                     const ptr: *IntBuilder = @ptrCast(@alignCast(ctx));
                     return ptr.finish() catch ChildBuilderError.FinishFailed;
                 }
             }.finish,
             .lenFn = struct {
+                /// Return the logical length.
                 fn len(ctx: *anyopaque) usize {
                     const ptr: *IntBuilder = @ptrCast(@alignCast(ctx));
                     return ptr.len;
                 }
             }.len,
             .resetFn = struct {
+                /// Reset state while retaining reusable capacity when possible.
                 fn reset(ctx: *anyopaque) ChildBuilderError!void {
                     const ptr: *IntBuilder = @ptrCast(@alignCast(ctx));
                     ptr.reset() catch return ChildBuilderError.ResetFailed;
                 }
             }.reset,
             .clearFn = struct {
+                /// Clear state and release reusable buffers when required.
                 fn clear(ctx: *anyopaque) ChildBuilderError!void {
                     const ptr: *IntBuilder = @ptrCast(@alignCast(ctx));
                     ptr.clear() catch return ChildBuilderError.ClearFailed;
@@ -972,23 +1034,27 @@ test "struct builder reset child failure leaves parent unchanged" {
         .{
             .ctx = &child_builder,
             .finishFn = struct {
+                /// Finalize builder state and return an immutable array reference.
                 fn finish(ctx: *anyopaque) ChildBuilderError!ArrayRef {
                     const ptr: *IntBuilder = @ptrCast(@alignCast(ctx));
                     return ptr.finish() catch ChildBuilderError.FinishFailed;
                 }
             }.finish,
             .lenFn = struct {
+                /// Return the logical length.
                 fn len(ctx: *anyopaque) usize {
                     const ptr: *IntBuilder = @ptrCast(@alignCast(ctx));
                     return ptr.len;
                 }
             }.len,
             .resetFn = struct {
+                /// Reset state while retaining reusable capacity when possible.
                 fn reset(_: *anyopaque) ChildBuilderError!void {
                     return ChildBuilderError.ResetFailed;
                 }
             }.reset,
             .clearFn = struct {
+                /// Clear state and release reusable buffers when required.
                 fn clear(ctx: *anyopaque) ChildBuilderError!void {
                     const ptr: *IntBuilder = @ptrCast(@alignCast(ctx));
                     ptr.clear() catch return ChildBuilderError.ClearFailed;
@@ -1024,24 +1090,28 @@ test "struct builder clear child failure leaves parent unchanged" {
         .{
             .ctx = &child_builder,
             .finishFn = struct {
+                /// Finalize builder state and return an immutable array reference.
                 fn finish(ctx: *anyopaque) ChildBuilderError!ArrayRef {
                     const ptr: *IntBuilder = @ptrCast(@alignCast(ctx));
                     return ptr.finish() catch ChildBuilderError.FinishFailed;
                 }
             }.finish,
             .lenFn = struct {
+                /// Return the logical length.
                 fn len(ctx: *anyopaque) usize {
                     const ptr: *IntBuilder = @ptrCast(@alignCast(ctx));
                     return ptr.len;
                 }
             }.len,
             .resetFn = struct {
+                /// Reset state while retaining reusable capacity when possible.
                 fn reset(ctx: *anyopaque) ChildBuilderError!void {
                     const ptr: *IntBuilder = @ptrCast(@alignCast(ctx));
                     ptr.reset() catch return ChildBuilderError.ResetFailed;
                 }
             }.reset,
             .clearFn = struct {
+                /// Clear state and release reusable buffers when required.
                 fn clear(_: *anyopaque) ChildBuilderError!void {
                     return ChildBuilderError.ClearFailed;
                 }
@@ -1078,23 +1148,27 @@ test "struct builder finishFromChildrenReset does not partially recycle on child
         .{
             .ctx = &child_builder,
             .finishFn = struct {
+                /// Finalize builder state and return an immutable array reference.
                 fn finish(ctx: *anyopaque) ChildBuilderError!ArrayRef {
                     const ptr: *IntBuilder = @ptrCast(@alignCast(ctx));
                     return ptr.finish() catch ChildBuilderError.FinishFailed;
                 }
             }.finish,
             .lenFn = struct {
+                /// Return the logical length.
                 fn len(ctx: *anyopaque) usize {
                     const ptr: *IntBuilder = @ptrCast(@alignCast(ctx));
                     return ptr.len;
                 }
             }.len,
             .resetFn = struct {
+                /// Reset state while retaining reusable capacity when possible.
                 fn reset(_: *anyopaque) ChildBuilderError!void {
                     return ChildBuilderError.ResetFailed;
                 }
             }.reset,
             .clearFn = struct {
+                /// Clear state and release reusable buffers when required.
                 fn clear(ctx: *anyopaque) ChildBuilderError!void {
                     const ptr: *IntBuilder = @ptrCast(@alignCast(ctx));
                     ptr.clear() catch return ChildBuilderError.ClearFailed;
@@ -1127,24 +1201,28 @@ test "struct builder finishFromChildrenClear does not partially recycle on child
         .{
             .ctx = &child_builder,
             .finishFn = struct {
+                /// Finalize builder state and return an immutable array reference.
                 fn finish(ctx: *anyopaque) ChildBuilderError!ArrayRef {
                     const ptr: *IntBuilder = @ptrCast(@alignCast(ctx));
                     return ptr.finish() catch ChildBuilderError.FinishFailed;
                 }
             }.finish,
             .lenFn = struct {
+                /// Return the logical length.
                 fn len(ctx: *anyopaque) usize {
                     const ptr: *IntBuilder = @ptrCast(@alignCast(ctx));
                     return ptr.len;
                 }
             }.len,
             .resetFn = struct {
+                /// Reset state while retaining reusable capacity when possible.
                 fn reset(ctx: *anyopaque) ChildBuilderError!void {
                     const ptr: *IntBuilder = @ptrCast(@alignCast(ctx));
                     ptr.reset() catch return ChildBuilderError.ResetFailed;
                 }
             }.reset,
             .clearFn = struct {
+                /// Clear state and release reusable buffers when required.
                 fn clear(_: *anyopaque) ChildBuilderError!void {
                     return ChildBuilderError.ClearFailed;
                 }

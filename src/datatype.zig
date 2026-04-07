@@ -1,5 +1,7 @@
 const std = @import("std");
 
+// Arrow logical/physical type definitions and shared schema metadata structs.
+
 pub const TypeId = enum(u8) {
     null = 0,
     bool = 1,
@@ -91,6 +93,7 @@ pub const IntType = struct {
     bit_width: u8,
     signed: bool,
 
+    /// Execute fromTypeId logic for this type.
     pub fn fromTypeId(id: TypeId) ?IntType {
         return switch (id) {
             .int8 => .{ .bit_width = 8, .signed = true },
@@ -105,6 +108,7 @@ pub const IntType = struct {
         };
     }
 
+    /// Execute toTypeId logic for this type.
     pub fn toTypeId(self: IntType) ?TypeId {
         return switch (self.bit_width) {
             8 => if (self.signed) .int8 else .uint8,
@@ -148,6 +152,7 @@ pub const Field = struct {
     nullable: bool = true,
     metadata: ?[]const KeyValue = null,
 
+    /// Initialize and return a new instance.
     pub fn init(name: []const u8, data_type: *const DataType) Field {
         return .{ .name = name, .data_type = data_type };
     }
@@ -247,10 +252,12 @@ pub const DataType = union(TypeId) {
     decimal64: DecimalParams,
     max_id: void,
 
+    /// Execute id logic for this type.
     pub fn id(self: DataType) TypeId {
         return std.meta.activeTag(self);
     }
 
+    /// Execute name logic for this type.
     pub fn name(self: DataType) []const u8 {
         return switch (self) {
             .null => "null",
