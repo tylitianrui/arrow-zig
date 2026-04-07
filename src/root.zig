@@ -66,16 +66,34 @@ pub const Float32Builder = array.Float32Builder;
 pub const Float64Builder = array.Float64Builder;
 pub const BooleanArray = array.BooleanArray;
 pub const StringArray = array.StringArray;
+pub const LargeStringArray = array.LargeStringArray;
 pub const BinaryArray = array.BinaryArray;
+pub const LargeBinaryArray = array.LargeBinaryArray;
 pub const BooleanBuilder = array.BooleanBuilder;
 pub const StringBuilder = array.StringBuilder;
+pub const LargeStringBuilder = array.LargeStringBuilder;
 pub const BinaryBuilder = array.BinaryBuilder;
+pub const LargeBinaryBuilder = array.LargeBinaryBuilder;
 pub const ListArray = array.ListArray;
 pub const LargeListArray = array.LargeListArray;
 pub const ListBuilder = array.ListBuilder;
 pub const LargeListBuilder = array.LargeListBuilder;
 pub const StructArray = array.StructArray;
 pub const StructBuilder = array.StructBuilder;
+pub const FixedSizeBinaryArray = array.FixedSizeBinaryArray;
+pub const FixedSizeBinaryBuilder = array.FixedSizeBinaryBuilder;
+pub const FixedSizeListArray = array.FixedSizeListArray;
+pub const FixedSizeListBuilder = array.FixedSizeListBuilder;
+pub const DictionaryArray = array.DictionaryArray;
+pub const DictionaryBuilder = array.DictionaryBuilder;
+pub const MapArray = array.MapArray;
+pub const SparseUnionArray = array.SparseUnionArray;
+pub const DenseUnionArray = array.DenseUnionArray;
+pub const RunEndEncodedArray = array.RunEndEncodedArray;
+pub const MapBuilder = array.MapBuilder;
+pub const SparseUnionBuilder = array.SparseUnionBuilder;
+pub const DenseUnionBuilder = array.DenseUnionBuilder;
+pub const RunEndEncodedBuilder = array.RunEndEncodedBuilder;
 
 // Pull buffer tests into the root test target.
 test {
@@ -92,4 +110,7 @@ test {
     _ = @import("array/binary_array.zig");
     _ = @import("array/list_array.zig");
     _ = @import("array/struct_array.zig");
+    _ = @import("array/fixed_size_array.zig");
+    _ = @import("array/dictionary_array.zig");
+    _ = @import("array/advanced_array.zig");
 }

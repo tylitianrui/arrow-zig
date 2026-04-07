@@ -18,37 +18,37 @@ Goal: Build a production-usable Zig implementation of Apache Arrow core memory m
 ## Phase A - Core Type Coverage Completion
 
 ### A1. LargeString / LargeBinary
-- [ ] A1.1 Add LargeStringArray view type.
-- [ ] A1.2 Add LargeBinaryArray view type.
-- [ ] A1.3 Add LargeStringBuilder (i64 offsets).
-- [ ] A1.4 Add LargeBinaryBuilder (i64 offsets).
-- [ ] A1.5 Add finishReset/finishClear parity for large builders.
-- [ ] A1.6 Export new types from src/array/array.zig.
-- [ ] A1.7 Export new types from src/root.zig.
-- [ ] A1.8 Add unit tests: append/appendNull/finish/slice.
+- [x] A1.1 Add LargeStringArray view type.
+- [x] A1.2 Add LargeBinaryArray view type.
+- [x] A1.3 Add LargeStringBuilder (i64 offsets).
+- [x] A1.4 Add LargeBinaryBuilder (i64 offsets).
+- [x] A1.5 Add finishReset/finishClear parity for large builders.
+- [x] A1.6 Export new types from src/array/array.zig.
+- [x] A1.7 Export new types from src/root.zig.
+- [x] A1.8 Add unit tests: append/appendNull/finish/slice.
 
 ### A2. FixedSizeBinary / FixedSizeList
-- [ ] A2.1 Add FixedSizeBinaryArray view type.
-- [ ] A2.2 Add FixedSizeBinaryBuilder with width checks.
-- [ ] A2.3 Add FixedSizeListArray view type.
-- [ ] A2.4 Add FixedSizeListBuilder with list_size invariants.
-- [ ] A2.5 Add unit tests for width/list_size mismatch errors.
-- [ ] A2.6 Add slice behavior tests for both types.
-- [ ] A2.7 Export from src/array/array.zig and src/root.zig.
+- [x] A2.1 Add FixedSizeBinaryArray view type.
+- [x] A2.2 Add FixedSizeBinaryBuilder with width checks.
+- [x] A2.3 Add FixedSizeListArray view type.
+- [x] A2.4 Add FixedSizeListBuilder with list_size invariants.
+- [x] A2.5 Add unit tests for width/list_size mismatch errors.
+- [x] A2.6 Add slice behavior tests for both types.
+- [x] A2.7 Export from src/array/array.zig and src/root.zig.
 
 ### A3. Dictionary
-- [ ] A3.1 Add DictionaryArray view (indices + dictionary values).
-- [ ] A3.2 Add DictionaryBuilder for index types (int8/int16/int32/int64 at minimum).
-- [ ] A3.3 Enforce dictionary presence/type invariants at finish time.
-- [ ] A3.4 Add tests for invalid dictionary/missing dictionary.
-- [ ] A3.5 Add tests for slicing dictionary arrays.
+- [x] A3.1 Add DictionaryArray view (indices + dictionary values).
+- [x] A3.2 Add DictionaryBuilder for index types (int8/int16/int32/int64 at minimum).
+- [x] A3.3 Enforce dictionary presence/type invariants at finish time.
+- [x] A3.4 Add tests for invalid dictionary/missing dictionary.
+- [x] A3.5 Add tests for slicing dictionary arrays.
 
 ### A4. Map / Union / RunEndEncoded
-- [ ] A4.1 Add MapArray view (offsets + struct child).
-- [ ] A4.2 Add SparseUnionArray and DenseUnionArray views.
-- [ ] A4.3 Add RunEndEncodedArray view.
-- [ ] A4.4 Add minimal builders for above or explicit constructor helpers.
-- [ ] A4.5 Add validation-focused tests for child counts and offsets.
+- [x] A4.1 Add MapArray view (offsets + struct child).
+- [x] A4.2 Add SparseUnionArray and DenseUnionArray views.
+- [x] A4.3 Add RunEndEncodedArray view.
+- [x] A4.4 Add minimal builders for above or explicit constructor helpers.
+- [x] A4.5 Add validation-focused tests for child counts and offsets.
 
 ### A5. Validation & Regression Suite Completion
 - [ ] A5.1 Add nullability invariant tests across all newly added builders.
@@ -106,8 +106,8 @@ Goal: Build a production-usable Zig implementation of Apache Arrow core memory m
 - [ ] C4.3 Define release checklist and semver rules.
 
 ## Immediate Next Sprint (Recommended)
-- [ ] S1. Complete A1.1-A1.8 (LargeString/LargeBinary full path).
-- [ ] S2. Complete A2.1-A2.7 (FixedSizeBinary/FixedSizeList full path).
+- [x] S1. Complete A1.1-A1.8 (LargeString/LargeBinary full path).
+- [x] S2. Complete A2.1-A2.7 (FixedSizeBinary/FixedSizeList full path).
 - [ ] S3. Start B1.1-B1.3 (Schema/Field metadata serialization scaffold).
 
 ## Definition of Done (Per Task)

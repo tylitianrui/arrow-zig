@@ -15,6 +15,7 @@ pub const ArrayRef = array_ref.ArrayRef;
 pub const BuilderState = builder_state.BuilderState;
 
 const STRING_TYPE = DataType{ .string = {} };
+const LARGE_STRING_TYPE = DataType{ .large_string = {} };
 
 /// Variable-length UTF-8 array view.
 pub const StringArray = struct {
@@ -33,6 +34,28 @@ pub const StringArray = struct {
         std.debug.assert(self.data.buffers.len >= 3);
 
         const offsets = self.data.buffers[1].typedSlice(i32);
+        const start = offsets[self.data.offset + i];
+        const end = offsets[self.data.offset + i + 1];
+        return self.data.buffers[2].data[@intCast(start)..@intCast(end)];
+    }
+};
+
+pub const LargeStringArray = struct {
+    data: *const ArrayData,
+
+    pub fn len(self: LargeStringArray) usize {
+        return self.data.length;
+    }
+
+    pub fn isNull(self: LargeStringArray, i: usize) bool {
+        return self.data.isNull(i);
+    }
+
+    pub fn value(self: LargeStringArray, i: usize) []const u8 {
+        std.debug.assert(i < self.data.length);
+        std.debug.assert(self.data.buffers.len >= 3);
+
+        const offsets = self.data.buffers[1].typedSlice(i64);
         const start = offsets[self.data.offset + i];
         const end = offsets[self.data.offset + i + 1];
         return self.data.buffers[2].data[@intCast(start)..@intCast(end)];
@@ -186,6 +209,165 @@ pub const StringBuilder = struct {
         try self.reset();
         return finished_ref;
     }
+
+    pub fn finishClear(self: *StringBuilder) !ArrayRef {
+        const finished_ref = try self.finish();
+        try self.clear();
+        return finished_ref;
+    }
+};
+
+pub const LargeStringBuilder = struct {
+    allocator: std.mem.Allocator,
+    offsets: OwnedBuffer,
+    data: OwnedBuffer,
+    validity: ?OwnedBuffer = null,
+    buffers: [3]SharedBuffer = undefined,
+    len: usize = 0,
+    null_count: usize = 0,
+    data_len: usize = 0,
+    state: BuilderState = .ready,
+
+    pub fn init(allocator: std.mem.Allocator, capacity: usize, data_capacity: usize) !LargeStringBuilder {
+        const offsets = try OwnedBuffer.init(allocator, (capacity + 1) * @sizeOf(i64));
+        const offsets_slice = std.mem.bytesAsSlice(i64, offsets.data);
+        offsets_slice[0] = 0;
+        return .{
+            .allocator = allocator,
+            .offsets = offsets,
+            .data = try OwnedBuffer.init(allocator, data_capacity),
+        };
+    }
+
+    pub fn deinit(self: *LargeStringBuilder) void {
+        self.offsets.deinit();
+        self.data.deinit();
+        if (self.validity) |*valid| valid.deinit();
+    }
+
+    pub fn reset(self: *LargeStringBuilder) BuilderError!void {
+        if (self.state != .finished) return BuilderError.NotFinished;
+        if (!self.offsets.isEmpty()) {
+            const offsets_slice = std.mem.bytesAsSlice(i64, self.offsets.data);
+            offsets_slice[0] = 0;
+        }
+        self.len = 0;
+        self.null_count = 0;
+        self.data_len = 0;
+        self.state = .ready;
+    }
+
+    pub fn clear(self: *LargeStringBuilder) BuilderError!void {
+        if (self.state != .finished) return BuilderError.NotFinished;
+        self.offsets.deinit();
+        self.data.deinit();
+        if (self.validity) |*valid| valid.deinit();
+        self.validity = null;
+        self.len = 0;
+        self.null_count = 0;
+        self.data_len = 0;
+        self.state = .ready;
+    }
+
+    fn ensureOffsetsCapacity(self: *LargeStringBuilder, needed_len: usize) !void {
+        const capacity = self.offsets.len() / @sizeOf(i64);
+        if (needed_len <= capacity) return;
+        const was_empty = capacity == 0;
+        try self.offsets.resize(needed_len * @sizeOf(i64));
+        if (was_empty) {
+            const offsets_slice = std.mem.bytesAsSlice(i64, self.offsets.data);
+            offsets_slice[0] = 0;
+        }
+    }
+
+    fn ensureDataCapacity(self: *LargeStringBuilder, needed_len: usize) !void {
+        if (needed_len <= self.data.len()) return;
+        try self.data.resize(needed_len);
+    }
+
+    fn ensureValidityForNull(self: *LargeStringBuilder, new_len: usize) !void {
+        if (self.validity == null) {
+            var buf = try initValidityAllValid(self.allocator, new_len);
+            bitmap.clearBit(buf.data[0..bitmap.byteLength(new_len)], new_len - 1);
+            self.validity = buf;
+            self.null_count += 1;
+            return;
+        }
+        var buf = &self.validity.?;
+        try ensureBitmapCapacity(buf, new_len);
+        bitmap.clearBit(buf.data[0..bitmap.byteLength(new_len)], new_len - 1);
+        self.null_count += 1;
+    }
+
+    fn setValidBit(self: *LargeStringBuilder, index: usize) !void {
+        if (self.validity == null) return;
+        var buf = &self.validity.?;
+        try ensureBitmapCapacity(buf, index + 1);
+        bitmap.setBit(buf.data[0..bitmap.byteLength(index + 1)], index);
+    }
+
+    const BuilderError = error{ AlreadyFinished, NotFinished, OffsetOverflow };
+
+    pub fn append(self: *LargeStringBuilder, value: []const u8) !void {
+        if (self.state == .finished) return BuilderError.AlreadyFinished;
+        const next_len = self.len + 1;
+        try self.ensureOffsetsCapacity(next_len + 1);
+        try self.ensureDataCapacity(self.data_len + value.len);
+        @memcpy(self.data.data[self.data_len .. self.data_len + value.len], value);
+        self.data_len += value.len;
+
+        const cast_offset = std.math.cast(i64, self.data_len) orelse return BuilderError.OffsetOverflow;
+        const offsets_slice = std.mem.bytesAsSlice(i64, self.offsets.data);
+        offsets_slice[next_len] = cast_offset;
+        try self.setValidBit(self.len);
+        self.len = next_len;
+    }
+
+    pub fn appendNull(self: *LargeStringBuilder) !void {
+        if (self.state == .finished) return BuilderError.AlreadyFinished;
+        const next_len = self.len + 1;
+        try self.ensureOffsetsCapacity(next_len + 1);
+        const cast_offset = std.math.cast(i64, self.data_len) orelse return BuilderError.OffsetOverflow;
+        const offsets_slice = std.mem.bytesAsSlice(i64, self.offsets.data);
+        offsets_slice[next_len] = cast_offset;
+        try self.ensureValidityForNull(next_len);
+        self.len = next_len;
+    }
+
+    pub fn finish(self: *LargeStringBuilder) !ArrayRef {
+        if (self.state == .finished) return BuilderError.AlreadyFinished;
+        const validity_buf = if (self.validity) |*buf| try buf.toShared(bitmap.byteLength(self.len)) else SharedBuffer.empty;
+        self.buffers[0] = validity_buf;
+        self.buffers[1] = try self.offsets.toShared((self.len + 1) * @sizeOf(i64));
+        self.buffers[2] = try self.data.toShared(self.data_len);
+
+        const buffers = try self.allocator.alloc(SharedBuffer, 3);
+        buffers[0] = self.buffers[0];
+        buffers[1] = self.buffers[1];
+        buffers[2] = self.buffers[2];
+
+        const data = ArrayData{
+            .data_type = LARGE_STRING_TYPE,
+            .length = self.len,
+            .null_count = self.null_count,
+            .buffers = buffers,
+        };
+
+        self.state = .finished;
+        return ArrayRef.fromOwnedUnsafe(self.allocator, data);
+    }
+
+    pub fn finishReset(self: *LargeStringBuilder) !ArrayRef {
+        const finished_ref = try self.finish();
+        try self.reset();
+        return finished_ref;
+    }
+
+    pub fn finishClear(self: *LargeStringBuilder) !ArrayRef {
+        const finished_ref = try self.finish();
+        try self.clear();
+        return finished_ref;
+    }
 };
 
 test "string array reads slices" {
@@ -224,4 +406,55 @@ test "string builder appends slices" {
     try std.testing.expectEqualStrings("zig", built.value(0));
     try std.testing.expect(built.isNull(1));
     try std.testing.expectEqualStrings("lang", built.value(2));
+}
+
+test "large string array reads slices" {
+    const dtype = DataType{ .large_string = {} };
+    const offsets = [_]i64{ 0, 3, 7 };
+    const data_bytes = "ziglang";
+    var offset_bytes: [offsets.len * @sizeOf(i64)]u8 align(buffer.ALIGNMENT) = undefined;
+    @memcpy(offset_bytes[0..], std.mem.sliceAsBytes(offsets[0..]));
+    const data = ArrayData{
+        .data_type = dtype,
+        .length = 2,
+        .buffers = &[_]SharedBuffer{
+            SharedBuffer.empty,
+            SharedBuffer.fromSlice(offset_bytes[0..]),
+            SharedBuffer.fromSlice(data_bytes),
+        },
+    };
+
+    const array = LargeStringArray{ .data = &data };
+    try std.testing.expectEqualStrings("zig", array.value(0));
+    try std.testing.expectEqualStrings("lang", array.value(1));
+}
+
+test "large string builder appends slices and supports slice" {
+    var builder = try LargeStringBuilder.init(std.testing.allocator, 2, 8);
+    defer builder.deinit();
+
+    try builder.append("zig");
+    try builder.appendNull();
+    try builder.append("lang");
+
+    var array_handle = try builder.finishReset();
+    defer array_handle.release();
+    const built = LargeStringArray{ .data = array_handle.data() };
+    try std.testing.expectEqual(@as(usize, 3), built.len());
+    try std.testing.expectEqualStrings("zig", built.value(0));
+    try std.testing.expect(built.isNull(1));
+    try std.testing.expectEqualStrings("lang", built.value(2));
+
+    var sliced = try array_handle.slice(1, 2);
+    defer sliced.release();
+    const sliced_view = LargeStringArray{ .data = sliced.data() };
+    try std.testing.expect(sliced_view.isNull(0));
+    try std.testing.expectEqualStrings("lang", sliced_view.value(1));
+
+    try builder.append("more");
+    var second = try builder.finishClear();
+    defer second.release();
+    const second_view = LargeStringArray{ .data = second.data() };
+    try std.testing.expectEqual(@as(usize, 1), second_view.len());
+    try std.testing.expectEqualStrings("more", second_view.value(0));
 }
