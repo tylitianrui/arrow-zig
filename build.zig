@@ -31,6 +31,20 @@ pub fn build(b: *std.Build) !void {
         "flatc-zig",
     );
 
+    // Work around a flatc-zig Windows path bug where generated lib.zig can use
+    // backslashes inside @import string literals.
+    const fix_flatc_lib = b.addExecutable(.{
+        .name = "fix-flatc-lib",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/fix_flatc_lib.zig"),
+            .target = b.graph.host,
+            .optimize = .ReleaseSafe,
+        }),
+    });
+    const run_fix_flatc_lib = b.addRunArtifact(fix_flatc_lib);
+    run_fix_flatc_lib.step.dependOn(&gen_step.step);
+    run_fix_flatc_lib.addFileArg(gen_step.module.root_source_file.?);
+
     const arrow_fbs_module = b.createModule(.{
         .root_source_file = gen_step.module.root_source_file,
         .imports = &.{.{ .name = "flatbufferz", .module = fbz_dep.module("flatbufferz") }},
@@ -49,7 +63,7 @@ pub fn build(b: *std.Build) !void {
     test_module.addImport("arrow_fbs", arrow_fbs_module);
 
     const tests = b.addTest(.{ .root_module = test_module });
-    tests.step.dependOn(&gen_step.step);
+    tests.step.dependOn(&run_fix_flatc_lib.step);
 
     // Discover example files in the `examples` directory and wire them into the build.
     const examples_dir = b.path("examples");
@@ -82,6 +96,7 @@ pub fn build(b: *std.Build) !void {
                 .optimize = optimize,
             }),
         });
+        exe.step.dependOn(&run_fix_flatc_lib.step);
 
         exe.root_module.addImport("zarrow", b.modules.get("zarrow").?);
 
@@ -128,6 +143,7 @@ pub fn build(b: *std.Build) !void {
                 .optimize = optimize,
             }),
         });
+        bench_exe.step.dependOn(&run_fix_flatc_lib.step);
         bench_exe.root_module.addImport("zarrow", b.modules.get("zarrow").?);
 
         const run_bench = b.addRunArtifact(bench_exe);
