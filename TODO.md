@@ -1,46 +1,117 @@
 # zarrow TODO
 
-Goal: Build a Zig ecosystem for Apache Arrow (core + IPC + tooling + integrations).
+Goal: Build a production-usable Zig implementation of Apache Arrow core memory model, then incrementally add IPC/interop/compute.
 
-## Phase 0 - Project basics
-- Define project scope and non-goals for the first release.
-- Expand README with usage, build/test commands, and module overview.
-- Establish semantic versioning and release process.
-- Add a CONTRIBUTING guide and code style notes.
+## Done (Code-Verified)
+- [x] D1. Primitive numeric arrays/builders implemented.
+- [x] D2. Boolean array/builder implemented.
+- [x] D3. String/Binary arrays/builders implemented.
+- [x] D4. List/LargeList arrays/builders implemented.
+- [x] D5. Struct array/builder implemented (including child-builder coordination).
+- [x] D6. Shared ownership model implemented (SharedBuffer/OwnedBuffer + ArrayRef retain/release).
+- [x] D7. Array slicing path implemented and tested.
+- [x] D8. Schema/DataType surface is exposed from root.
+- [x] D9. RecordBatch implemented (init/deinit/column/numRows/numColumns/slice).
+- [x] D10. RecordBatchBuilder implemented (set/setByName/finish/reset/clear).
+- [x] D11. Benchmarks framework implemented (benchmark/smoke/full/matrix/ci).
 
-## Phase 1 - Core data model
-- Finish ArrayData validation rules and tests for all supported types.
-- Add large types: LargeString, LargeBinary, LargeList (+ builders).
-- Add fixed-size types: FixedSizeBinary, FixedSizeList (+ builders).
-- Add Date/Time/Timestamp/Duration/Interval arrays and builders.
-- Add Decimal (32/64/128/256) arrays and builders.
-- Add Dictionary arrays (index + values) and builders.
-- Add Struct, List, Map, Union, RunEndEncoded arrays.
+## Phase A - Core Type Coverage Completion
 
-## Phase 2 - IPC and memory format
-- Implement Schema/Field metadata serialization.
-- Implement Arrow IPC: stream + file format (writer).
-- Implement IPC reader with zero-copy buffers.
-- Add buffer alignment and size validation for IPC payloads.
+### A1. LargeString / LargeBinary
+- [ ] A1.1 Add LargeStringArray view type.
+- [ ] A1.2 Add LargeBinaryArray view type.
+- [ ] A1.3 Add LargeStringBuilder (i64 offsets).
+- [ ] A1.4 Add LargeBinaryBuilder (i64 offsets).
+- [ ] A1.5 Add finishReset/finishClear parity for large builders.
+- [ ] A1.6 Export new types from src/array/array.zig.
+- [ ] A1.7 Export new types from src/root.zig.
+- [ ] A1.8 Add unit tests: append/appendNull/finish/slice.
 
-## Phase 3 - Compute + kernels
-- Implement basic compute kernels (filter, take, cast, compare).
-- Add arithmetic kernels for primitive types.
-- Add string/binary kernels (concat, length, slice).
-- Add null handling utilities and bitmap ops.
+### A2. FixedSizeBinary / FixedSizeList
+- [ ] A2.1 Add FixedSizeBinaryArray view type.
+- [ ] A2.2 Add FixedSizeBinaryBuilder with width checks.
+- [ ] A2.3 Add FixedSizeListArray view type.
+- [ ] A2.4 Add FixedSizeListBuilder with list_size invariants.
+- [ ] A2.5 Add unit tests for width/list_size mismatch errors.
+- [ ] A2.6 Add slice behavior tests for both types.
+- [ ] A2.7 Export from src/array/array.zig and src/root.zig.
 
-## Phase 4 - Interop + storage
-- Add C Data Interface (FFI) support.
-- Add Parquet read/write (optional, if scope allows).
-- Add CSV/JSON adapters for quick import/export.
+### A3. Dictionary
+- [ ] A3.1 Add DictionaryArray view (indices + dictionary values).
+- [ ] A3.2 Add DictionaryBuilder for index types (int8/int16/int32/int64 at minimum).
+- [ ] A3.3 Enforce dictionary presence/type invariants at finish time.
+- [ ] A3.4 Add tests for invalid dictionary/missing dictionary.
+- [ ] A3.5 Add tests for slicing dictionary arrays.
 
-## Phase 5 - UX and tooling
-- Add examples for all array types/builders.
-- Add benchmarks for builders + IPC read/write.
-- Add fuzz tests for ArrayData validation and IPC parsing.
+### A4. Map / Union / RunEndEncoded
+- [ ] A4.1 Add MapArray view (offsets + struct child).
+- [ ] A4.2 Add SparseUnionArray and DenseUnionArray views.
+- [ ] A4.3 Add RunEndEncodedArray view.
+- [ ] A4.4 Add minimal builders for above or explicit constructor helpers.
+- [ ] A4.5 Add validation-focused tests for child counts and offsets.
 
-## Near-term milestones (suggested)
-1. Complete validation and tests for current arrays.
-2. Add LargeString/LargeBinary/FixedSizeBinary + builders.
-3. Add IPC writer for Schema + RecordBatch (no dictionary).
-4. Add IPC reader for same subset.
+### A5. Validation & Regression Suite Completion
+- [ ] A5.1 Add nullability invariant tests across all newly added builders.
+- [ ] A5.2 Add length/type mismatch tests for RecordBatch with new types.
+- [ ] A5.3 Add stress tests for retain/release balance in nested arrays.
+- [ ] A5.4 Add slice consistency tests (offset + length + null_count semantics).
+- [ ] A5.5 Ensure zig build test remains green for all targets in CI matrix.
+
+## Phase B - IPC MVP (Schema + RecordBatch)
+
+### B1. Metadata Serialization
+- [ ] B1.1 Implement Field metadata serialization.
+- [ ] B1.2 Implement Schema metadata serialization.
+- [ ] B1.3 Add deterministic ordering tests for metadata output.
+
+### B2. IPC Writer (MVP Subset)
+- [ ] B2.1 Implement stream header/footer writer.
+- [ ] B2.2 Write RecordBatch for primitive/boolean/string/binary/list/struct.
+- [ ] B2.3 Add alignment/padding logic for body buffers.
+- [ ] B2.4 Add writer golden tests for small fixtures.
+
+### B3. IPC Reader (MVP Subset)
+- [ ] B3.1 Implement stream message parser.
+- [ ] B3.2 Reconstruct Schema + RecordBatch from stream.
+- [ ] B3.3 Implement zero-copy path for compatible payloads.
+- [ ] B3.4 Add reader roundtrip tests vs writer output.
+
+### B4. IPC Robustness
+- [ ] B4.1 Add malformed header/message length tests.
+- [ ] B4.2 Add invalid offset/length payload tests.
+- [ ] B4.3 Add deterministic error mapping for parse failures.
+
+## Phase C - Interop and Hardening
+
+### C1. Arrow C Data Interface (FFI)
+- [ ] C1.1 Export Schema to C Data Interface.
+- [ ] C1.2 Export Array to C Data Interface.
+- [ ] C1.3 Import Schema from C Data Interface.
+- [ ] C1.4 Import Array from C Data Interface.
+- [ ] C1.5 Add smoke roundtrip tests.
+
+### C2. Fuzzing
+- [ ] C2.1 Add fuzz target for ArrayData.validateLayout.
+- [ ] C2.2 Add fuzz target for IPC reader message parsing.
+- [ ] C2.3 Seed corpus with malformed and edge payloads.
+
+### C3. Benchmark Reliability
+- [ ] C3.1 Add git_sha field to CSV benchmark output.
+- [ ] C3.2 Add timestamp field to CSV benchmark output.
+- [ ] C3.3 Add benchmark-ci parser sanity check script/test.
+
+### C4. Project Governance
+- [ ] C4.1 Add CONTRIBUTING.md.
+- [ ] C4.2 Add API stability policy (experimental vs stable sections).
+- [ ] C4.3 Define release checklist and semver rules.
+
+## Immediate Next Sprint (Recommended)
+- [ ] S1. Complete A1.1-A1.8 (LargeString/LargeBinary full path).
+- [ ] S2. Complete A2.1-A2.7 (FixedSizeBinary/FixedSizeList full path).
+- [ ] S3. Start B1.1-B1.3 (Schema/Field metadata serialization scaffold).
+
+## Definition of Done (Per Task)
+- [ ] T1. Code merged with unit tests.
+- [ ] T2. Public exports updated in src/root.zig.
+- [ ] T3. zig build test passes.
+- [ ] T4. If perf-sensitive, benchmark-smoke run attached.
