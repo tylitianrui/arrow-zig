@@ -68,6 +68,7 @@ pub const ArrayData = struct {
         std.debug.assert(i < self.length);
         if (self.null_count) |count| {
             if (count == 0) return false;
+            if (count == self.length) return true;
         }
         const validity_bitmap = self.validity() orelse return false;
         return !validity_bitmap.isValid(self.offset + i);

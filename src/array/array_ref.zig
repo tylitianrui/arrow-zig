@@ -170,17 +170,37 @@ pub const ArrayRef = struct {
     /// Create an ArrayRef by retaining shared buffers and child refs.
     pub fn fromBorrowed(allocator: std.mem.Allocator, layout: ArrayData) !ArrayRef {
         const buffers = try allocator.alloc(SharedBuffer, layout.buffers.len);
+        var buf_count: usize = 0;
+        errdefer {
+            var i: usize = 0;
+            while (i < buf_count) : (i += 1) {
+                var owned = buffers[i];
+                owned.release();
+            }
+            allocator.free(buffers);
+        }
         for (layout.buffers, 0..) |buf, i| {
             buffers[i] = buf.retain();
+            buf_count += 1;
         }
 
         const children = try allocator.alloc(ArrayRef, layout.children.len);
+        var child_count: usize = 0;
+        errdefer {
+            var i: usize = 0;
+            while (i < child_count) : (i += 1) {
+                children[i].release();
+            }
+            allocator.free(children);
+        }
         for (layout.children, 0..) |child, i| {
             children[i] = child.retain();
+            child_count += 1;
         }
 
         var dict_ref: ?ArrayRef = null;
         if (layout.dictionary) |dict| dict_ref = dict.retain();
+        errdefer if (dict_ref) |*owned| owned.release();
 
         var owned = layout;
         owned.buffers = buffers;
