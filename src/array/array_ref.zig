@@ -365,3 +365,50 @@ test "array ref slice is shallow for list_view" {
     try std.testing.expectEqual(@as(usize, 5), child_data.length);
     try std.testing.expectEqual(@as(usize, 0), child_data.offset);
 }
+
+test "array ref nested retain/release stress stays balanced" {
+    const allocator = std.testing.allocator;
+    const value_type = array_data.DataType{ .int32 = {} };
+    const field = datatype.Field{ .name = "item", .data_type = &value_type, .nullable = true };
+    const list_type = array_data.DataType{ .list = .{ .value_field = field } };
+
+    var child_values: [6 * @sizeOf(i32)]u8 align(buffer.ALIGNMENT) = undefined;
+    @memcpy(child_values[0..], std.mem.sliceAsBytes(&[_]i32{ 1, 2, 3, 4, 5, 6 }));
+    const child_layout = ArrayData{
+        .data_type = value_type,
+        .length = 6,
+        .buffers = &[_]SharedBuffer{ SharedBuffer.empty, SharedBuffer.fromSlice(child_values[0..]) },
+    };
+    var child_ref = try ArrayRef.fromBorrowed(allocator, child_layout);
+    defer child_ref.release();
+
+    const offsets = [_]i32{ 0, 2, 4, 6 };
+    var offset_bytes: [offsets.len * @sizeOf(i32)]u8 align(buffer.ALIGNMENT) = undefined;
+    @memcpy(offset_bytes[0..], std.mem.sliceAsBytes(offsets[0..]));
+
+    const buffers = try allocator.alloc(SharedBuffer, 2);
+    buffers[0] = SharedBuffer.empty;
+    buffers[1] = SharedBuffer.fromSlice(offset_bytes[0..]);
+
+    const children = try allocator.alloc(ArrayRef, 1);
+    children[0] = child_ref.retain();
+
+    var parent = try ArrayRef.fromOwnedUnsafe(allocator, .{
+        .data_type = list_type,
+        .length = 3,
+        .buffers = buffers,
+        .children = children,
+    });
+    defer parent.release();
+
+    var i: usize = 0;
+    while (i < 512) : (i += 1) {
+        var sliced = try parent.slice(1, 2);
+        var held = sliced.retain();
+        held.release();
+
+        var nested = try sliced.slice(0, 1);
+        nested.release();
+        sliced.release();
+    }
+}

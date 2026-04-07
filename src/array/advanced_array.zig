@@ -815,3 +815,53 @@ test "run end encoded builder and array basic path" {
     try std.testing.expectEqual(@as(i32, 100), a0.value(0));
     try std.testing.expectEqual(@as(i32, 200), a4.value(0));
 }
+
+test "map builder preserves nullability invariants" {
+    const allocator = std.testing.allocator;
+
+    const int_type = DataType{ .int32 = {} };
+    const key_field = Field{ .name = "key", .data_type = &int_type, .nullable = false };
+    const item_field = Field{ .name = "item", .data_type = &int_type, .nullable = true };
+
+    var key_builder = try @import("primitive_array.zig").PrimitiveBuilder(i32, DataType{ .int32 = {} }).init(allocator, 2);
+    defer key_builder.deinit();
+    try key_builder.append(1);
+    try key_builder.append(2);
+    var key_ref = try key_builder.finish();
+    defer key_ref.release();
+
+    var item_builder = try @import("primitive_array.zig").PrimitiveBuilder(i32, DataType{ .int32 = {} }).init(allocator, 2);
+    defer item_builder.deinit();
+    try item_builder.append(10);
+    try item_builder.append(20);
+    var item_ref = try item_builder.finish();
+    defer item_ref.release();
+
+    var entries_builder = @import("struct_array.zig").StructBuilder.init(allocator, &[_]Field{ key_field, item_field });
+    defer entries_builder.deinit();
+    try entries_builder.appendValid();
+    try entries_builder.appendValid();
+    var entries_ref = try entries_builder.finish(&[_]ArrayRef{ key_ref, item_ref });
+    defer entries_ref.release();
+
+    var map_builder = try MapBuilder.init(allocator, 2, key_field, item_field, false);
+    defer map_builder.deinit();
+    try map_builder.appendLen(2);
+    try map_builder.appendNull();
+
+    var out = try map_builder.finish(entries_ref);
+    defer out.release();
+
+    const map = MapArray{ .data = out.data() };
+    try std.testing.expectEqual(@as(usize, 2), map.len());
+    try std.testing.expect(!map.isNull(0));
+    try std.testing.expect(map.isNull(1));
+
+    var first = try map.value(0);
+    defer first.release();
+    try std.testing.expectEqual(@as(usize, 2), first.data().length);
+
+    var second = try map.value(1);
+    defer second.release();
+    try std.testing.expectEqual(@as(usize, 0), second.data().length);
+}

@@ -641,3 +641,26 @@ test "array data validateLayout rejects run_end_encoded nonmonotonic" {
 
     try std.testing.expectError(error.InvalidOffsets, data.validateLayout());
 }
+
+test "array data slice preserves offset length and recomputes null_count when needed" {
+    const dtype = DataType{ .int32 = {} };
+    var validity: [1]u8 = .{0b0000_1101}; // valid: [0,2,3], null: [1,4]
+    const data = ArrayData{
+        .data_type = dtype,
+        .length = 5,
+        .offset = 0,
+        .null_count = 2,
+        .buffers = &[_]SharedBuffer{SharedBuffer.fromSlice(validity[0..])},
+    };
+
+    var sliced = data.slice(1, 3);
+    try std.testing.expectEqual(@as(usize, 3), sliced.length);
+    try std.testing.expectEqual(@as(usize, 1), sliced.offset);
+    try std.testing.expectEqual(@as(?usize, null), sliced.null_count);
+
+    try std.testing.expect(sliced.isNull(0));
+    try std.testing.expect(!sliced.isNull(1));
+    try std.testing.expect(!sliced.isNull(2));
+    try std.testing.expectEqual(@as(usize, 1), sliced.nullCount());
+    try std.testing.expectEqual(@as(?usize, 1), sliced.null_count);
+}

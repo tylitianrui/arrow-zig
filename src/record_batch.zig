@@ -489,3 +489,51 @@ test "record batch builder reset before finish releases slots" {
 
     try std.testing.expectEqual(@as(usize, 1), batch.numRows());
 }
+
+test "record batch rejects new-type column mismatch" {
+    const allocator = std.testing.allocator;
+
+    const large_binary_type = @import("datatype.zig").DataType{ .large_binary = {} };
+    const fields = [_]Field{.{ .name = "payload", .data_type = &large_binary_type, .nullable = true }};
+
+    var binary_builder = try @import("array/binary_array.zig").BinaryBuilder.init(allocator, 2, 8);
+    defer binary_builder.deinit();
+    try binary_builder.append("ab");
+    try binary_builder.append("cd");
+    var binary_ref = try binary_builder.finish();
+    defer binary_ref.release();
+
+    try std.testing.expectError(
+        RecordBatchError.InvalidColumnType,
+        RecordBatch.init(allocator, .{ .fields = fields[0..] }, &[_]ArrayRef{binary_ref}),
+    );
+}
+
+test "record batch rejects new-type length mismatch" {
+    const allocator = std.testing.allocator;
+
+    const fsb_type = @import("datatype.zig").DataType{ .fixed_size_binary = .{ .byte_width = 2 } };
+    const large_string_type = @import("datatype.zig").DataType{ .large_string = {} };
+    const fields = [_]Field{
+        .{ .name = "k", .data_type = &fsb_type, .nullable = false },
+        .{ .name = "v", .data_type = &large_string_type, .nullable = true },
+    };
+
+    var fsb_builder = try @import("array/fixed_size_array.zig").FixedSizeBinaryBuilder.init(allocator, 2, 2);
+    defer fsb_builder.deinit();
+    try fsb_builder.append("aa");
+    try fsb_builder.append("bb");
+    var fsb_ref = try fsb_builder.finish();
+    defer fsb_ref.release();
+
+    var ls_builder = try @import("array/string_array.zig").LargeStringBuilder.init(allocator, 1, 4);
+    defer ls_builder.deinit();
+    try ls_builder.append("one");
+    var ls_ref = try ls_builder.finish();
+    defer ls_ref.release();
+
+    try std.testing.expectError(
+        RecordBatchError.InvalidColumnLength,
+        RecordBatch.init(allocator, .{ .fields = fields[0..] }, &[_]ArrayRef{ fsb_ref, ls_ref }),
+    );
+}

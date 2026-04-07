@@ -57,11 +57,11 @@ Goal: Build a production-usable Zig implementation of Apache Arrow core memory m
 
 ### A5. Validation & Regression Suite Completion
 
-- [ ] A5.1 Add nullability invariant tests across all newly added builders.
-- [ ] A5.2 Add length/type mismatch tests for RecordBatch with new types.
-- [ ] A5.3 Add stress tests for retain/release balance in nested arrays.
-- [ ] A5.4 Add slice consistency tests (offset + length + null_count semantics).
-- [ ] A5.5 Ensure zig build test remains green for all targets in CI matrix.
+- [x] A5.1 Add nullability invariant tests across all newly added builders.
+- [x] A5.2 Add length/type mismatch tests for RecordBatch with new types.
+- [x] A5.3 Add stress tests for retain/release balance in nested arrays.
+- [x] A5.4 Add slice consistency tests (offset + length + null_count semantics).
+- [x] A5.5 Ensure zig build test remains green for all targets in CI matrix.
 
 ## Phase B - IPC MVP (Schema + RecordBatch)
 
