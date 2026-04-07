@@ -113,12 +113,14 @@ pub fn StreamReader(comptime ReaderType: type) type {
 }
 
 const MessageWithBody = struct {
+    metadata: array_data.SharedBuffer,
     msg: fbs.MessageT,
     body_len: usize,
     body: ?array_data.SharedBuffer,
 
     fn deinit(self: *MessageWithBody, allocator: std.mem.Allocator) void {
         self.msg.deinit(allocator);
+        self.metadata.release();
         if (self.body) |*buf| buf.release();
     }
 };
@@ -128,17 +130,20 @@ fn readMessageOptional(self: anytype) (StreamError || fb.common.PackError || @Ty
     if (meta_len_opt == null) return null;
     const meta_len = meta_len_opt.?;
 
-    const meta_buf = try self.allocator.alloc(u8, meta_len);
-    defer self.allocator.free(meta_buf);
-    if (meta_len > 0) try self.reader.readNoEof(meta_buf);
+    var meta_buf_owned = try OwnedBuffer.init(self.allocator, meta_len);
+    errdefer meta_buf_owned.deinit();
+    if (meta_len > 0) try self.reader.readNoEof(meta_buf_owned.data[0..meta_len]);
+    var metadata = try meta_buf_owned.toShared(meta_len);
+    errdefer metadata.release();
     try format.skipPadding(self.reader, format.padLen(meta_len));
 
-    const msg = fbs.Message.GetRootAs(meta_buf, 0);
+    const msg = fbs.Message.GetRootAs(@constCast(metadata.data), 0);
     const opts: fb.common.PackOptions = .{ .allocator = self.allocator };
     const msg_t = try fbs.MessageT.Unpack(msg, opts);
     if (msg_t.version != .V5 and msg_t.version != .V4) {
         var tmp = msg_t;
         tmp.deinit(self.allocator);
+        metadata.release();
         return StreamError.InvalidMetadata;
     }
 
@@ -151,7 +156,7 @@ fn readMessageOptional(self: anytype) (StreamError || fb.common.PackError || @Ty
         body_shared = try body_buf.toShared(body_len);
     }
 
-    return .{ .msg = msg_t, .body_len = body_len, .body = body_shared };
+    return .{ .metadata = metadata, .msg = msg_t, .body_len = body_len, .body = body_shared };
 }
 
 fn readMessage(self: anytype) (StreamError || fb.common.PackError || @TypeOf(self.reader).Error || error{ EndOfStream, OutOfMemory })!MessageWithBody {
@@ -181,6 +186,7 @@ fn buildDataTypeFromFlatbuf(allocator: std.mem.Allocator, field_t: fbs.FieldT) (
     if (field_t.type == .NONE) return StreamError.UnsupportedType;
 
     const dtype = switch (field_t.type) {
+        .NONE => return StreamError.UnsupportedType,
         .Null => DataType{ .null = {} },
         .Bool => DataType{ .bool = {} },
         .Int => blk: {
@@ -201,7 +207,6 @@ fn buildDataTypeFromFlatbuf(allocator: std.mem.Allocator, field_t: fbs.FieldT) (
                 .HALF => DataType{ .half_float = {} },
                 .SINGLE => DataType{ .float = {} },
                 .DOUBLE => DataType{ .double = {} },
-                else => return StreamError.UnsupportedType,
             };
         },
         .Utf8 => DataType{ .string = {} },
@@ -232,6 +237,20 @@ fn buildDataTypeFromFlatbuf(allocator: std.mem.Allocator, field_t: fbs.FieldT) (
             }
             break :blk DataType{ .struct_ = .{ .fields = child_fields } };
         },
+        .Decimal,
+        .Date,
+        .Time,
+        .Timestamp,
+        .Interval,
+        .Union,
+        .Map,
+        .Duration,
+        .RunEndEncoded,
+        .BinaryView,
+        .Utf8View,
+        .ListView,
+        .LargeListView,
+        => return StreamError.UnsupportedType,
     };
 
     if (field_t.dictionary) |dict_t| {

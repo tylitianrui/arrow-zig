@@ -23,7 +23,7 @@ pub fn build(b: *std.Build) !void {
         fbz_dep.artifact("flatc-zig"),
         &.{
             "src/format/Message.fbs",
-            "src/format/Schema.fbs",
+            "src/format/schema.fbs",
             "src/format/Tensor.fbs",
             "src/format/SparseTensor.fbs",
         },
