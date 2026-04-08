@@ -110,7 +110,8 @@ pub fn StreamWriter(comptime WriterType: type) type {
         }
 
         pub fn writeEnd(self: *Self) !void {
-            try format.writeInt(self.writer, u32, 0);
+            // Emit EOS as continuation marker + 0-length metadata (8 bytes).
+            try format.writeMessageLength(self.writer, 0);
         }
     };
 }
@@ -146,7 +147,7 @@ fn buildSchemaT(allocator: std.mem.Allocator, schema: Schema) WriterError!fbs.Sc
     return .{
         .endianness = .Little,
         .fields = fields,
-        .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0),
+        .custom_metadata = try buildCustomMetadataT(allocator, schema.metadata),
         .features = try std.ArrayList(i64).initCapacity(allocator, 0),
     };
 }
@@ -177,8 +178,32 @@ fn buildFieldT(allocator: std.mem.Allocator, field: Field) WriterError!fbs.Field
         .type = type_t,
         .dictionary = null,
         .children = children,
-        .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0),
+        .custom_metadata = try buildCustomMetadataT(allocator, field.metadata),
     };
+}
+
+fn buildCustomMetadataT(allocator: std.mem.Allocator, metadata: ?[]const datatype.KeyValue) WriterError!std.ArrayList(fbs.KeyValueT) {
+    const kvs = metadata orelse return std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0);
+    if (kvs.len == 0) return std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0);
+
+    const sorted = try allocator.dupe(datatype.KeyValue, kvs);
+    defer allocator.free(sorted);
+    std.sort.pdq(datatype.KeyValue, sorted, {}, lessThanKeyValue);
+
+    var out = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, sorted.len);
+    for (sorted) |kv| {
+        try out.append(allocator, .{
+            .key = kv.key,
+            .value = kv.value,
+        });
+    }
+    return out;
+}
+
+fn lessThanKeyValue(_: void, a: datatype.KeyValue, b: datatype.KeyValue) bool {
+    const key_order = std.mem.order(u8, a.key, b.key);
+    if (key_order != .eq) return key_order == .lt;
+    return std.mem.order(u8, a.value, b.value) == .lt;
 }
 
 fn buildTypeT(allocator: std.mem.Allocator, dt: DataType) WriterError!fbs.TypeT {
@@ -251,4 +276,53 @@ fn appendArrayMeta(
 fn computeNullCount(data: *const ArrayData) usize {
     const validity = data.validity() orelse return 0;
     return validity.countNulls();
+}
+
+fn parseGoldenHexCsv(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
+    var out = std.ArrayList(u8){};
+    defer out.deinit(allocator);
+
+    var it = std.mem.tokenizeAny(u8, text, ", \n\r\t");
+    while (it.next()) |token| {
+        const digits = if (std.mem.startsWith(u8, token, "0x") or std.mem.startsWith(u8, token, "0X")) token[2..] else token;
+        if (digits.len == 0) continue;
+        if (digits.len != 2) return error.InvalidFixtureFormat;
+        try out.append(allocator, try std.fmt.parseInt(u8, digits, 16));
+    }
+
+    return out.toOwnedSlice(allocator);
+}
+
+test "ipc writer stream output matches golden fixture" {
+    const allocator = std.testing.allocator;
+
+    const int_type = DataType{ .int32 = {} };
+    const fields = [_]Field{
+        .{ .name = "id", .data_type = &int_type, .nullable = false },
+    };
+    const schema = Schema{ .fields = fields[0..] };
+
+    var builder = try @import("../array/primitive_array.zig").PrimitiveBuilder(i32, DataType{ .int32 = {} }).init(allocator, 2);
+    defer builder.deinit();
+    try builder.append(1);
+    try builder.append(2);
+    var col_ref = try builder.finish();
+    defer col_ref.release();
+
+    var batch = try RecordBatch.init(allocator, schema, &[_]ArrayRef{col_ref});
+    defer batch.deinit();
+
+    var out = std.array_list.Managed(u8).init(allocator);
+    defer out.deinit();
+
+    var writer = StreamWriter(@TypeOf(out.writer())).init(allocator, out.writer());
+    try writer.writeSchema(schema);
+    try writer.writeRecordBatch(batch);
+    try writer.writeEnd();
+
+    const golden_text = @embedFile("testdata/writer_simple_stream.hex");
+    const expected = try parseGoldenHexCsv(allocator, golden_text);
+    defer allocator.free(expected);
+
+    try std.testing.expectEqualSlices(u8, expected, out.items);
 }

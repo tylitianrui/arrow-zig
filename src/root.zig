@@ -107,6 +107,7 @@ test {
     _ = @import("datatype.zig");
     _ = @import("schema.zig");
     _ = @import("record_batch.zig");
+    _ = @import("ipc/stream_writer.zig");
     _ = @import("ipc/stream_reader.zig");
     _ = @import("array/array.zig");
     _ = @import("array/array_data.zig");

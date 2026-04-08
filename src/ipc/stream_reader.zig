@@ -27,6 +27,7 @@ const fbs = struct {
     const MetadataVersion = arrow_fbs.org_apache_arrow_flatbuf_MetadataVersion.MetadataVersion;
     const SchemaT = arrow_fbs.org_apache_arrow_flatbuf_Schema.SchemaT;
     const FieldT = arrow_fbs.org_apache_arrow_flatbuf_Field.FieldT;
+    const KeyValueT = arrow_fbs.org_apache_arrow_flatbuf_KeyValue.KeyValueT;
     const TypeT = arrow_fbs.org_apache_arrow_flatbuf_Type.TypeT;
     const DictionaryEncodingT = arrow_fbs.org_apache_arrow_flatbuf_DictionaryEncoding.DictionaryEncodingT;
     const Endianness = arrow_fbs.org_apache_arrow_flatbuf_Endianness.Endianness;
@@ -154,7 +155,9 @@ fn readMessageOptional(self: anytype) (StreamError || fb.common.PackError || @Ty
         errdefer body_buf.deinit();
         try self.reader.readNoEof(body_buf.data[0..body_len]);
         body_shared = try body_buf.toShared(body_len);
+        try format.skipPadding(self.reader, format.padLen(body_len));
     }
+    try format.skipPadding(self.reader, format.padLen(body_len));
 
     return .{ .metadata = metadata, .msg = msg_t, .body_len = body_len, .body = body_shared };
 }
@@ -171,7 +174,11 @@ fn buildSchemaFromFlatbuf(allocator: std.mem.Allocator, schema_t: *fbs.SchemaT) 
     for (schema_t.fields.items, 0..) |field_t, i| {
         fields[i] = try buildFieldFromFlatbuf(allocator, field_t);
     }
-    return .{ .fields = fields, .endianness = .little, .metadata = null };
+    return .{
+        .fields = fields,
+        .endianness = .little,
+        .metadata = try buildMetadataFromFlatbuf(allocator, schema_t.custom_metadata.items),
+    };
 }
 
 fn buildFieldFromFlatbuf(allocator: std.mem.Allocator, field_t: fbs.FieldT) (StreamError || error{OutOfMemory})!Field {
@@ -179,7 +186,25 @@ fn buildFieldFromFlatbuf(allocator: std.mem.Allocator, field_t: fbs.FieldT) (Str
     const dtype = try buildDataTypeFromFlatbuf(allocator, field_t);
     const dtype_ptr = try allocator.create(DataType);
     dtype_ptr.* = dtype;
-    return .{ .name = name, .data_type = dtype_ptr, .nullable = field_t.nullable };
+    return .{
+        .name = name,
+        .data_type = dtype_ptr,
+        .nullable = field_t.nullable,
+        .metadata = try buildMetadataFromFlatbuf(allocator, field_t.custom_metadata.items),
+    };
+}
+
+fn buildMetadataFromFlatbuf(allocator: std.mem.Allocator, metadata_t: []const fbs.KeyValueT) error{OutOfMemory}!?[]const datatype.KeyValue {
+    if (metadata_t.len == 0) return null;
+
+    const out = try allocator.alloc(datatype.KeyValue, metadata_t.len);
+    for (metadata_t, 0..) |entry, i| {
+        out[i] = .{
+            .key = try allocator.dupe(u8, entry.key),
+            .value = try allocator.dupe(u8, entry.value),
+        };
+    }
+    return out;
 }
 
 fn buildDataTypeFromFlatbuf(allocator: std.mem.Allocator, field_t: fbs.FieldT) (StreamError || error{OutOfMemory})!DataType {
@@ -502,4 +527,160 @@ test "ipc stream roundtrip large string and binary" {
     try std.testing.expect(ls_view.isNull(1));
     try std.testing.expectEqualStrings("zz", lb_view.value(0));
     try std.testing.expect(lb_view.isNull(1));
+}
+
+test "ipc schema roundtrip preserves field and schema metadata" {
+    const allocator = std.testing.allocator;
+
+    const int_type = DataType{ .int32 = {} };
+    const field_md = [_]datatype.KeyValue{
+        .{ .key = "z", .value = "9" },
+        .{ .key = "a", .value = "1" },
+    };
+    const schema_md = [_]datatype.KeyValue{
+        .{ .key = "owner", .value = "core" },
+        .{ .key = "version", .value = "1" },
+    };
+    const fields = [_]Field{
+        .{
+            .name = "id",
+            .data_type = &int_type,
+            .nullable = false,
+            .metadata = field_md[0..],
+        },
+    };
+    const schema = Schema{
+        .fields = fields[0..],
+        .metadata = schema_md[0..],
+    };
+
+    var out_buf = std.array_list.Managed(u8).init(allocator);
+    defer out_buf.deinit();
+    var writer = @import("stream_writer.zig").StreamWriter(@TypeOf(out_buf.writer())).init(allocator, out_buf.writer());
+    try writer.writeSchema(schema);
+    try writer.writeEnd();
+
+    var stream = std.io.fixedBufferStream(out_buf.items);
+    var reader = StreamReader(@TypeOf(stream.reader())).init(allocator, stream.reader());
+    defer reader.deinit();
+
+    const out_schema = try reader.readSchema();
+    try std.testing.expect(out_schema.metadata != null);
+    try std.testing.expect(out_schema.fields[0].metadata != null);
+
+    const out_schema_md = out_schema.metadata.?;
+    try std.testing.expectEqual(@as(usize, 2), out_schema_md.len);
+    try std.testing.expectEqualStrings("owner", out_schema_md[0].key);
+    try std.testing.expectEqualStrings("core", out_schema_md[0].value);
+    try std.testing.expectEqualStrings("version", out_schema_md[1].key);
+    try std.testing.expectEqualStrings("1", out_schema_md[1].value);
+
+    const out_field_md = out_schema.fields[0].metadata.?;
+    try std.testing.expectEqual(@as(usize, 2), out_field_md.len);
+    try std.testing.expectEqualStrings("a", out_field_md[0].key);
+    try std.testing.expectEqualStrings("1", out_field_md[0].value);
+    try std.testing.expectEqualStrings("z", out_field_md[1].key);
+    try std.testing.expectEqualStrings("9", out_field_md[1].value);
+}
+
+test "ipc schema metadata serialization is deterministic" {
+    const allocator = std.testing.allocator;
+
+    const int_type = DataType{ .int32 = {} };
+
+    const field_md_a = [_]datatype.KeyValue{
+        .{ .key = "beta", .value = "2" },
+        .{ .key = "alpha", .value = "1" },
+    };
+    const field_md_b = [_]datatype.KeyValue{
+        .{ .key = "alpha", .value = "1" },
+        .{ .key = "beta", .value = "2" },
+    };
+    const schema_md_a = [_]datatype.KeyValue{
+        .{ .key = "z", .value = "9" },
+        .{ .key = "a", .value = "0" },
+    };
+    const schema_md_b = [_]datatype.KeyValue{
+        .{ .key = "a", .value = "0" },
+        .{ .key = "z", .value = "9" },
+    };
+
+    const fields_a = [_]Field{
+        .{ .name = "id", .data_type = &int_type, .nullable = false, .metadata = field_md_a[0..] },
+    };
+    const fields_b = [_]Field{
+        .{ .name = "id", .data_type = &int_type, .nullable = false, .metadata = field_md_b[0..] },
+    };
+    const schema_a = Schema{ .fields = fields_a[0..], .metadata = schema_md_a[0..] };
+    const schema_b = Schema{ .fields = fields_b[0..], .metadata = schema_md_b[0..] };
+
+    var out_a = std.array_list.Managed(u8).init(allocator);
+    defer out_a.deinit();
+    var out_b = std.array_list.Managed(u8).init(allocator);
+    defer out_b.deinit();
+
+    var writer_a = @import("stream_writer.zig").StreamWriter(@TypeOf(out_a.writer())).init(allocator, out_a.writer());
+    var writer_b = @import("stream_writer.zig").StreamWriter(@TypeOf(out_b.writer())).init(allocator, out_b.writer());
+    try writer_a.writeSchema(schema_a);
+    try writer_b.writeSchema(schema_b);
+
+    try std.testing.expectEqualSlices(u8, out_a.items, out_b.items);
+}
+
+test "ipc reader skips padded body bytes before next message" {
+    const allocator = std.testing.allocator;
+
+    var raw = std.array_list.Managed(u8).init(allocator);
+    defer raw.deinit();
+
+    // Message 1 has a 1-byte body, which requires 7 bytes of 8-byte IPC padding.
+    try appendRawTestMessage(allocator, raw.writer(), 1, 0xAB);
+    // Message 2 follows immediately and should still be parsed correctly.
+    try appendRawTestMessage(allocator, raw.writer(), 0, 0x00);
+
+    var stream = std.io.fixedBufferStream(raw.items);
+    var reader = StreamReader(@TypeOf(stream.reader())).init(allocator, stream.reader());
+    defer reader.deinit();
+
+    const first_opt = try readMessageOptional(reader);
+    try std.testing.expect(first_opt != null);
+    var first = first_opt.?;
+    defer first.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), first.body_len);
+
+    const second_opt = try readMessageOptional(reader);
+    try std.testing.expect(second_opt != null);
+    var second = second_opt.?;
+    defer second.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 0), second.body_len);
+}
+
+fn appendRawTestMessage(allocator: std.mem.Allocator, writer: anytype, body_len: usize, body_fill: u8) !void {
+    var builder = fb.Builder.init(allocator);
+    defer builder.deinitAll();
+
+    var msg = fbs.MessageT{
+        .version = .V5,
+        .header = .{ .NONE = {} },
+        .bodyLength = @intCast(body_len),
+        .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0),
+    };
+    defer msg.deinit(allocator);
+
+    const opts: fb.common.PackOptions = .{ .allocator = allocator };
+    const msg_off = try fbs.MessageT.Pack(msg, &builder, opts);
+    try fbs.Message.FinishBuffer(&builder, msg_off);
+    const metadata = try builder.finishedBytes();
+
+    try format.writeMessageLength(writer, @intCast(metadata.len));
+    try writer.writeAll(metadata);
+    try format.writePadding(writer, format.padLen(metadata.len));
+
+    if (body_len > 0) {
+        const body = try allocator.alloc(u8, body_len);
+        defer allocator.free(body);
+        @memset(body, body_fill);
+        try writer.writeAll(body);
+    }
+    try format.writePadding(writer, format.padLen(body_len));
 }

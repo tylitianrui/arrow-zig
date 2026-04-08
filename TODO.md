@@ -67,23 +67,23 @@ Goal: Build a production-usable Zig implementation of Apache Arrow core memory m
 
 ### B1. Metadata Serialization
 
-- [ ] B1.1 Implement Field metadata serialization.
-- [ ] B1.2 Implement Schema metadata serialization.
-- [ ] B1.3 Add deterministic ordering tests for metadata output.
+- [x] B1.1 Implement Field metadata serialization.
+- [x] B1.2 Implement Schema metadata serialization.
+- [x] B1.3 Add deterministic ordering tests for metadata output.
 
 ### B2. IPC Writer (MVP Subset)
 
-- [ ] B2.1 Implement stream header/footer writer.
-- [ ] B2.2 Write RecordBatch for primitive/boolean/string/binary/list/struct.
-- [ ] B2.3 Add alignment/padding logic for body buffers.
-- [ ] B2.4 Add writer golden tests for small fixtures.
+- [x] B2.1 Implement stream header/footer writer.
+- [x] B2.2 Write RecordBatch for primitive/boolean/string/binary/list/struct.
+- [x] B2.3 Add alignment/padding logic for body buffers.
+- [x] B2.4 Add writer golden tests for small fixtures.
 
 ### B3. IPC Reader (MVP Subset)
 
-- [ ] B3.1 Implement stream message parser.
-- [ ] B3.2 Reconstruct Schema + RecordBatch from stream.
-- [ ] B3.3 Implement zero-copy path for compatible payloads.
-- [ ] B3.4 Add reader roundtrip tests vs writer output.
+- [x] B3.1 Implement stream message parser.
+- [x] B3.2 Reconstruct Schema + RecordBatch from stream.
+- [x] B3.3 Implement zero-copy path for compatible payloads.
+- [x] B3.4 Add reader roundtrip tests vs writer output.
 
 ### B4. IPC Robustness
 
@@ -123,7 +123,7 @@ Goal: Build a production-usable Zig implementation of Apache Arrow core memory m
 
 - [x] S1. Complete A1.1-A1.8 (LargeString/LargeBinary full path).
 - [x] S2. Complete A2.1-A2.7 (FixedSizeBinary/FixedSizeList full path).
-- [ ] S3. Start B1.1-B1.3 (Schema/Field metadata serialization scaffold).
+- [x] S3. Start B1.1-B1.3 (Schema/Field metadata serialization scaffold).
 
 ## Definition of Done (Per Task)
 

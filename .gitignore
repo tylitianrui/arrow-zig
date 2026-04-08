@@ -1,5 +1,6 @@
 # Zig build cache and generated outputs
 /.zig-cache/
+/src/format/.zig-cache/
 /zig-out/
 
 # Native build artifacts
@@ -28,4 +29,3 @@
 *.tar.bz2
 *.tar.xz
 *.7z
-
