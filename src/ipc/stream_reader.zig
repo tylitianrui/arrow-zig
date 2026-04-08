@@ -321,12 +321,14 @@ fn buildDataTypeFromFlatbuf(allocator: std.mem.Allocator, field_t: fbs.FieldT) (
         },
         .Map => blk: {
             if (field_t.children.items.len != 1) return StreamError.InvalidMetadata;
+            const entries_meta = field_t.children.items[0];
+            if (entries_meta.nullable) return StreamError.InvalidMetadata;
+            if (entries_meta.type != .Struct_) return StreamError.InvalidMetadata;
+            if (entries_meta.children.items.len != 2) return StreamError.InvalidMetadata;
+            if (entries_meta.children.items[0].nullable) return StreamError.InvalidMetadata;
             const entries_field = try buildFieldFromFlatbuf(allocator, field_t.children.items[0]);
             if (entries_field.data_type.* != .struct_) return StreamError.InvalidMetadata;
-            if (entries_field.nullable) return StreamError.InvalidMetadata;
             const entry_fields = entries_field.data_type.struct_.fields;
-            if (entry_fields.len != 2) return StreamError.InvalidMetadata;
-            if (entry_fields[0].nullable) return StreamError.InvalidMetadata;
             break :blk DataType{
                 .map = .{
                     .key_field = entry_fields[0],
@@ -373,13 +375,16 @@ fn buildDataTypeFromFlatbuf(allocator: std.mem.Allocator, field_t: fbs.FieldT) (
         },
         .RunEndEncoded => blk: {
             if (field_t.children.items.len != 2) return StreamError.InvalidMetadata;
+            const run_end_meta = field_t.children.items[0];
+            if (run_end_meta.type != .Int) return StreamError.InvalidMetadata;
+            const run_end_int = run_end_meta.type.Int.?;
+            if (!run_end_int.is_signed) return StreamError.InvalidMetadata;
+            if (run_end_int.bitWidth != 16 and run_end_int.bitWidth != 32 and run_end_int.bitWidth != 64) {
+                return StreamError.InvalidMetadata;
+            }
             const run_end_field = try buildFieldFromFlatbuf(allocator, field_t.children.items[0]);
             const value_field = try buildFieldFromFlatbuf(allocator, field_t.children.items[1]);
             const run_end_type = try intTypeFromDataType(run_end_field.data_type.*);
-            if (!run_end_type.signed) return StreamError.InvalidMetadata;
-            if (run_end_type.bit_width != 16 and run_end_type.bit_width != 32 and run_end_type.bit_width != 64) {
-                return StreamError.InvalidMetadata;
-            }
             const value_ptr = try allocator.create(DataType);
             value_ptr.* = value_field.data_type.*;
             break :blk DataType{
@@ -954,6 +959,13 @@ test "ipc schema accepts list-view metadata with one child" {
     defer field.deinit(allocator);
 
     const dtype = try buildDataTypeFromFlatbuf(allocator, field);
+    defer switch (dtype) {
+        .list_view => |lv| {
+            allocator.free(lv.value_field.name);
+            allocator.destroy(@constCast(lv.value_field.data_type));
+        },
+        else => {},
+    };
     try std.testing.expect(dtype == .list_view);
 }
 
