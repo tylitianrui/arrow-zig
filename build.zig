@@ -18,15 +18,20 @@ pub fn build(b: *std.Build) !void {
         .optimize = optimize,
     });
 
-    const format_dir = b.path("src/format").getPath(b);
+    const is_windows = b.graph.host.result.os.tag == .windows;
+    const format_dir = if (is_windows) "src/format" else b.path("src/format").getPath(b);
+    const message_fbs = if (is_windows) "src/format/Message.fbs" else b.path("src/format/Message.fbs").getPath(b);
+    const schema_fbs = if (is_windows) "src/format/Schema.fbs" else b.path("src/format/Schema.fbs").getPath(b);
+    const tensor_fbs = if (is_windows) "src/format/Tensor.fbs" else b.path("src/format/Tensor.fbs").getPath(b);
+    const sparse_tensor_fbs = if (is_windows) "src/format/SparseTensor.fbs" else b.path("src/format/SparseTensor.fbs").getPath(b);
     const gen_step = try @import("flatbufferz").GenStep.create(
         b,
         fbz_dep.artifact("flatc-zig"),
         &.{
-            b.path("src/format/Message.fbs").getPath(b),
-            b.path("src/format/Schema.fbs").getPath(b),
-            b.path("src/format/Tensor.fbs").getPath(b),
-            b.path("src/format/SparseTensor.fbs").getPath(b),
+            message_fbs,
+            schema_fbs,
+            tensor_fbs,
+            sparse_tensor_fbs,
         },
         &.{ "-I", format_dir },
         "flatc-zig",
