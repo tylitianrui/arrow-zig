@@ -2,6 +2,7 @@
 /.zig-cache/
 /src/format/.zig-cache/
 /zig-out/
+/.venv*/
 
 # Native build artifacts
 *.o

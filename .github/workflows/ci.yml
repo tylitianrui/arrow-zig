@@ -26,3 +26,26 @@ jobs:
 
       - name: Run tests
         run: zig build test
+
+  pyarrow-fixture-check:
+    name: PyArrow Fixture Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install PyArrow
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pyarrow==23.0.1
+
+      - name: Regenerate IPC fixtures
+        run: python tools/generate_ipc_fixtures.py
+
+      - name: Ensure fixtures are up to date
+        run: git diff --exit-code -- src/ipc/testdata

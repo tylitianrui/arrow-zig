@@ -18,16 +18,17 @@ pub fn build(b: *std.Build) !void {
         .optimize = optimize,
     });
 
+    const format_dir = b.path("src/format").getPath(b);
     const gen_step = try @import("flatbufferz").GenStep.create(
         b,
         fbz_dep.artifact("flatc-zig"),
         &.{
-            "src/format/Message.fbs",
-            "src/format/Schema.fbs",
-            "src/format/Tensor.fbs",
-            "src/format/SparseTensor.fbs",
+            b.path("src/format/Message.fbs").getPath(b),
+            b.path("src/format/Schema.fbs").getPath(b),
+            b.path("src/format/Tensor.fbs").getPath(b),
+            b.path("src/format/SparseTensor.fbs").getPath(b),
         },
-        &.{ "-I", "src/format" },
+        &.{ "-I", format_dir },
         "flatc-zig",
     );
 

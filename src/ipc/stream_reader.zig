@@ -155,7 +155,6 @@ fn readMessageOptional(self: anytype) (StreamError || fb.common.PackError || @Ty
         errdefer body_buf.deinit();
         try self.reader.readNoEof(body_buf.data[0..body_len]);
         body_shared = try body_buf.toShared(body_len);
-        try format.skipPadding(self.reader, format.padLen(body_len));
     }
     try format.skipPadding(self.reader, format.padLen(body_len));
 
@@ -420,6 +419,13 @@ fn bufferCountForType(dt: DataType) StreamError!usize {
     };
 }
 
+fn expectMetadataEntry(metadata: []const datatype.KeyValue, key: []const u8, value: []const u8) !void {
+    for (metadata) |entry| {
+        if (std.mem.eql(u8, entry.key, key) and std.mem.eql(u8, entry.value, value)) return;
+    }
+    return error.MetadataEntryMissing;
+}
+
 test "ipc stream roundtrip schema and batch" {
     const allocator = std.testing.allocator;
 
@@ -627,19 +633,105 @@ test "ipc schema metadata serialization is deterministic" {
     try std.testing.expectEqualSlices(u8, out_a.items, out_b.items);
 }
 
-test "ipc reader skips padded body bytes before next message" {
+test "ipc reader accepts pyarrow simple stream fixture" {
+    const allocator = std.testing.allocator;
+    const data = @embedFile("testdata/pyarrow_simple_stream.arrow");
+
+    var stream = std.io.fixedBufferStream(data);
+    var reader = StreamReader(@TypeOf(stream.reader())).init(allocator, stream.reader());
+    defer reader.deinit();
+
+    const schema = try reader.readSchema();
+    try std.testing.expectEqual(@as(usize, 2), schema.fields.len);
+
+    const batch_opt = try reader.nextRecordBatch();
+    try std.testing.expect(batch_opt != null);
+    var batch = batch_opt.?;
+    defer batch.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), batch.numRows());
+    const names = @import("../array/string_array.zig").StringArray{ .data = batch.columns[1].data() };
+    try std.testing.expectEqualStrings("a", names.value(0));
+    try std.testing.expect(names.isNull(1));
+}
+
+test "ipc reader accepts pyarrow metadata stream fixture" {
+    const allocator = std.testing.allocator;
+    const data = @embedFile("testdata/pyarrow_metadata_stream.arrow");
+
+    var stream = std.io.fixedBufferStream(data);
+    var reader = StreamReader(@TypeOf(stream.reader())).init(allocator, stream.reader());
+    defer reader.deinit();
+
+    const schema = try reader.readSchema();
+    try std.testing.expect(schema.metadata != null);
+    try std.testing.expect(schema.fields[0].metadata != null);
+
+    const schema_md = schema.metadata.?;
+    try expectMetadataEntry(schema_md, "owner", "core");
+    try expectMetadataEntry(schema_md, "version", "1");
+    try expectMetadataEntry(schema_md, "pad", "padpadpad");
+
+    const field_md = schema.fields[0].metadata.?;
+    try expectMetadataEntry(field_md, "alpha", "1");
+    try expectMetadataEntry(field_md, "z", "9");
+}
+
+test "ipc reader reads pyarrow multi-batch stream fixture" {
+    const allocator = std.testing.allocator;
+    const data = @embedFile("testdata/pyarrow_multi_batch_stream.arrow");
+
+    var stream = std.io.fixedBufferStream(data);
+    var reader = StreamReader(@TypeOf(stream.reader())).init(allocator, stream.reader());
+    defer reader.deinit();
+
+    _ = try reader.readSchema();
+
+    const first_opt = try reader.nextRecordBatch();
+    try std.testing.expect(first_opt != null);
+    var first = first_opt.?;
+    defer first.deinit();
+    try std.testing.expectEqual(@as(usize, 3), first.numRows());
+
+    const second_opt = try reader.nextRecordBatch();
+    try std.testing.expect(second_opt != null);
+    var second = second_opt.?;
+    defer second.deinit();
+    try std.testing.expectEqual(@as(usize, 2), second.numRows());
+
+    const done = try reader.nextRecordBatch();
+    try std.testing.expect(done == null);
+}
+
+test "ipc reader handles non-8-aligned body and still reads next real writer message" {
     const allocator = std.testing.allocator;
 
-    var raw = std.array_list.Managed(u8).init(allocator);
-    defer raw.deinit();
+    const int_type = DataType{ .int32 = {} };
+    const fields = [_]Field{
+        .{ .name = "id", .data_type = &int_type, .nullable = false },
+    };
+    const schema = Schema{ .fields = fields[0..] };
 
-    // Message 1 has a 1-byte body, which requires 7 bytes of 8-byte IPC padding.
-    try appendRawTestMessage(allocator, raw.writer(), 1, 0xAB);
-    // Message 2 follows immediately and should still be parsed correctly.
-    try appendRawTestMessage(allocator, raw.writer(), 0, 0x00);
+    // 1) Real writer output: schema message.
+    var real_stream = std.array_list.Managed(u8).init(allocator);
+    defer real_stream.deinit();
+    var real_writer = @import("stream_writer.zig").StreamWriter(@TypeOf(real_stream.writer())).init(allocator, real_stream.writer());
+    try real_writer.writeSchema(schema);
+    try real_writer.writeEnd();
 
-    var stream = std.io.fixedBufferStream(raw.items);
-    var reader = StreamReader(@TypeOf(stream.reader())).init(allocator, stream.reader());
+    // 2) Build a stream where a valid flatbuffer message with body_len=1 is inserted
+    // before the real writer schema message.
+    var combined = std.array_list.Managed(u8).init(allocator);
+    defer combined.deinit();
+    try appendValidTestMessageWithBody(allocator, combined.writer(), 1, 0xAB);
+    // Explicitly place Arrow IPC body padding (8-byte alignment) before next message.
+    try format.writePadding(combined.writer(), format.padLen(@as(usize, 1)));
+    const next_real_message_offset = combined.items.len;
+    try combined.appendSlice(real_stream.items);
+
+    // 3) Reader must consume body + body padding and then parse the real schema message.
+    var input = std.io.fixedBufferStream(combined.items);
+    var reader = StreamReader(@TypeOf(input.reader())).init(allocator, input.reader());
     defer reader.deinit();
 
     const first_opt = try readMessageOptional(reader);
@@ -647,21 +739,31 @@ test "ipc reader skips padded body bytes before next message" {
     var first = first_opt.?;
     defer first.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 1), first.body_len);
+    try std.testing.expectEqual(next_real_message_offset, input.pos);
 
     const second_opt = try readMessageOptional(reader);
     try std.testing.expect(second_opt != null);
     var second = second_opt.?;
     defer second.deinit(allocator);
-    try std.testing.expectEqual(@as(usize, 0), second.body_len);
+    try std.testing.expect(second.msg.header == .Schema);
 }
 
-fn appendRawTestMessage(allocator: std.mem.Allocator, writer: anytype, body_len: usize, body_fill: u8) !void {
+fn appendValidTestMessageWithBody(allocator: std.mem.Allocator, writer: anytype, body_len: usize, fill: u8) !void {
     var builder = fb.Builder.init(allocator);
     defer builder.deinitAll();
 
+    const schema_ptr = try allocator.create(fbs.SchemaT);
+    errdefer allocator.destroy(schema_ptr);
+    schema_ptr.* = .{
+        .endianness = .Little,
+        .fields = try std.ArrayList(fbs.FieldT).initCapacity(allocator, 0),
+        .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0),
+        .features = try std.ArrayList(i64).initCapacity(allocator, 0),
+    };
+
     var msg = fbs.MessageT{
         .version = .V5,
-        .header = .{ .NONE = {} },
+        .header = .{ .Schema = schema_ptr },
         .bodyLength = @intCast(body_len),
         .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0),
     };
@@ -679,8 +781,7 @@ fn appendRawTestMessage(allocator: std.mem.Allocator, writer: anytype, body_len:
     if (body_len > 0) {
         const body = try allocator.alloc(u8, body_len);
         defer allocator.free(body);
-        @memset(body, body_fill);
+        @memset(body, fill);
         try writer.writeAll(body);
     }
-    try format.writePadding(writer, format.padLen(body_len));
 }

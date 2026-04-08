@@ -1,0 +1,2 @@
+python 3.11.15
+pyarrow 23.0.1
