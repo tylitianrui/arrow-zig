@@ -58,6 +58,11 @@ pub fn main() !void {
 }
 
 fn writeReeFixture(allocator: std.mem.Allocator, writer: *zarrow.IpcStreamWriter(WriterAdapter)) !void {
+    // Writes one stream with:
+    // - schema: ree: run_end_encoded<int32, int32>
+    // - one record batch (5 rows)
+    //   run_ends=[2, 5], values=[100, 200]
+    //   decoded logical values=[100, 100, 200, 200, 200]
     const value_type = zarrow.DataType{ .int32 = {} };
     const ree_type = zarrow.DataType{
         .run_end_encoded = .{
@@ -98,6 +103,11 @@ fn writeReeFixture(allocator: std.mem.Allocator, writer: *zarrow.IpcStreamWriter
 }
 
 fn writeCanonicalFixture(allocator: std.mem.Allocator, writer: *zarrow.IpcStreamWriter(WriterAdapter)) !void {
+    // Writes one stream with:
+    // - schema: id: int32 (non-null), name: utf8 (nullable)
+    // - one record batch (3 rows)
+    //   id=[1, 2, 3]
+    //   name=["alice", null, "bob"]
     const id_type = zarrow.DataType{ .int32 = {} };
     const name_type = zarrow.DataType{ .string = {} };
     const fields = [_]zarrow.Field{
@@ -131,6 +141,9 @@ fn writeCanonicalFixture(allocator: std.mem.Allocator, writer: *zarrow.IpcStream
 }
 
 fn writeDictionaryDeltaFixture(allocator: std.mem.Allocator, writer: *zarrow.IpcStreamWriter(WriterAdapter)) !void {
+    // Writes one stream with dictionary-encoded column "color":
+    // - schema: color: dictionary<int32, utf8>
+    // - two record batches to exercise dictionary delta behavior.
     const value_type = zarrow.DataType{ .string = {} };
     const dict_type = zarrow.DataType{
         .dictionary = .{
@@ -159,6 +172,10 @@ fn writeDictionaryDeltaFixture(allocator: std.mem.Allocator, writer: *zarrow.Ipc
         2,
     );
     defer dict_builder_1.deinit();
+    // Batch 1:
+    // - dictionary values=["red", "blue"]
+    // - indices=[0, 1]
+    // - decoded values=["red", "blue"]
     try dict_builder_1.appendIndex(0);
     try dict_builder_1.appendIndex(1);
     var dict_col_1 = try dict_builder_1.finish(dict_values_1);
@@ -179,6 +196,10 @@ fn writeDictionaryDeltaFixture(allocator: std.mem.Allocator, writer: *zarrow.Ipc
         1,
     );
     defer dict_builder_2.deinit();
+    // Batch 2:
+    // - dictionary values=["green"]
+    // - indices=[0]
+    // - decoded values=["green"]
     try dict_builder_2.appendIndex(0);
     var dict_col_2 = try dict_builder_2.finish(dict_values_2);
     defer dict_col_2.release();

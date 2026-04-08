@@ -11,6 +11,11 @@ import pyarrow.ipc as ipc
 
 
 def generate_canonical(out_path: pathlib.Path) -> None:
+    # Writes one stream with:
+    # - schema: id: int32 (non-null), name: utf8 (nullable)
+    # - one record batch (3 rows)
+    #   id=[1, 2, 3]
+    #   name=["alice", null, "bob"]
     schema = pa.schema(
         [
             pa.field("id", pa.int32(), nullable=False),
@@ -29,6 +34,13 @@ def generate_canonical(out_path: pathlib.Path) -> None:
 
 
 def generate_dict_delta(out_path: pathlib.Path) -> None:
+    # Writes one stream with dictionary-encoded column "color":
+    # - schema: color: dictionary<int32, utf8>
+    # - two record batches
+    #   batch1 decoded values=["red", "blue"]
+    #   batch2 decoded values=["green"]
+    # Note: PyArrow may materialize the second dictionary as a superset
+    # (for example ["red", "blue", "green"] with index 2).
     dtype = pa.dictionary(pa.int32(), pa.string())
     schema = pa.schema([pa.field("color", dtype, nullable=False)])
 
@@ -48,6 +60,11 @@ def generate_dict_delta(out_path: pathlib.Path) -> None:
 
 
 def generate_ree(out_path: pathlib.Path) -> None:
+    # Writes one stream with:
+    # - schema: ree: run_end_encoded<int32, int32>
+    # - one record batch (5 rows)
+    #   run_ends=[2, 5], values=[100, 200]
+    #   decoded logical values=[100, 100, 200, 200, 200]
     run_ends = pa.array([2, 5], type=pa.int32())
     values = pa.array([100, 200], type=pa.int32())
     col = pa.RunEndEncodedArray.from_arrays(run_ends, values)

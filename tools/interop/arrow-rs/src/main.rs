@@ -17,6 +17,11 @@ fn canonical_schema() -> Arc<Schema> {
 }
 
 fn generate(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    // Writes one stream with:
+    // - schema: id: int32 (non-null), name: utf8 (nullable)
+    // - one record batch (3 rows)
+    //   id=[1, 2, 3]
+    //   name=["alice", null, "bob"]
     let schema = canonical_schema();
     let ids: ArrayRef = Arc::new(Int32Array::from(vec![1, 2, 3]));
     let names: ArrayRef = Arc::new(StringArray::from(vec![Some("alice"), None, Some("bob")]));
@@ -38,6 +43,11 @@ fn dict_delta_schema() -> Arc<Schema> {
 }
 
 fn generate_dict_delta(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    // Writes one stream with dictionary-encoded column "color":
+    // - schema: color: dictionary<int32, utf8>
+    // - two record batches to exercise dictionary delta behavior
+    //   batch1 decoded values=["red", "blue"]
+    //   batch2 decoded values=["green"]
     let schema = dict_delta_schema();
 
     let mut first_builder = StringDictionaryBuilder::<Int32Type>::new();
@@ -72,6 +82,11 @@ fn ree_schema() -> Arc<Schema> {
 }
 
 fn generate_ree(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    // Writes one stream with:
+    // - schema: ree: run_end_encoded<int32, int32>
+    // - one record batch (5 rows)
+    //   run_ends=[2, 5], values=[100, 200]
+    //   decoded logical values=[100, 100, 200, 200, 200]
     let schema = ree_schema();
     let run_ends = Int32Array::from(vec![2, 5]);
     let values = Int32Array::from(vec![100, 200]);
@@ -86,6 +101,10 @@ fn generate_ree(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn validate(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    // Expected decoded content:
+    // - one batch with 3 rows
+    // - id=[1, 2, 3]
+    // - name=["alice", null, "bob"]
     let file = File::open(path)?;
     let mut reader = StreamReader::try_new(file, None)?;
     let schema = reader.schema();
@@ -128,6 +147,10 @@ fn validate(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn validate_dict_delta(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    // Expected decoded content:
+    // - two batches
+    //   batch1 values=["red", "blue"]
+    //   batch2 values=["green"]
     let file = File::open(path)?;
     let mut reader = StreamReader::try_new(file, None)?;
     let schema = reader.schema();
@@ -189,6 +212,9 @@ fn validate_dict_delta(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn validate_ree(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    // Expected decoded content:
+    // - one batch with 5 rows
+    // - logical values=[100, 100, 200, 200, 200]
     let file = File::open(path)?;
     let mut reader = StreamReader::try_new(file, None)?;
     let schema = reader.schema();

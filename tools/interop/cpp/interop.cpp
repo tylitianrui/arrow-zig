@@ -18,6 +18,11 @@ std::shared_ptr<arrow::Schema> CanonicalSchema() {
 }
 
 arrow::Status Generate(const std::string& path) {
+  // Writes one stream with:
+  // - schema: id: int32 (non-null), name: utf8 (nullable)
+  // - one record batch (3 rows)
+  //   id=[1, 2, 3]
+  //   name=["alice", null, "bob"]
   auto schema = CanonicalSchema();
 
   arrow::Int32Builder id_builder;
@@ -41,6 +46,11 @@ arrow::Status Generate(const std::string& path) {
 }
 
 arrow::Status GenerateDictDelta(const std::string& path) {
+  // Writes one stream with dictionary-encoded column "color":
+  // - schema: color: dictionary<int32, utf8>
+  // - two record batches to exercise dictionary delta behavior
+  //   batch1 decoded values=["red", "blue"]
+  //   batch2 decoded values=["green"]
   auto dict_type = arrow::dictionary(arrow::int32(), arrow::utf8(), false);
   auto schema = arrow::schema({arrow::field("color", dict_type, false)});
 
@@ -70,6 +80,11 @@ arrow::Status GenerateDictDelta(const std::string& path) {
 }
 
 arrow::Status GenerateRee(const std::string& path) {
+  // Writes one stream with:
+  // - schema: ree: run_end_encoded<int32, int32>
+  // - one record batch (5 rows)
+  //   run_ends=[2, 5], values=[100, 200]
+  //   decoded logical values=[100, 100, 200, 200, 200]
   auto ree_type = arrow::run_end_encoded(arrow::int32(), arrow::int32());
   auto schema = arrow::schema({arrow::field("ree", ree_type, true)});
 
@@ -96,6 +111,10 @@ arrow::Status GenerateRee(const std::string& path) {
 }
 
 arrow::Status Validate(const std::string& path) {
+  // Expected decoded content:
+  // - one batch with 3 rows
+  // - id=[1, 2, 3]
+  // - name=["alice", null, "bob"]
   ARROW_ASSIGN_OR_RAISE(auto in, arrow::io::ReadableFile::Open(path));
   ARROW_ASSIGN_OR_RAISE(auto reader, arrow::ipc::RecordBatchStreamReader::Open(in));
   auto schema = reader->schema();
@@ -140,6 +159,10 @@ arrow::Result<std::string> DecodeDictionaryString(const std::shared_ptr<arrow::A
 }
 
 arrow::Status ValidateDictDelta(const std::string& path) {
+  // Expected decoded content:
+  // - two batches
+  //   batch1 values=["red", "blue"]
+  //   batch2 values=["green"]
   ARROW_ASSIGN_OR_RAISE(auto in, arrow::io::ReadableFile::Open(path));
   ARROW_ASSIGN_OR_RAISE(auto reader, arrow::ipc::RecordBatchStreamReader::Open(in));
   auto schema = reader->schema();
@@ -169,6 +192,9 @@ arrow::Status ValidateDictDelta(const std::string& path) {
 }
 
 arrow::Status ValidateRee(const std::string& path) {
+  // Expected decoded content:
+  // - one batch with 5 rows
+  // - logical values=[100, 100, 200, 200, 200]
   ARROW_ASSIGN_OR_RAISE(auto in, arrow::io::ReadableFile::Open(path));
   ARROW_ASSIGN_OR_RAISE(auto reader, arrow::ipc::RecordBatchStreamReader::Open(in));
   auto schema = reader->schema();

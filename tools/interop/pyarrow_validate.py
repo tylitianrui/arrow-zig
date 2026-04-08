@@ -26,6 +26,10 @@ def decode_dictionary_values(column: pa.Array) -> list[str]:
 
 
 def validate_canonical(in_path: pathlib.Path) -> None:
+    # Expected decoded content:
+    # - one batch with 3 rows
+    # - id=[1, 2, 3]
+    # - name=["alice", null, "bob"]
     with ipc.open_stream(in_path) as reader:
         schema = reader.schema
         if len(schema) != 2:
@@ -51,6 +55,10 @@ def validate_canonical(in_path: pathlib.Path) -> None:
 
 
 def validate_dict_delta(in_path: pathlib.Path) -> None:
+    # Expected decoded content:
+    # - two batches
+    #   batch1 values=["red", "blue"]
+    #   batch2 values=["green"]
     with ipc.open_stream(in_path) as reader:
         schema = reader.schema
         if len(schema) != 1:
@@ -75,6 +83,9 @@ def validate_dict_delta(in_path: pathlib.Path) -> None:
 
 
 def validate_ree(in_path: pathlib.Path) -> None:
+    # Expected decoded content:
+    # - one batch with 5 rows
+    # - logical values=[100, 100, 200, 200, 200]
     with ipc.open_stream(in_path) as reader:
         schema = reader.schema
         if len(schema) != 1:
