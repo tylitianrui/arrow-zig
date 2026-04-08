@@ -9,7 +9,7 @@ pub const KeyValue = datatype.KeyValue;
 
 pub const Schema = struct {
     fields: []const Field,
-    endianness: Endianness = .native,
+    endianness: Endianness = .little,
     metadata: ?[]const KeyValue = null,
 };
 
@@ -25,7 +25,7 @@ test "schema holds fields and defaults" {
     const schema = Schema{ .fields = fields[0..] };
 
     try std.testing.expectEqual(@as(usize, 2), schema.fields.len);
-    try std.testing.expectEqual(datatype.Endianness.native, schema.endianness);
+    try std.testing.expectEqual(datatype.Endianness.little, schema.endianness);
 }
 
 test "schema supports explicit endianness" {

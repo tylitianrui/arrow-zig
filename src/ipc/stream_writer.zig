@@ -216,6 +216,7 @@ fn writeMessage(allocator: std.mem.Allocator, writer: anytype, msg: fbs.MessageT
 }
 
 fn buildSchemaT(allocator: std.mem.Allocator, schema: Schema, next_dictionary_id: *i64) WriterError!fbs.SchemaT {
+    if (schema.endianness != .little) return StreamError.UnsupportedType;
     var fields = try std.ArrayList(fbs.FieldT).initCapacity(allocator, 0);
     for (schema.fields) |field| {
         try fields.append(allocator, try buildFieldT(allocator, field, next_dictionary_id));
@@ -1089,4 +1090,21 @@ test "ipc writer rejects dictionary with unsigned index type" {
     defer writer.deinit();
 
     try std.testing.expectError(StreamError.InvalidMetadata, writer.writeSchema(schema));
+}
+
+test "ipc writer rejects big-endian schema" {
+    const allocator = std.testing.allocator;
+
+    const id_type = DataType{ .int32 = {} };
+    const fields = [_]Field{
+        .{ .name = "id", .data_type = &id_type, .nullable = false },
+    };
+    const schema = Schema{ .fields = fields[0..], .endianness = .big };
+
+    var out = std.array_list.Managed(u8).init(allocator);
+    defer out.deinit();
+    var writer = StreamWriter(@TypeOf(out.writer())).init(allocator, out.writer());
+    defer writer.deinit();
+
+    try std.testing.expectError(StreamError.UnsupportedType, writer.writeSchema(schema));
 }

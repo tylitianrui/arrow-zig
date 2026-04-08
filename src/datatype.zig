@@ -81,7 +81,6 @@ pub const FloatPrecision = enum(u8) {
 pub const Endianness = enum(u8) {
     little = 0,
     big = 1,
-    native = 2,
 };
 
 pub const KeyValue = struct {
