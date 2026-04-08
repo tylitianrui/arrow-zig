@@ -60,6 +60,7 @@ const fbs = struct {
     const LargeUtf8T = arrow_fbs.org_apache_arrow_flatbuf_LargeUtf8.LargeUtf8T;
     const ListT = arrow_fbs.org_apache_arrow_flatbuf_List.ListT;
     const LargeListT = arrow_fbs.org_apache_arrow_flatbuf_LargeList.LargeListT;
+    const ListViewT = arrow_fbs.org_apache_arrow_flatbuf_ListView.ListViewT;
     const Struct_T = arrow_fbs.org_apache_arrow_flatbuf_Struct_.Struct_T;
     const NullT = arrow_fbs.org_apache_arrow_flatbuf_Null.NullT;
 };
@@ -191,7 +192,7 @@ fn readMessageOptional(self: anytype) (StreamError || fb.common.PackError || @Ty
     }
 
     var body_shared: ?array_data.SharedBuffer = null;
-    const body_len: usize = @intCast(msg_t.bodyLength);
+    const body_len = std.math.cast(usize, msg_t.bodyLength) orelse return StreamError.InvalidBody;
     if (body_len > 0) {
         var body_buf = try OwnedBuffer.init(self.allocator, body_len);
         errdefer body_buf.deinit();
@@ -292,10 +293,25 @@ fn buildDataTypeFromFlatbuf(allocator: std.mem.Allocator, field_t: fbs.FieldT) (
         .FixedSizeList => blk: {
             if (field_t.children.items.len != 1) return StreamError.InvalidMetadata;
             const list_size = field_t.type.FixedSizeList.?.listSize;
+            if (list_size < 0) return StreamError.InvalidMetadata;
             const child_field = try buildFieldFromFlatbuf(allocator, field_t.children.items[0]);
             break :blk DataType{ .fixed_size_list = .{ .value_field = child_field, .list_size = list_size } };
         },
-        .FixedSizeBinary => DataType{ .fixed_size_binary = .{ .byte_width = field_t.type.FixedSizeBinary.?.byteWidth } },
+        .ListView => blk: {
+            if (field_t.children.items.len != 1) return StreamError.InvalidMetadata;
+            const child_field = try buildFieldFromFlatbuf(allocator, field_t.children.items[0]);
+            break :blk DataType{ .list_view = .{ .value_field = child_field } };
+        },
+        .LargeListView => blk: {
+            if (field_t.children.items.len != 1) return StreamError.InvalidMetadata;
+            const child_field = try buildFieldFromFlatbuf(allocator, field_t.children.items[0]);
+            break :blk DataType{ .large_list_view = .{ .value_field = child_field } };
+        },
+        .FixedSizeBinary => blk: {
+            const byte_width = field_t.type.FixedSizeBinary.?.byteWidth;
+            if (byte_width <= 0) return StreamError.InvalidMetadata;
+            break :blk DataType{ .fixed_size_binary = .{ .byte_width = byte_width } };
+        },
         .Struct_ => blk: {
             const child_fields = try allocator.alloc(Field, field_t.children.items.len);
             for (field_t.children.items, 0..) |child, i| {
@@ -307,8 +323,10 @@ fn buildDataTypeFromFlatbuf(allocator: std.mem.Allocator, field_t: fbs.FieldT) (
             if (field_t.children.items.len != 1) return StreamError.InvalidMetadata;
             const entries_field = try buildFieldFromFlatbuf(allocator, field_t.children.items[0]);
             if (entries_field.data_type.* != .struct_) return StreamError.InvalidMetadata;
+            if (entries_field.nullable) return StreamError.InvalidMetadata;
             const entry_fields = entries_field.data_type.struct_.fields;
             if (entry_fields.len != 2) return StreamError.InvalidMetadata;
+            if (entry_fields[0].nullable) return StreamError.InvalidMetadata;
             break :blk DataType{
                 .map = .{
                     .key_field = entry_fields[0],
@@ -358,6 +376,10 @@ fn buildDataTypeFromFlatbuf(allocator: std.mem.Allocator, field_t: fbs.FieldT) (
             const run_end_field = try buildFieldFromFlatbuf(allocator, field_t.children.items[0]);
             const value_field = try buildFieldFromFlatbuf(allocator, field_t.children.items[1]);
             const run_end_type = try intTypeFromDataType(run_end_field.data_type.*);
+            if (!run_end_type.signed) return StreamError.InvalidMetadata;
+            if (run_end_type.bit_width != 16 and run_end_type.bit_width != 32 and run_end_type.bit_width != 64) {
+                return StreamError.InvalidMetadata;
+            }
             const value_ptr = try allocator.create(DataType);
             value_ptr.* = value_field.data_type.*;
             break :blk DataType{
@@ -396,8 +418,9 @@ fn buildDataTypeFromFlatbuf(allocator: std.mem.Allocator, field_t: fbs.FieldT) (
         .Duration => DataType{ .duration = .{ .unit = fromFbsTimeUnit(field_t.type.Duration.?.unit) } },
         .Decimal => blk: {
             const dec_t = field_t.type.Decimal.?;
+            const precision = std.math.cast(u8, dec_t.precision) orelse return StreamError.InvalidMetadata;
             const params = datatype.DecimalParams{
-                .precision = @intCast(dec_t.precision),
+                .precision = precision,
                 .scale = dec_t.scale,
             };
             break :blk switch (dec_t.bitWidth) {
@@ -416,16 +439,15 @@ fn buildDataTypeFromFlatbuf(allocator: std.mem.Allocator, field_t: fbs.FieldT) (
                 .MONTH_DAY_NANO => DataType{ .interval_month_day_nano = .{ .unit = .month_day_nano } },
             };
         },
-        .BinaryView,
-        .Utf8View,
-        .ListView,
-        .LargeListView,
-        => return StreamError.UnsupportedType,
+        .BinaryView => DataType{ .binary_view = {} },
+        .Utf8View => DataType{ .string_view = {} },
     };
 
     if (field_t.dictionary) |dict_t| {
         const index_type = dict_t.indexType orelse return StreamError.UnsupportedType;
-        const index = datatype.IntType{ .bit_width = @intCast(index_type.bitWidth), .signed = index_type.is_signed };
+        const bit_width = std.math.cast(u8, index_type.bitWidth) orelse return StreamError.InvalidMetadata;
+        if (bit_width != 8 and bit_width != 16 and bit_width != 32 and bit_width != 64) return StreamError.InvalidMetadata;
+        const index = datatype.IntType{ .bit_width = bit_width, .signed = index_type.is_signed };
         const value_ptr = try allocator.create(DataType);
         value_ptr.* = dtype;
         return DataType{ .dictionary = .{ .id = dict_t.id, .index_type = index, .value_type = value_ptr, .ordered = dict_t.isOrdered } };
@@ -464,8 +486,6 @@ fn buildRecordBatchFromFlatbuf(
     body: array_data.SharedBuffer,
     dictionary_values: *const std.AutoHashMap(i64, ArrayRef),
 ) (StreamError || array_data.ValidationError || record_batch.RecordBatchError || error{OutOfMemory})!RecordBatch {
-    if (record_batch_t.variadicBufferCounts.items.len != 0) return StreamError.UnsupportedType;
-
     const columns = try allocator.alloc(ArrayRef, schema.fields.len);
     var col_count: usize = 0;
     errdefer {
@@ -476,25 +496,33 @@ fn buildRecordBatchFromFlatbuf(
 
     var node_index: usize = 0;
     var buffer_index: usize = 0;
+    var variadic_index: usize = 0;
     for (schema.fields, 0..) |field, i| {
         columns[i] = try readArrayFromMeta(
             allocator,
             field.data_type.*,
             record_batch_t.nodes.items,
             record_batch_t.buffers.items,
+            record_batch_t.variadicBufferCounts.items,
             body,
             &node_index,
             &buffer_index,
+            &variadic_index,
             dictionary_values,
         );
         col_count += 1;
     }
+    if (node_index != record_batch_t.nodes.items.len or buffer_index != record_batch_t.buffers.items.len) {
+        return StreamError.InvalidMetadata;
+    }
+    if (variadic_index != record_batch_t.variadicBufferCounts.items.len) return StreamError.InvalidMetadata;
 
     const batch = try RecordBatch.init(allocator, schema, columns);
     var i: usize = 0;
     while (i < col_count) : (i += 1) columns[i].release();
     allocator.free(columns);
-    if (batch.numRows() != @as(usize, @intCast(record_batch_t.length))) return StreamError.InvalidMetadata;
+    const expected_rows = std.math.cast(usize, record_batch_t.length) orelse return StreamError.InvalidMetadata;
+    if (batch.numRows() != expected_rows) return StreamError.InvalidMetadata;
     return batch;
 }
 
@@ -503,16 +531,18 @@ fn readArrayFromMeta(
     dt: DataType,
     nodes: []const fbs.FieldNodeT,
     buffers_meta: []const fbs.BufferT,
+    variadic_buffer_counts: []const i64,
     body: array_data.SharedBuffer,
     node_index: *usize,
     buffer_index: *usize,
+    variadic_index: *usize,
     dictionary_values: *const std.AutoHashMap(i64, ArrayRef),
 ) (StreamError || array_data.ValidationError || error{OutOfMemory})!ArrayRef {
     if (node_index.* >= nodes.len) return StreamError.InvalidMetadata;
     const node = nodes[node_index.*];
     node_index.* += 1;
 
-    const buffer_count = try bufferCountForType(dt);
+    const buffer_count = try bufferCountForType(dt, variadic_buffer_counts, variadic_index);
     const buffers = try allocator.alloc(array_data.SharedBuffer, buffer_count);
     var buf_count: usize = 0;
     errdefer {
@@ -529,8 +559,9 @@ fn readArrayFromMeta(
         if (buffer_index.* >= buffers_meta.len) return StreamError.InvalidMetadata;
         const meta = buffers_meta[buffer_index.*];
         buffer_index.* += 1;
-        const start = @as(usize, @intCast(meta.offset));
-        const end = start + @as(usize, @intCast(meta.length));
+        const start = std.math.cast(usize, meta.offset) orelse return StreamError.InvalidBody;
+        const len = std.math.cast(usize, meta.length) orelse return StreamError.InvalidBody;
+        const end = std.math.add(usize, start, len) catch return StreamError.InvalidBody;
         if (end > body.len()) return StreamError.InvalidBody;
         buffers[i] = if (meta.length == 0) array_data.SharedBuffer.empty else body.slice(start, end);
         buf_count += 1;
@@ -539,14 +570,14 @@ fn readArrayFromMeta(
     var children: []ArrayRef = &.{};
     var dictionary_ref: ?ArrayRef = null;
     errdefer if (dictionary_ref) |*dict| dict.release();
-    if (dt == .list or dt == .large_list or dt == .fixed_size_list or dt == .map) {
+    if (dt == .list or dt == .large_list or dt == .fixed_size_list or dt == .map or dt == .list_view or dt == .large_list_view) {
         children = try allocator.alloc(ArrayRef, 1);
         errdefer allocator.free(children);
         const child_dt = if (dt == .map)
             (dt.map.entries_type orelse return StreamError.InvalidMetadata).*
         else
             childValueType(dt);
-        children[0] = try readArrayFromMeta(allocator, child_dt, nodes, buffers_meta, body, node_index, buffer_index, dictionary_values);
+        children[0] = try readArrayFromMeta(allocator, child_dt, nodes, buffers_meta, variadic_buffer_counts, body, node_index, buffer_index, variadic_index, dictionary_values);
     } else if (dt == .struct_) {
         const field_count = dt.struct_.fields.len;
         children = try allocator.alloc(ArrayRef, field_count);
@@ -558,7 +589,7 @@ fn readArrayFromMeta(
         }
         var idx: usize = 0;
         while (idx < field_count) : (idx += 1) {
-            children[idx] = try readArrayFromMeta(allocator, dt.struct_.fields[idx].data_type.*, nodes, buffers_meta, body, node_index, buffer_index, dictionary_values);
+            children[idx] = try readArrayFromMeta(allocator, dt.struct_.fields[idx].data_type.*, nodes, buffers_meta, variadic_buffer_counts, body, node_index, buffer_index, variadic_index, dictionary_values);
             filled += 1;
         }
     } else if (dt == .sparse_union or dt == .dense_union) {
@@ -575,23 +606,26 @@ fn readArrayFromMeta(
             allocator.free(children);
         }
         for (union_fields, 0..) |field, idx| {
-            children[idx] = try readArrayFromMeta(allocator, field.data_type.*, nodes, buffers_meta, body, node_index, buffer_index, dictionary_values);
+            children[idx] = try readArrayFromMeta(allocator, field.data_type.*, nodes, buffers_meta, variadic_buffer_counts, body, node_index, buffer_index, variadic_index, dictionary_values);
             filled += 1;
         }
     } else if (dt == .run_end_encoded) {
         children = try allocator.alloc(ArrayRef, 1);
         errdefer allocator.free(children);
-        children[0] = try readArrayFromMeta(allocator, dt.run_end_encoded.value_type.*, nodes, buffers_meta, body, node_index, buffer_index, dictionary_values);
+        children[0] = try readArrayFromMeta(allocator, dt.run_end_encoded.value_type.*, nodes, buffers_meta, variadic_buffer_counts, body, node_index, buffer_index, variadic_index, dictionary_values);
     } else if (dt == .dictionary) {
         const dictionary_id = dt.dictionary.id orelse return StreamError.InvalidMetadata;
         const dict_ref = dictionary_values.get(dictionary_id) orelse return StreamError.InvalidMetadata;
         dictionary_ref = dict_ref.retain();
     }
 
+    const array_len = std.math.cast(usize, node.length) orelse return StreamError.InvalidMetadata;
+    const null_count = std.math.cast(usize, node.null_count) orelse return StreamError.InvalidMetadata;
+
     const data = ArrayData{
         .data_type = dt,
-        .length = @intCast(node.length),
-        .null_count = @intCast(node.null_count),
+        .length = array_len,
+        .null_count = null_count,
         .buffers = buffers,
         .children = children,
         .dictionary = dictionary_ref,
@@ -605,16 +639,25 @@ fn childValueType(dt: DataType) DataType {
         .list => |lst| lst.value_field.data_type.*,
         .large_list => |lst| lst.value_field.data_type.*,
         .fixed_size_list => |lst| lst.value_field.data_type.*,
+        .list_view => |lst| lst.value_field.data_type.*,
+        .large_list_view => |lst| lst.value_field.data_type.*,
         else => dt,
     };
 }
 
-fn bufferCountForType(dt: DataType) StreamError!usize {
+fn bufferCountForType(dt: DataType, variadic_buffer_counts: []const i64, variadic_index: *usize) StreamError!usize {
     return switch (dt) {
         .null => 0,
         .struct_, .fixed_size_list => 1,
         .list, .large_list, .map => 2,
+        .list_view, .large_list_view => 3,
         .string, .binary, .large_string, .large_binary => 3,
+        .string_view, .binary_view => blk: {
+            if (variadic_index.* >= variadic_buffer_counts.len) return StreamError.InvalidMetadata;
+            const variadic_count = std.math.cast(usize, variadic_buffer_counts[variadic_index.*]) orelse return StreamError.InvalidMetadata;
+            variadic_index.* += 1;
+            break :blk std.math.add(usize, 2, variadic_count) catch return StreamError.InvalidMetadata;
+        },
         .bool, .uint8, .int8, .uint16, .int16, .uint32, .int32, .uint64, .int64, .half_float, .float, .double, .fixed_size_binary, .date32, .date64, .time32, .time64, .timestamp, .duration, .interval_months, .interval_day_time, .interval_month_day_nano, .decimal32, .decimal64, .decimal128, .decimal256 => 2,
         .dictionary => 2,
         .sparse_union => 1,
@@ -630,20 +673,22 @@ fn ingestDictionaryBatch(
     dictionary_batch_t: *fbs.DictionaryBatchT,
     body: array_data.SharedBuffer,
 ) (StreamError || array_data.ValidationError || error{OutOfMemory})!void {
-    if (dictionary_batch_t.isDelta) return StreamError.UnsupportedType;
     const record_batch_t = dictionary_batch_t.data orelse return StreamError.InvalidMetadata;
     const value_type = findDictionaryValueType(schema, dictionary_batch_t.id) orelse return StreamError.InvalidMetadata;
 
     var node_index: usize = 0;
     var buffer_index: usize = 0;
+    var variadic_index: usize = 0;
     var dictionary = try readArrayFromMeta(
         self.allocator,
         value_type,
         record_batch_t.nodes.items,
         record_batch_t.buffers.items,
+        record_batch_t.variadicBufferCounts.items,
         body,
         &node_index,
         &buffer_index,
+        &variadic_index,
         &self.dictionary_values,
     );
     errdefer dictionary.release();
@@ -651,6 +696,8 @@ fn ingestDictionaryBatch(
     if (node_index != record_batch_t.nodes.items.len or buffer_index != record_batch_t.buffers.items.len) {
         return StreamError.InvalidMetadata;
     }
+    if (variadic_index != record_batch_t.variadicBufferCounts.items.len) return StreamError.InvalidMetadata;
+    if (dictionary_batch_t.isDelta and self.dictionary_values.get(dictionary_batch_t.id) != null) return StreamError.UnsupportedType;
 
     const previous = try self.dictionary_values.fetchPut(dictionary_batch_t.id, dictionary);
     if (previous) |entry| {
@@ -694,6 +741,220 @@ fn expectMetadataEntry(metadata: []const datatype.KeyValue, key: []const u8, val
         if (std.mem.eql(u8, entry.key, key) and std.mem.eql(u8, entry.value, value)) return;
     }
     return error.MetadataEntryMissing;
+}
+
+test "ipc schema rejects fixed-size-binary metadata with non-positive width" {
+    const allocator = std.testing.allocator;
+
+    const fsb_t = try allocator.create(fbs.FixedSizeBinaryT);
+    fsb_t.* = .{ .byteWidth = 0 };
+
+    var field = fbs.FieldT{
+        .name = "bad_fsb",
+        .nullable = true,
+        .type = .{ .FixedSizeBinary = fsb_t },
+        .dictionary = null,
+        .children = try std.ArrayList(fbs.FieldT).initCapacity(allocator, 0),
+        .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0),
+    };
+    defer field.deinit(allocator);
+
+    try std.testing.expectError(StreamError.InvalidMetadata, buildDataTypeFromFlatbuf(allocator, field));
+}
+
+test "ipc schema rejects dictionary index metadata with invalid bit width" {
+    const allocator = std.testing.allocator;
+
+    const int_t = try allocator.create(fbs.IntT);
+    int_t.* = .{ .bitWidth = 32, .is_signed = true };
+
+    const dict_index_t = try allocator.create(fbs.IntT);
+    dict_index_t.* = .{ .bitWidth = 7, .is_signed = true };
+    const dict_t = try allocator.create(fbs.DictionaryEncodingT);
+    dict_t.* = .{
+        .id = 1,
+        .indexType = dict_index_t,
+        .isOrdered = false,
+        .dictionaryKind = .DenseArray,
+    };
+
+    var field = fbs.FieldT{
+        .name = "bad_dict",
+        .nullable = true,
+        .type = .{ .Int = int_t },
+        .dictionary = dict_t,
+        .children = try std.ArrayList(fbs.FieldT).initCapacity(allocator, 0),
+        .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0),
+    };
+    defer field.deinit(allocator);
+
+    try std.testing.expectError(StreamError.InvalidMetadata, buildDataTypeFromFlatbuf(allocator, field));
+}
+
+test "ipc schema rejects run-end-encoded metadata with unsigned run-end type" {
+    const allocator = std.testing.allocator;
+
+    const run_end_int = try allocator.create(fbs.IntT);
+    run_end_int.* = .{ .bitWidth = 16, .is_signed = false };
+    const run_end_field = fbs.FieldT{
+        .name = "run_ends",
+        .nullable = false,
+        .type = .{ .Int = run_end_int },
+        .dictionary = null,
+        .children = try std.ArrayList(fbs.FieldT).initCapacity(allocator, 0),
+        .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0),
+    };
+
+    const value_int = try allocator.create(fbs.IntT);
+    value_int.* = .{ .bitWidth = 32, .is_signed = true };
+    const value_field = fbs.FieldT{
+        .name = "values",
+        .nullable = true,
+        .type = .{ .Int = value_int },
+        .dictionary = null,
+        .children = try std.ArrayList(fbs.FieldT).initCapacity(allocator, 0),
+        .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0),
+    };
+
+    const ree_t = try allocator.create(fbs.RunEndEncodedT);
+    ree_t.* = .{};
+
+    var children = try std.ArrayList(fbs.FieldT).initCapacity(allocator, 2);
+    try children.append(allocator, run_end_field);
+    try children.append(allocator, value_field);
+
+    var field = fbs.FieldT{
+        .name = "bad_ree",
+        .nullable = true,
+        .type = .{ .RunEndEncoded = ree_t },
+        .dictionary = null,
+        .children = children,
+        .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0),
+    };
+    defer field.deinit(allocator);
+
+    try std.testing.expectError(StreamError.InvalidMetadata, buildDataTypeFromFlatbuf(allocator, field));
+}
+
+test "ipc schema rejects map metadata with nullable entries field" {
+    const allocator = std.testing.allocator;
+
+    const int_t = try allocator.create(fbs.IntT);
+    int_t.* = .{ .bitWidth = 32, .is_signed = true };
+    const key_field = fbs.FieldT{
+        .name = "key",
+        .nullable = false,
+        .type = .{ .Int = int_t },
+        .dictionary = null,
+        .children = try std.ArrayList(fbs.FieldT).initCapacity(allocator, 0),
+        .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0),
+    };
+
+    const val_t = try allocator.create(fbs.IntT);
+    val_t.* = .{ .bitWidth = 32, .is_signed = true };
+    const value_field = fbs.FieldT{
+        .name = "value",
+        .nullable = true,
+        .type = .{ .Int = val_t },
+        .dictionary = null,
+        .children = try std.ArrayList(fbs.FieldT).initCapacity(allocator, 0),
+        .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0),
+    };
+
+    const struct_t = try allocator.create(fbs.Struct_T);
+    struct_t.* = .{};
+    var entries_children = try std.ArrayList(fbs.FieldT).initCapacity(allocator, 2);
+    try entries_children.append(allocator, key_field);
+    try entries_children.append(allocator, value_field);
+    const entries_field = fbs.FieldT{
+        .name = "entries",
+        .nullable = true,
+        .type = .{ .Struct_ = struct_t },
+        .dictionary = null,
+        .children = entries_children,
+        .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0),
+    };
+
+    const map_t = try allocator.create(fbs.MapT);
+    map_t.* = .{ .keysSorted = false };
+    var map_children = try std.ArrayList(fbs.FieldT).initCapacity(allocator, 1);
+    try map_children.append(allocator, entries_field);
+    var map_field = fbs.FieldT{
+        .name = "map_col",
+        .nullable = true,
+        .type = .{ .Map = map_t },
+        .dictionary = null,
+        .children = map_children,
+        .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0),
+    };
+    defer map_field.deinit(allocator);
+
+    try std.testing.expectError(StreamError.InvalidMetadata, buildDataTypeFromFlatbuf(allocator, map_field));
+}
+
+test "ipc schema rejects fixed-size-list metadata with negative list size" {
+    const allocator = std.testing.allocator;
+
+    const child_int = try allocator.create(fbs.IntT);
+    child_int.* = .{ .bitWidth = 32, .is_signed = true };
+    const child_field = fbs.FieldT{
+        .name = "item",
+        .nullable = true,
+        .type = .{ .Int = child_int },
+        .dictionary = null,
+        .children = try std.ArrayList(fbs.FieldT).initCapacity(allocator, 0),
+        .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0),
+    };
+
+    const fsl_t = try allocator.create(fbs.FixedSizeListT);
+    fsl_t.* = .{ .listSize = -1 };
+
+    var children = try std.ArrayList(fbs.FieldT).initCapacity(allocator, 1);
+    try children.append(allocator, child_field);
+    var field = fbs.FieldT{
+        .name = "bad_fsl",
+        .nullable = true,
+        .type = .{ .FixedSizeList = fsl_t },
+        .dictionary = null,
+        .children = children,
+        .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0),
+    };
+    defer field.deinit(allocator);
+
+    try std.testing.expectError(StreamError.InvalidMetadata, buildDataTypeFromFlatbuf(allocator, field));
+}
+
+test "ipc schema accepts list-view metadata with one child" {
+    const allocator = std.testing.allocator;
+
+    const child_int = try allocator.create(fbs.IntT);
+    child_int.* = .{ .bitWidth = 32, .is_signed = true };
+    const child_field = fbs.FieldT{
+        .name = "item",
+        .nullable = true,
+        .type = .{ .Int = child_int },
+        .dictionary = null,
+        .children = try std.ArrayList(fbs.FieldT).initCapacity(allocator, 0),
+        .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0),
+    };
+
+    const lv_t = try allocator.create(fbs.ListViewT);
+    lv_t.* = .{};
+
+    var children = try std.ArrayList(fbs.FieldT).initCapacity(allocator, 1);
+    try children.append(allocator, child_field);
+    var field = fbs.FieldT{
+        .name = "lv",
+        .nullable = true,
+        .type = .{ .ListView = lv_t },
+        .dictionary = null,
+        .children = children,
+        .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0),
+    };
+    defer field.deinit(allocator);
+
+    const dtype = try buildDataTypeFromFlatbuf(allocator, field);
+    try std.testing.expect(dtype == .list_view);
 }
 
 test "ipc stream roundtrip schema and batch" {
@@ -1494,6 +1755,230 @@ test "ipc reader handles non-8-aligned body and still reads next real writer mes
     var second = second_opt.?;
     defer second.deinit(allocator);
     try std.testing.expect(second.msg.header == .Schema);
+}
+
+test "ipc reader returns EndOfStream for truncated metadata payload" {
+    const allocator = std.testing.allocator;
+
+    var bytes = std.array_list.Managed(u8).init(allocator);
+    defer bytes.deinit();
+
+    // Declare metadata length as 16 bytes but provide only 4 bytes.
+    try format.writeMessageLength(bytes.writer(), 16);
+    try bytes.writer().writeAll(&[_]u8{ 0x01, 0x02, 0x03, 0x04 });
+
+    var stream = std.io.fixedBufferStream(bytes.items);
+    var reader = StreamReader(@TypeOf(stream.reader())).init(allocator, stream.reader());
+    defer reader.deinit();
+
+    try std.testing.expectError(error.EndOfStream, reader.readSchema());
+}
+
+test "ipc reader rejects non-schema first message" {
+    const allocator = std.testing.allocator;
+
+    var out = std.array_list.Managed(u8).init(allocator);
+    defer out.deinit();
+
+    const nodes = try std.ArrayList(fbs.FieldNodeT).initCapacity(allocator, 0);
+    const buffers = try std.ArrayList(fbs.BufferT).initCapacity(allocator, 0);
+    const batch_ptr = try allocator.create(fbs.RecordBatchT);
+    batch_ptr.* = .{
+        .length = 0,
+        .nodes = nodes,
+        .buffers = buffers,
+        .variadicBufferCounts = try std.ArrayList(i64).initCapacity(allocator, 0),
+    };
+
+    var msg = fbs.MessageT{
+        .version = .V5,
+        .header = .{ .RecordBatch = batch_ptr },
+        .bodyLength = 0,
+        .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0),
+    };
+    defer msg.deinit(allocator);
+
+    try appendEncodedMessage(allocator, out.writer(), msg, &.{});
+    try format.writeMessageLength(out.writer(), 0);
+
+    var stream = std.io.fixedBufferStream(out.items);
+    var reader = StreamReader(@TypeOf(stream.reader())).init(allocator, stream.reader());
+    defer reader.deinit();
+
+    try std.testing.expectError(StreamError.InvalidMessage, reader.readSchema());
+}
+
+test "ipc reader rejects record batch buffer offset beyond body" {
+    const allocator = std.testing.allocator;
+
+    const int_type = DataType{ .int32 = {} };
+    const fields = [_]Field{
+        .{ .name = "id", .data_type = &int_type, .nullable = false },
+    };
+    const schema = Schema{ .fields = fields[0..] };
+
+    var out = std.array_list.Managed(u8).init(allocator);
+    defer out.deinit();
+
+    var writer = @import("stream_writer.zig").StreamWriter(@TypeOf(out.writer())).init(allocator, out.writer());
+    try writer.writeSchema(schema);
+
+    var nodes = try std.ArrayList(fbs.FieldNodeT).initCapacity(allocator, 0);
+    try nodes.append(allocator, .{ .length = 1, .null_count = 0 });
+
+    var buffers = try std.ArrayList(fbs.BufferT).initCapacity(allocator, 0);
+    try buffers.append(allocator, .{ .offset = 0, .length = 0 });
+    // int32 values buffer claims bytes far beyond the provided body (len=1).
+    try buffers.append(allocator, .{ .offset = 8, .length = 4 });
+
+    const batch_ptr = try allocator.create(fbs.RecordBatchT);
+    batch_ptr.* = .{
+        .length = 1,
+        .nodes = nodes,
+        .buffers = buffers,
+        .variadicBufferCounts = try std.ArrayList(i64).initCapacity(allocator, 0),
+    };
+
+    var malformed_msg = fbs.MessageT{
+        .version = .V5,
+        .header = .{ .RecordBatch = batch_ptr },
+        .bodyLength = 1,
+        .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0),
+    };
+    defer malformed_msg.deinit(allocator);
+
+    try appendEncodedMessage(allocator, out.writer(), malformed_msg, &[_]u8{0x00});
+    try writer.writeEnd();
+
+    var stream = std.io.fixedBufferStream(out.items);
+    var reader = StreamReader(@TypeOf(stream.reader())).init(allocator, stream.reader());
+    defer reader.deinit();
+
+    _ = try reader.readSchema();
+    try std.testing.expectError(StreamError.InvalidBody, reader.nextRecordBatch());
+}
+
+test "ipc reader rejects record batch with trailing metadata entries" {
+    const allocator = std.testing.allocator;
+
+    const int_type = DataType{ .int32 = {} };
+    const fields = [_]Field{
+        .{ .name = "id", .data_type = &int_type, .nullable = false },
+    };
+    const schema = Schema{ .fields = fields[0..] };
+
+    var out = std.array_list.Managed(u8).init(allocator);
+    defer out.deinit();
+
+    var writer = @import("stream_writer.zig").StreamWriter(@TypeOf(out.writer())).init(allocator, out.writer());
+    try writer.writeSchema(schema);
+
+    var nodes = try std.ArrayList(fbs.FieldNodeT).initCapacity(allocator, 0);
+    try nodes.append(allocator, .{ .length = 1, .null_count = 0 });
+    // Unused trailing node should be rejected.
+    try nodes.append(allocator, .{ .length = 999, .null_count = 0 });
+
+    var buffers = try std.ArrayList(fbs.BufferT).initCapacity(allocator, 0);
+    try buffers.append(allocator, .{ .offset = 0, .length = 0 });
+    try buffers.append(allocator, .{ .offset = 0, .length = 4 });
+    // Unused trailing buffer should be rejected.
+    try buffers.append(allocator, .{ .offset = 0, .length = 0 });
+
+    const batch_ptr = try allocator.create(fbs.RecordBatchT);
+    batch_ptr.* = .{
+        .length = 1,
+        .nodes = nodes,
+        .buffers = buffers,
+        .variadicBufferCounts = try std.ArrayList(i64).initCapacity(allocator, 0),
+    };
+
+    var malformed_msg = fbs.MessageT{
+        .version = .V5,
+        .header = .{ .RecordBatch = batch_ptr },
+        .bodyLength = 4,
+        .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0),
+    };
+    defer malformed_msg.deinit(allocator);
+
+    // One int32 value.
+    try appendEncodedMessage(allocator, out.writer(), malformed_msg, &[_]u8{ 1, 0, 0, 0 });
+    try writer.writeEnd();
+
+    var stream = std.io.fixedBufferStream(out.items);
+    var reader = StreamReader(@TypeOf(stream.reader())).init(allocator, stream.reader());
+    defer reader.deinit();
+
+    _ = try reader.readSchema();
+    try std.testing.expectError(StreamError.InvalidMetadata, reader.nextRecordBatch());
+}
+
+test "ipc reader rejects unexpected variadic buffer counts" {
+    const allocator = std.testing.allocator;
+
+    const int_type = DataType{ .int32 = {} };
+    const fields = [_]Field{
+        .{ .name = "id", .data_type = &int_type, .nullable = false },
+    };
+    const schema = Schema{ .fields = fields[0..] };
+
+    var out = std.array_list.Managed(u8).init(allocator);
+    defer out.deinit();
+
+    var writer = @import("stream_writer.zig").StreamWriter(@TypeOf(out.writer())).init(allocator, out.writer());
+    try writer.writeSchema(schema);
+
+    var nodes = try std.ArrayList(fbs.FieldNodeT).initCapacity(allocator, 0);
+    try nodes.append(allocator, .{ .length = 1, .null_count = 0 });
+
+    var buffers = try std.ArrayList(fbs.BufferT).initCapacity(allocator, 0);
+    try buffers.append(allocator, .{ .offset = 0, .length = 0 });
+    try buffers.append(allocator, .{ .offset = 0, .length = 4 });
+
+    var variadic_counts = try std.ArrayList(i64).initCapacity(allocator, 1);
+    try variadic_counts.append(allocator, 1);
+
+    const batch_ptr = try allocator.create(fbs.RecordBatchT);
+    batch_ptr.* = .{
+        .length = 1,
+        .nodes = nodes,
+        .buffers = buffers,
+        .variadicBufferCounts = variadic_counts,
+    };
+
+    var malformed_msg = fbs.MessageT{
+        .version = .V5,
+        .header = .{ .RecordBatch = batch_ptr },
+        .bodyLength = 4,
+        .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0),
+    };
+    defer malformed_msg.deinit(allocator);
+
+    try appendEncodedMessage(allocator, out.writer(), malformed_msg, &[_]u8{ 1, 0, 0, 0 });
+    try writer.writeEnd();
+
+    var stream = std.io.fixedBufferStream(out.items);
+    var reader = StreamReader(@TypeOf(stream.reader())).init(allocator, stream.reader());
+    defer reader.deinit();
+
+    _ = try reader.readSchema();
+    try std.testing.expectError(StreamError.InvalidMetadata, reader.nextRecordBatch());
+}
+
+fn appendEncodedMessage(allocator: std.mem.Allocator, writer: anytype, msg: fbs.MessageT, body: []const u8) !void {
+    var builder = fb.Builder.init(allocator);
+    defer builder.deinitAll();
+
+    const opts: fb.common.PackOptions = .{ .allocator = allocator };
+    const msg_off = try fbs.MessageT.Pack(msg, &builder, opts);
+    try fbs.Message.FinishBuffer(&builder, msg_off);
+    const metadata = try builder.finishedBytes();
+
+    try format.writeMessageLength(writer, @intCast(metadata.len));
+    try writer.writeAll(metadata);
+    try format.writePadding(writer, format.padLen(metadata.len));
+
+    if (body.len > 0) try writer.writeAll(body);
+    try format.writePadding(writer, format.padLen(body.len));
 }
 
 fn appendValidTestMessageWithBody(allocator: std.mem.Allocator, writer: anytype, body_len: usize, fill: u8) !void {

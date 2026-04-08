@@ -60,7 +60,8 @@ pub const ArrayData = struct {
     pub fn validity(self: Self) ?ValidityBitmap {
         if (self.buffers.len == 0) return null;
         if (self.buffers[0].isEmpty()) return null;
-        return ValidityBitmap.fromBuffer(self.buffers[0], self.length + self.offset);
+        const total_len = std.math.add(usize, self.length, self.offset) catch return null;
+        return ValidityBitmap.fromBuffer(self.buffers[0], total_len);
     }
 
     /// Check whether the element at index is null.
@@ -152,7 +153,7 @@ pub const ArrayData = struct {
             .decimal64 => 8,
             .decimal128 => 16,
             .decimal256 => 32,
-            .fixed_size_binary => |fsb| @intCast(fsb.byte_width),
+            .fixed_size_binary => |fsb| std.math.cast(usize, fsb.byte_width) orelse 0,
             else => null,
         };
     }
@@ -168,16 +169,18 @@ pub const ArrayData = struct {
 
     /// Execute validateOffsetsI32 logic for this type.
     fn validateOffsetsI32(offsets: []const i32, total_len: usize, data_len: usize) ValidationError!void {
-        if (offsets.len < total_len + 1) return error.BufferTooSmall;
+        const needed_len = std.math.add(usize, total_len, 1) catch return error.InvalidOffsets;
+        if (offsets.len < needed_len) return error.BufferTooSmall;
         var prev: i32 = offsets[0];
         if (prev < 0) return error.InvalidOffsets;
         var i: usize = 1;
-        while (i < total_len + 1) : (i += 1) {
+        while (i < needed_len) : (i += 1) {
             const cur = offsets[i];
             if (cur < prev or cur < 0) return error.InvalidOffsets;
             prev = cur;
         }
-        if (@as(usize, @intCast(prev)) > data_len) return error.InvalidOffsets;
+        const prev_usize = std.math.cast(usize, prev) orelse return error.InvalidOffsets;
+        if (prev_usize > data_len) return error.InvalidOffsets;
     }
 
     // ListView offsets/sizes are per-element views into the child array.
@@ -189,23 +192,27 @@ pub const ArrayData = struct {
             const off = offsets[i];
             const size = sizes[i];
             if (off < 0 or size < 0) return error.InvalidOffsets;
-            const end = @as(usize, @intCast(off)) + @as(usize, @intCast(size));
+            const off_usize = std.math.cast(usize, off) orelse return error.InvalidOffsets;
+            const size_usize = std.math.cast(usize, size) orelse return error.InvalidOffsets;
+            const end = std.math.add(usize, off_usize, size_usize) catch return error.InvalidOffsets;
             if (end > child_len) return error.InvalidOffsets;
         }
     }
 
     /// Execute validateOffsetsI64 logic for this type.
     fn validateOffsetsI64(offsets: []const i64, total_len: usize, data_len: usize) ValidationError!void {
-        if (offsets.len < total_len + 1) return error.BufferTooSmall;
+        const needed_len = std.math.add(usize, total_len, 1) catch return error.InvalidOffsets;
+        if (offsets.len < needed_len) return error.BufferTooSmall;
         var prev: i64 = offsets[0];
         if (prev < 0) return error.InvalidOffsets;
         var i: usize = 1;
-        while (i < total_len + 1) : (i += 1) {
+        while (i < needed_len) : (i += 1) {
             const cur = offsets[i];
             if (cur < prev or cur < 0) return error.InvalidOffsets;
             prev = cur;
         }
-        if (@as(usize, @intCast(prev)) > data_len) return error.InvalidOffsets;
+        const prev_usize = std.math.cast(usize, prev) orelse return error.InvalidOffsets;
+        if (prev_usize > data_len) return error.InvalidOffsets;
     }
 
     // Run ends must be strictly increasing and cover the logical length.
@@ -221,7 +228,8 @@ pub const ArrayData = struct {
             if (val <= prev) return error.InvalidOffsets;
             prev = val;
         }
-        if (prev < @as(i64, @intCast(total_len))) return error.InvalidOffsets;
+        const total_len_i64 = std.math.cast(i64, total_len) orelse return error.InvalidOffsets;
+        if (prev < total_len_i64) return error.InvalidOffsets;
     }
 
     /// Execute validateRunEndsUnsigned logic for this type.
@@ -237,7 +245,8 @@ pub const ArrayData = struct {
             if (val <= prev) return error.InvalidOffsets;
             prev = val;
         }
-        if (prev < @as(u64, @intCast(total_len))) return error.InvalidOffsets;
+        const total_len_u64 = std.math.cast(u64, total_len) orelse return error.InvalidOffsets;
+        if (prev < total_len_u64) return error.InvalidOffsets;
     }
 
     // LargeListView offsets/sizes use 64-bit indices.
@@ -249,7 +258,9 @@ pub const ArrayData = struct {
             const off = offsets[i];
             const size = sizes[i];
             if (off < 0 or size < 0) return error.InvalidOffsets;
-            const end = @as(usize, @intCast(off)) + @as(usize, @intCast(size));
+            const off_usize = std.math.cast(usize, off) orelse return error.InvalidOffsets;
+            const size_usize = std.math.cast(usize, size) orelse return error.InvalidOffsets;
+            const end = std.math.add(usize, off_usize, size_usize) catch return error.InvalidOffsets;
             if (end > child_len) return error.InvalidOffsets;
         }
     }
@@ -260,7 +271,7 @@ pub const ArrayData = struct {
             if (count != 0 and (self.buffers.len == 0 or self.buffers[0].isEmpty())) return error.InvalidNullCount;
         }
 
-        const total_len = self.offset + self.length;
+        const total_len = std.math.add(usize, self.offset, self.length) catch return error.InvalidOffsets;
         if (self.buffers.len > 0 and !self.buffers[0].isEmpty()) {
             const needed = bitmap.byteLength(total_len);
             if (self.buffers[0].len() < needed) return error.BufferTooSmall;
@@ -283,7 +294,7 @@ pub const ArrayData = struct {
 
                 // Views are validated against the child logical length.
                 const child_data = self.children[0].data();
-                const child_len = child_data.length + child_data.offset;
+                const child_len = std.math.add(usize, child_data.length, child_data.offset) catch return error.InvalidChildren;
                 if (offset_width == 4) {
                     const offsets = self.buffers[1].typedSlice(i32);
                     const sizes = self.buffers[2].typedSlice(i32);
@@ -308,7 +319,7 @@ pub const ArrayData = struct {
 
                 const data_len = if (is_list) blk: {
                     const child_data = self.children[0].data();
-                    break :blk child_data.length + child_data.offset;
+                    break :blk std.math.add(usize, child_data.length, child_data.offset) catch return error.InvalidChildren;
                 } else if (self.buffers.len >= 3) self.buffers[2].len() else 0;
 
                 if (offset_width == 4) {
@@ -328,17 +339,19 @@ pub const ArrayData = struct {
                 };
                 if (self.children.len != expected) return error.InvalidChildren;
                 if (self.data_type == .fixed_size_list) {
-                    const list_size = @as(usize, @intCast(self.data_type.fixed_size_list.list_size));
-                    const required = total_len * list_size;
+                    const list_size = std.math.cast(usize, self.data_type.fixed_size_list.list_size) orelse return error.InvalidChildren;
+                    const required = std.math.mul(usize, total_len, list_size) catch return error.InvalidChildren;
                     const child_data = self.children[0].data();
-                    if (child_data.length + child_data.offset < required) return error.InvalidChildren;
+                    const child_total = std.math.add(usize, child_data.length, child_data.offset) catch return error.InvalidChildren;
+                    if (child_total < required) return error.InvalidChildren;
                 }
             },
             .dictionary => |dict| {
                 if (self.buffers.len < 2) return error.InvalidBufferCount;
                 const byte_width = dict.index_type.bit_width / 8;
                 if (byte_width == 0) return error.InvalidOffsetBuffer;
-                if (self.buffers[1].len() < total_len * byte_width) return error.BufferTooSmall;
+                const needed = std.math.mul(usize, total_len, byte_width) catch return error.BufferTooSmall;
+                if (self.buffers[1].len() < needed) return error.BufferTooSmall;
                 if (self.dictionary == null) return error.MissingDictionary;
             },
             .sparse_union => |uni| {
@@ -350,7 +363,8 @@ pub const ArrayData = struct {
                 if (self.buffers.len < 2) return error.InvalidBufferCount;
                 if (self.children.len != uni.fields.len) return error.InvalidChildren;
                 if (self.buffers[0].len() < total_len) return error.BufferTooSmall;
-                if (self.buffers[1].len() < total_len * @sizeOf(i32)) return error.BufferTooSmall;
+                const needed = std.math.mul(usize, total_len, @sizeOf(i32)) catch return error.BufferTooSmall;
+                if (self.buffers[1].len() < needed) return error.BufferTooSmall;
             },
             .run_end_encoded => {
                 if (self.buffers.len < 1) return error.InvalidBufferCount;
@@ -391,7 +405,8 @@ pub const ArrayData = struct {
                 if (fixedWidthByteSize(self.data_type)) |byte_width| {
                     if (self.buffers.len < 2) return error.InvalidBufferCount;
                     if (byte_width == 0) return error.InvalidOffsetBuffer;
-                    if (self.buffers[1].len() < total_len * byte_width) return error.BufferTooSmall;
+                    const needed = std.math.mul(usize, total_len, byte_width) catch return error.BufferTooSmall;
+                    if (self.buffers[1].len() < needed) return error.BufferTooSmall;
                 }
             },
         }
@@ -403,7 +418,8 @@ pub const ArrayData = struct {
 
         if (self.null_count) |expected_count| {
             if (self.buffers.len > 0 and !self.buffers[0].isEmpty()) {
-                const validity_bitmap = ValidityBitmap.fromBuffer(self.buffers[0], self.offset + self.length);
+                const total_len = std.math.add(usize, self.offset, self.length) catch return error.InvalidOffsets;
+                const validity_bitmap = ValidityBitmap.fromBuffer(self.buffers[0], total_len);
                 var actual_count: usize = 0;
                 var i: usize = 0;
                 while (i < self.length) : (i += 1) {
