@@ -56,8 +56,16 @@ pub const ArrayData = struct {
 
     const Self = @This();
 
+    fn hasTopLevelValidityBitmap(dt: DataType) bool {
+        return switch (dt) {
+            .null, .sparse_union, .dense_union => false,
+            else => true,
+        };
+    }
+
     /// Execute validity logic for this type.
     pub fn validity(self: Self) ?ValidityBitmap {
+        if (!hasTopLevelValidityBitmap(self.data_type)) return null;
         if (self.buffers.len == 0) return null;
         if (self.buffers[0].isEmpty()) return null;
         const total_len = std.math.add(usize, self.length, self.offset) catch return null;
@@ -275,13 +283,17 @@ pub const ArrayData = struct {
             // Null arrays have no validity bitmap; all elements are implicitly null.
             if (self.data_type == .null) {
                 if (count != self.length) return error.InvalidNullCount;
-            } else {
-                if (count != 0 and (self.buffers.len == 0 or self.buffers[0].isEmpty())) return error.InvalidNullCount;
+            } else if (!hasTopLevelValidityBitmap(self.data_type)) {
+                // Union arrays have no validity bitmap; null_count must be 0.
+                if (count != 0) return error.InvalidNullCount;
+            } else if (count != 0 and (self.buffers.len == 0 or self.buffers[0].isEmpty())) {
+                return error.InvalidNullCount;
             }
         }
 
         const total_len = std.math.add(usize, self.offset, self.length) catch return error.InvalidOffsets;
-        if (self.buffers.len > 0 and !self.buffers[0].isEmpty()) {
+        const has_top_level_validity = hasTopLevelValidityBitmap(self.data_type);
+        if (has_top_level_validity and self.buffers.len > 0 and !self.buffers[0].isEmpty()) {
             const needed = bitmap.byteLength(total_len);
             if (self.buffers[0].len() < needed) return error.BufferTooSmall;
         }
@@ -441,7 +453,7 @@ pub const ArrayData = struct {
         try self.validateLayout();
 
         if (self.null_count) |expected_count| {
-            if (self.buffers.len > 0 and !self.buffers[0].isEmpty()) {
+            if (hasTopLevelValidityBitmap(self.data_type) and self.buffers.len > 0 and !self.buffers[0].isEmpty()) {
                 const total_len = std.math.add(usize, self.offset, self.length) catch return error.InvalidOffsets;
                 const validity_bitmap = ValidityBitmap.fromBuffer(self.buffers[0], total_len);
                 var actual_count: usize = 0;
@@ -575,6 +587,46 @@ test "array data validateLayout rejects null type invalid null count" {
         .length = 3,
         .null_count = 2,
         .buffers = &[_]SharedBuffer{},
+    };
+
+    try std.testing.expectError(error.InvalidNullCount, data.validateLayout());
+}
+
+test "array data validateLayout rejects sparse union nonzero null count" {
+    const value_type = DataType{ .int32 = {} };
+    const union_fields = [_]datatype.Field{.{ .name = "i", .data_type = &value_type, .nullable = true }};
+    const union_type_ids = [_]i8{5};
+    const sparse_union_type = DataType{
+        .sparse_union = .{
+            .type_ids = union_type_ids[0..],
+            .fields = union_fields[0..],
+            .mode = .sparse,
+        },
+    };
+
+    var child_values: [2 * @sizeOf(i32)]u8 align(buffer.ALIGNMENT) = undefined;
+    @memcpy(child_values[0..], std.mem.sliceAsBytes(&[_]i32{ 11, 22 }));
+    const child_data = ArrayData{
+        .data_type = value_type,
+        .length = 2,
+        .null_count = 0,
+        .buffers = &[_]SharedBuffer{ SharedBuffer.empty, SharedBuffer.fromSlice(child_values[0..]) },
+    };
+    var child_ref = try ArrayRef.fromBorrowed(std.testing.allocator, child_data);
+    defer child_ref.release();
+    const children = &[_]ArrayRef{child_ref.retain()};
+    defer {
+        var owned = children[0];
+        owned.release();
+    }
+
+    const type_ids: [2]u8 = .{ 5, 5 };
+    const data = ArrayData{
+        .data_type = sparse_union_type,
+        .length = 2,
+        .null_count = 1,
+        .buffers = &[_]SharedBuffer{SharedBuffer.fromSlice(type_ids[0..])},
+        .children = children,
     };
 
     try std.testing.expectError(error.InvalidNullCount, data.validateLayout());
