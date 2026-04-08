@@ -179,6 +179,7 @@ pub const MapType = struct {
     key_field: Field,
     item_field: Field,
     keys_sorted: bool = false,
+    entries_type: ?*const DataType = null,
 };
 
 pub const UnionType = struct {
@@ -188,6 +189,7 @@ pub const UnionType = struct {
 };
 
 pub const DictionaryType = struct {
+    id: ?i64 = null,
     index_type: IntType,
     value_type: *const DataType,
     ordered: bool = false,

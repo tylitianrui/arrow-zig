@@ -31,12 +31,25 @@ const fbs = struct {
     const Endianness = arrow_fbs.org_apache_arrow_flatbuf_Endianness.Endianness;
     const KeyValueT = arrow_fbs.org_apache_arrow_flatbuf_KeyValue.KeyValueT;
     const RecordBatchT = arrow_fbs.org_apache_arrow_flatbuf_RecordBatch.RecordBatchT;
+    const DictionaryBatchT = arrow_fbs.org_apache_arrow_flatbuf_DictionaryBatch.DictionaryBatchT;
     const FieldNodeT = arrow_fbs.org_apache_arrow_flatbuf_FieldNode.FieldNodeT;
     const BufferT = arrow_fbs.org_apache_arrow_flatbuf_Buffer.BufferT;
     const DictionaryEncodingT = arrow_fbs.org_apache_arrow_flatbuf_DictionaryEncoding.DictionaryEncodingT;
     const IntT = arrow_fbs.org_apache_arrow_flatbuf_Int.IntT;
     const FloatingPointT = arrow_fbs.org_apache_arrow_flatbuf_FloatingPoint.FloatingPointT;
     const Precision = arrow_fbs.org_apache_arrow_flatbuf_Precision.Precision;
+    const DateT = arrow_fbs.org_apache_arrow_flatbuf_Date.DateT;
+    const DateUnit = arrow_fbs.org_apache_arrow_flatbuf_DateUnit.DateUnit;
+    const TimeT = arrow_fbs.org_apache_arrow_flatbuf_Time.TimeT;
+    const TimeUnit = arrow_fbs.org_apache_arrow_flatbuf_TimeUnit.TimeUnit;
+    const TimestampT = arrow_fbs.org_apache_arrow_flatbuf_Timestamp.TimestampT;
+    const DurationT = arrow_fbs.org_apache_arrow_flatbuf_Duration.DurationT;
+    const DecimalT = arrow_fbs.org_apache_arrow_flatbuf_Decimal.DecimalT;
+    const IntervalT = arrow_fbs.org_apache_arrow_flatbuf_Interval.IntervalT;
+    const IntervalUnit = arrow_fbs.org_apache_arrow_flatbuf_IntervalUnit.IntervalUnit;
+    const UnionT = arrow_fbs.org_apache_arrow_flatbuf_Union.UnionT;
+    const UnionMode = arrow_fbs.org_apache_arrow_flatbuf_UnionMode.UnionMode;
+    const RunEndEncodedT = arrow_fbs.org_apache_arrow_flatbuf_RunEndEncoded.RunEndEncodedT;
     const FixedSizeBinaryT = arrow_fbs.org_apache_arrow_flatbuf_FixedSizeBinary.FixedSizeBinaryT;
     const FixedSizeListT = arrow_fbs.org_apache_arrow_flatbuf_FixedSizeList.FixedSizeListT;
     const MapT = arrow_fbs.org_apache_arrow_flatbuf_Map.MapT;
@@ -65,7 +78,8 @@ pub fn StreamWriter(comptime WriterType: type) type {
         pub fn writeSchema(self: *Self, schema: Schema) (WriterError || @TypeOf(self.writer).Error)!void {
             const schema_ptr = try self.allocator.create(fbs.SchemaT);
             errdefer self.allocator.destroy(schema_ptr);
-            schema_ptr.* = try buildSchemaT(self.allocator, schema);
+            var next_dictionary_id: i64 = 0;
+            schema_ptr.* = try buildSchemaT(self.allocator, schema, &next_dictionary_id);
 
             var msg = fbs.MessageT{
                 .version = .V5,
@@ -79,6 +93,30 @@ pub fn StreamWriter(comptime WriterType: type) type {
         }
 
         pub fn writeRecordBatch(self: *Self, batch: RecordBatch) (WriterError || @TypeOf(self.writer).Error)!void {
+            var dictionary_ids = try std.ArrayList(i64).initCapacity(self.allocator, 0);
+            defer dictionary_ids.deinit(self.allocator);
+            var next_dictionary_id: i64 = 0;
+            for (batch.schema.fields) |field| {
+                try collectDictionaryIdsFromField(self.allocator, field, &next_dictionary_id, &dictionary_ids);
+            }
+
+            var dictionary_arrays = try std.ArrayList(ArrayRef).initCapacity(self.allocator, 0);
+            defer {
+                for (dictionary_arrays.items) |dict_ref| {
+                    var owned = dict_ref;
+                    owned.release();
+                }
+                dictionary_arrays.deinit(self.allocator);
+            }
+            for (batch.columns) |col| {
+                try collectDictionaryArraysFromData(self.allocator, col.data(), &dictionary_arrays);
+            }
+            if (dictionary_ids.items.len != dictionary_arrays.items.len) return StreamError.InvalidMetadata;
+
+            for (dictionary_ids.items, dictionary_arrays.items) |dictionary_id, dict_ref| {
+                try writeDictionaryBatch(self.allocator, self.writer, dictionary_id, dict_ref.data());
+            }
+
             var nodes = try std.ArrayList(fbs.FieldNodeT).initCapacity(self.allocator, 0);
             var buffers = try std.ArrayList(fbs.BufferT).initCapacity(self.allocator, 0);
             var body_buffers = try std.ArrayList(array_data.SharedBuffer).initCapacity(self.allocator, 0);
@@ -138,10 +176,10 @@ fn writeMessage(allocator: std.mem.Allocator, writer: anytype, msg: fbs.MessageT
     try format.writePadding(writer, format.padLen(@as(usize, @intCast(msg.bodyLength))));
 }
 
-fn buildSchemaT(allocator: std.mem.Allocator, schema: Schema) WriterError!fbs.SchemaT {
+fn buildSchemaT(allocator: std.mem.Allocator, schema: Schema, next_dictionary_id: *i64) WriterError!fbs.SchemaT {
     var fields = try std.ArrayList(fbs.FieldT).initCapacity(allocator, 0);
     for (schema.fields) |field| {
-        try fields.append(allocator, try buildFieldT(allocator, field));
+        try fields.append(allocator, try buildFieldT(allocator, field, next_dictionary_id));
     }
 
     return .{
@@ -152,31 +190,88 @@ fn buildSchemaT(allocator: std.mem.Allocator, schema: Schema) WriterError!fbs.Sc
     };
 }
 
-fn buildFieldT(allocator: std.mem.Allocator, field: Field) WriterError!fbs.FieldT {
+fn buildFieldT(allocator: std.mem.Allocator, field: Field, next_dictionary_id: *i64) WriterError!fbs.FieldT {
     var children = try std.ArrayList(fbs.FieldT).initCapacity(allocator, 0);
-    const type_t = try buildTypeT(allocator, field.data_type.*);
+    const logical_type = switch (field.data_type.*) {
+        .dictionary => |dict| dict.value_type.*,
+        else => field.data_type.*,
+    };
+    const type_t = try buildTypeT(allocator, logical_type);
 
-    switch (field.data_type.*) {
+    switch (logical_type) {
         .list => |lst| {
-            try children.append(allocator, try buildFieldT(allocator, lst.value_field));
+            try children.append(allocator, try buildFieldT(allocator, lst.value_field, next_dictionary_id));
         },
         .large_list => |lst| {
-            try children.append(allocator, try buildFieldT(allocator, lst.value_field));
+            try children.append(allocator, try buildFieldT(allocator, lst.value_field, next_dictionary_id));
         },
         .fixed_size_list => |lst| {
-            try children.append(allocator, try buildFieldT(allocator, lst.value_field));
+            try children.append(allocator, try buildFieldT(allocator, lst.value_field, next_dictionary_id));
         },
         .struct_ => |st| {
-            for (st.fields) |child| try children.append(allocator, try buildFieldT(allocator, child));
+            for (st.fields) |child| try children.append(allocator, try buildFieldT(allocator, child, next_dictionary_id));
+        },
+        .map => |map_t| {
+            var entry_children = try std.ArrayList(fbs.FieldT).initCapacity(allocator, 0);
+            try entry_children.append(allocator, try buildFieldT(allocator, map_t.key_field, next_dictionary_id));
+            try entry_children.append(allocator, try buildFieldT(allocator, map_t.item_field, next_dictionary_id));
+            try children.append(allocator, .{
+                .name = "entries",
+                .nullable = false,
+                .type = .{ .Struct_ = try allocT(allocator, fbs.Struct_T, .{}) },
+                .dictionary = null,
+                .children = entry_children,
+                .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0),
+            });
+        },
+        .sparse_union, .dense_union => |uni| {
+            for (uni.fields) |child| try children.append(allocator, try buildFieldT(allocator, child, next_dictionary_id));
+        },
+        .run_end_encoded => |ree| {
+            const run_end_dt = dataTypeFromIntType(ree.run_end_type);
+            const run_end_field = Field{
+                .name = "run_ends",
+                .data_type = &run_end_dt,
+                .nullable = false,
+            };
+            const value_dt = ree.value_type.*;
+            const value_field = Field{
+                .name = "values",
+                .data_type = &value_dt,
+                .nullable = true,
+            };
+            try children.append(allocator, try buildFieldT(allocator, run_end_field, next_dictionary_id));
+            try children.append(allocator, try buildFieldT(allocator, value_field, next_dictionary_id));
         },
         else => {},
     }
+
+    const dictionary_t = switch (field.data_type.*) {
+        .dictionary => |dict| blk: {
+            const dictionary_id = dict.id orelse id_blk: {
+                const assigned = next_dictionary_id.*;
+                next_dictionary_id.* += 1;
+                break :id_blk assigned;
+            };
+            const index_type_ptr = try allocT(allocator, fbs.IntT, .{
+                .bitWidth = dict.index_type.bit_width,
+                .is_signed = dict.index_type.signed,
+            });
+            break :blk try allocT(allocator, fbs.DictionaryEncodingT, .{
+                .id = dictionary_id,
+                .indexType = index_type_ptr,
+                .isOrdered = dict.ordered,
+                .dictionaryKind = .DenseArray,
+            });
+        },
+        else => null,
+    };
 
     return .{
         .name = field.name,
         .nullable = field.nullable,
         .type = type_t,
-        .dictionary = null,
+        .dictionary = dictionary_t,
         .children = children,
         .custom_metadata = try buildCustomMetadataT(allocator, field.metadata),
     };
@@ -230,8 +325,52 @@ fn buildTypeT(allocator: std.mem.Allocator, dt: DataType) WriterError!fbs.TypeT 
         .struct_ => .{ .Struct_ = try allocT(allocator, fbs.Struct_T, .{}) },
         .fixed_size_binary => |fsb| .{ .FixedSizeBinary = try allocT(allocator, fbs.FixedSizeBinaryT, .{ .byteWidth = fsb.byte_width }) },
         .fixed_size_list => |fsl| .{ .FixedSizeList = try allocT(allocator, fbs.FixedSizeListT, .{ .listSize = fsl.list_size }) },
-        .dictionary, .map, .list_view, .large_list_view, .binary_view, .string_view, .extension, .decimal32, .decimal64, .decimal128, .decimal256, .date32, .date64, .time32, .time64, .timestamp, .duration, .interval_months, .interval_day_time, .interval_month_day_nano, .sparse_union, .dense_union, .run_end_encoded => StreamError.UnsupportedType,
+        .date32 => .{ .Date = try allocT(allocator, fbs.DateT, .{ .unit = .DAY }) },
+        .date64 => .{ .Date = try allocT(allocator, fbs.DateT, .{ .unit = .MILLISECOND }) },
+        .time32 => |t| .{ .Time = try allocT(allocator, fbs.TimeT, .{ .unit = toFbsTimeUnit(t.unit), .bitWidth = 32 }) },
+        .time64 => |t| .{ .Time = try allocT(allocator, fbs.TimeT, .{ .unit = toFbsTimeUnit(t.unit), .bitWidth = 64 }) },
+        .timestamp => |ts| .{ .Timestamp = try allocT(allocator, fbs.TimestampT, .{ .unit = toFbsTimeUnit(ts.unit), .timezone = ts.timezone orelse "" }) },
+        .duration => |d| .{ .Duration = try allocT(allocator, fbs.DurationT, .{ .unit = toFbsTimeUnit(d.unit) }) },
+        .interval_months => .{ .Interval = try allocT(allocator, fbs.IntervalT, .{ .unit = .YEAR_MONTH }) },
+        .interval_day_time => .{ .Interval = try allocT(allocator, fbs.IntervalT, .{ .unit = .DAY_TIME }) },
+        .interval_month_day_nano => .{ .Interval = try allocT(allocator, fbs.IntervalT, .{ .unit = .MONTH_DAY_NANO }) },
+        .decimal32 => |d| .{ .Decimal = try allocT(allocator, fbs.DecimalT, .{ .precision = @intCast(d.precision), .scale = d.scale, .bitWidth = 32 }) },
+        .decimal64 => |d| .{ .Decimal = try allocT(allocator, fbs.DecimalT, .{ .precision = @intCast(d.precision), .scale = d.scale, .bitWidth = 64 }) },
+        .decimal128 => |d| .{ .Decimal = try allocT(allocator, fbs.DecimalT, .{ .precision = @intCast(d.precision), .scale = d.scale, .bitWidth = 128 }) },
+        .decimal256 => |d| .{ .Decimal = try allocT(allocator, fbs.DecimalT, .{ .precision = @intCast(d.precision), .scale = d.scale, .bitWidth = 256 }) },
+        .map => |m| .{ .Map = try allocT(allocator, fbs.MapT, .{ .keysSorted = m.keys_sorted }) },
+        .sparse_union => |u| blk: {
+            var type_ids = try std.ArrayList(i32).initCapacity(allocator, u.type_ids.len);
+            for (u.type_ids) |id| try type_ids.append(allocator, id);
+            break :blk .{
+                .Union = try allocT(allocator, fbs.UnionT, .{
+                    .mode = .Sparse,
+                    .typeIds = type_ids,
+                }),
+            };
+        },
+        .dense_union => |u| blk: {
+            var type_ids = try std.ArrayList(i32).initCapacity(allocator, u.type_ids.len);
+            for (u.type_ids) |id| try type_ids.append(allocator, id);
+            break :blk .{
+                .Union = try allocT(allocator, fbs.UnionT, .{
+                    .mode = .Dense,
+                    .typeIds = type_ids,
+                }),
+            };
+        },
+        .run_end_encoded => .{ .RunEndEncoded = try allocT(allocator, fbs.RunEndEncodedT, .{}) },
+        .dictionary, .list_view, .large_list_view, .binary_view, .string_view, .extension => StreamError.UnsupportedType,
         else => StreamError.UnsupportedType,
+    };
+}
+
+fn toFbsTimeUnit(unit: datatype.TimeUnit) fbs.TimeUnit {
+    return switch (unit) {
+        .second => .SECOND,
+        .millisecond => .MILLISECOND,
+        .microsecond => .MICROSECOND,
+        .nanosecond => .NANOSECOND,
     };
 }
 
@@ -239,6 +378,101 @@ fn allocT(allocator: std.mem.Allocator, comptime T: type, value: T) error{OutOfM
     const ptr = try allocator.create(T);
     ptr.* = value;
     return ptr;
+}
+
+fn dataTypeFromIntType(int_type: datatype.IntType) DataType {
+    return switch (int_type.bit_width) {
+        8 => if (int_type.signed) .{ .int8 = {} } else .{ .uint8 = {} },
+        16 => if (int_type.signed) .{ .int16 = {} } else .{ .uint16 = {} },
+        32 => if (int_type.signed) .{ .int32 = {} } else .{ .uint32 = {} },
+        64 => if (int_type.signed) .{ .int64 = {} } else .{ .uint64 = {} },
+        else => unreachable,
+    };
+}
+
+fn collectDictionaryIdsFromField(
+    allocator: std.mem.Allocator,
+    field: Field,
+    next_dictionary_id: *i64,
+    ids: *std.ArrayList(i64),
+) error{OutOfMemory}!void {
+    switch (field.data_type.*) {
+        .dictionary => |dict| {
+            const dictionary_id = dict.id orelse id_blk: {
+                const assigned = next_dictionary_id.*;
+                next_dictionary_id.* += 1;
+                break :id_blk assigned;
+            };
+            try ids.append(allocator, dictionary_id);
+        },
+        .list => |lst| try collectDictionaryIdsFromField(allocator, lst.value_field, next_dictionary_id, ids),
+        .large_list => |lst| try collectDictionaryIdsFromField(allocator, lst.value_field, next_dictionary_id, ids),
+        .fixed_size_list => |lst| try collectDictionaryIdsFromField(allocator, lst.value_field, next_dictionary_id, ids),
+        .struct_ => |st| for (st.fields) |child| try collectDictionaryIdsFromField(allocator, child, next_dictionary_id, ids),
+        else => {},
+    }
+}
+
+fn collectDictionaryArraysFromData(
+    allocator: std.mem.Allocator,
+    data: *const ArrayData,
+    out: *std.ArrayList(ArrayRef),
+) error{OutOfMemory}!void {
+    switch (data.data_type) {
+        .dictionary => {
+            if (data.dictionary == null) return;
+            try out.append(allocator, data.dictionary.?.retain());
+        },
+        .list, .large_list, .fixed_size_list => {
+            if (data.children.len == 1) try collectDictionaryArraysFromData(allocator, data.children[0].data(), out);
+        },
+        .struct_ => {
+            for (data.children) |child| try collectDictionaryArraysFromData(allocator, child.data(), out);
+        },
+        else => {},
+    }
+}
+
+fn writeDictionaryBatch(
+    allocator: std.mem.Allocator,
+    writer: anytype,
+    dictionary_id: i64,
+    dictionary_data: *const ArrayData,
+) (WriterError || @TypeOf(writer).Error)!void {
+    var nodes = try std.ArrayList(fbs.FieldNodeT).initCapacity(allocator, 0);
+    var buffers = try std.ArrayList(fbs.BufferT).initCapacity(allocator, 0);
+    var body_buffers = try std.ArrayList(array_data.SharedBuffer).initCapacity(allocator, 0);
+    defer body_buffers.deinit(allocator);
+
+    var body_offset: u64 = 0;
+    try appendArrayMeta(allocator, dictionary_data, &nodes, &buffers, &body_buffers, &body_offset);
+
+    const record_batch_ptr = try allocator.create(fbs.RecordBatchT);
+    errdefer allocator.destroy(record_batch_ptr);
+    record_batch_ptr.* = .{
+        .length = @intCast(dictionary_data.length),
+        .nodes = nodes,
+        .buffers = buffers,
+        .variadicBufferCounts = try std.ArrayList(i64).initCapacity(allocator, 0),
+    };
+
+    const dictionary_batch_ptr = try allocator.create(fbs.DictionaryBatchT);
+    errdefer allocator.destroy(dictionary_batch_ptr);
+    dictionary_batch_ptr.* = .{
+        .id = dictionary_id,
+        .data = record_batch_ptr,
+        .isDelta = false,
+    };
+
+    var msg = fbs.MessageT{
+        .version = .V5,
+        .header = .{ .DictionaryBatch = dictionary_batch_ptr },
+        .bodyLength = @intCast(body_offset),
+        .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0),
+    };
+    defer msg.deinit(allocator);
+
+    try writeMessage(allocator, writer, msg, body_buffers.items);
 }
 
 fn appendArrayMeta(
@@ -259,7 +493,7 @@ fn appendArrayMeta(
     }
 
     switch (data.data_type) {
-        .list, .large_list, .fixed_size_list => {
+        .list, .large_list, .fixed_size_list, .map => {
             if (data.children.len != 1) return StreamError.InvalidMetadata;
             try appendArrayMeta(allocator, data.children[0].data(), nodes, buffers, body_buffers, body_offset);
         },
@@ -268,7 +502,17 @@ fn appendArrayMeta(
                 try appendArrayMeta(allocator, child.data(), nodes, buffers, body_buffers, body_offset);
             }
         },
-        .dictionary => return StreamError.UnsupportedType,
+        .sparse_union, .dense_union => {
+            for (data.children) |child| {
+                try appendArrayMeta(allocator, child.data(), nodes, buffers, body_buffers, body_offset);
+            }
+        },
+        .run_end_encoded => |ree| {
+            _ = ree;
+            if (data.children.len != 1) return StreamError.InvalidMetadata;
+            try appendArrayMeta(allocator, data.children[0].data(), nodes, buffers, body_buffers, body_offset);
+        },
+        .dictionary => {},
         else => {},
     }
 }

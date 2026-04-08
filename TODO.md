@@ -91,6 +91,15 @@ Goal: Build a production-usable Zig implementation of Apache Arrow core memory m
 - [ ] B4.2 Add invalid offset/length payload tests.
 - [ ] B4.3 Add deterministic error mapping for parse failures.
 
+### B5. IPC Type Coverage Expansion
+
+- [x] B5.1 Add Date/Time/Timestamp/Duration IPC read+write support.
+- [x] B5.2 Add Decimal32/64/128/256 IPC read+write support.
+- [x] B5.3 Add DictionaryBatch write and dictionary array read reconstruction.
+- [x] B5.4 Add Map IPC read+write support.
+- [x] B5.5 Add Union IPC read+write support.
+- [x] B5.6 Add RunEndEncoded IPC read+write support.
+
 ## Phase C - Interop and Hardening
 
 ### C1. Arrow C Data Interface (FFI)
