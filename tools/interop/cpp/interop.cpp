@@ -83,8 +83,10 @@ arrow::Status GenerateRee(const std::string& path) {
   std::shared_ptr<arrow::Array> values;
   ARROW_RETURN_NOT_OK(values_builder.Finish(&values));
 
-  ARROW_ASSIGN_OR_RAISE(auto ree_arr, arrow::RunEndEncodedArray::Make(run_ends, values));
-  auto batch = arrow::RecordBatch::Make(schema, 5, {ree_arr});
+  ARROW_ASSIGN_OR_RAISE(auto ree_arr, arrow::RunEndEncodedArray::Make(5, run_ends, values, 0));
+  std::vector<std::shared_ptr<arrow::Array>> columns;
+  columns.push_back(std::static_pointer_cast<arrow::Array>(ree_arr));
+  auto batch = arrow::RecordBatch::Make(schema, 5, std::move(columns));
 
   ARROW_ASSIGN_OR_RAISE(auto out, arrow::io::FileOutputStream::Open(path));
   ARROW_ASSIGN_OR_RAISE(auto writer, arrow::ipc::MakeStreamWriter(out.get(), schema));
