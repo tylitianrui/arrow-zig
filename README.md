@@ -1,5 +1,6 @@
 # zarrow
 
+[English](README.md) | [中文](docs/README-ZH.md)
 Zig implementation of Apache Arrow.
 
 ## Goals
@@ -16,8 +17,25 @@ zarrow aims to provide a Zig implementation of the Apache Arrow in-memory model,
 
 zarrow is currently in active development.
 
-The ownership model, public APIs, and supported Arrow types are still evolving.  
-At this stage, the goal is to make the core memory model, validation rules, and array construction semantics explicit and correct before expanding broader format and ecosystem support.
+The ownership model and APIs are still evolving, but the IPC path is now much stricter and more explicit about invalid input handling.
+
+Current status (April 2026):
+
+- Core Arrow in-memory model, array builders, validation, and zero-copy slicing are implemented.
+- IPC stream reader supports schema + record batch + dictionary batch parsing with metadata versions V4/V5 (little-endian schema only).
+- IPC reader performs explicit bounds/cast/overflow checks for body length, buffer offsets/lengths, and node lengths, and maps malformed inputs to `StreamError`/validation errors instead of trapping.
+- RecordBatch metadata now requires full consumption (`nodes`, `buffers`, and `variadicBufferCounts` must all be exhausted) to avoid accepting trailing garbage metadata.
+- Dictionary schema metadata now validates index bit width strictly (`8/16/32/64` only).
+
+Known limitations:
+
+- IPC writer does not yet emit view-based types (`string_view`, `binary_view`, `list_view`, `large_list_view`) or `extension` types.
+- Dictionary delta updates are not fully implemented; a delta for an already-present dictionary id is rejected.
+- Full Arrow IPC feature coverage is still in progress (this is not yet a complete implementation of every optional IPC feature).
+
+Validation baseline:
+
+- `zig build test` is expected to pass in-tree before merging changes.
 
 ## Generate IPC Fixtures (PyArrow)
 
