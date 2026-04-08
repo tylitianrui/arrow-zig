@@ -144,30 +144,32 @@ pub const RunEndEncodedArray = struct {
 
     /// Execute runCount logic for this type.
     fn runCount(self: RunEndEncodedArray) usize {
-        const byte_width = self.data.data_type.run_end_encoded.run_end_type.bit_width / 8;
-        return self.data.buffers[0].len() / byte_width;
+        std.debug.assert(self.data.children.len == 2);
+        return self.data.children[0].data().length;
     }
 
     /// Execute runEndAt logic for this type.
     fn runEndAt(self: RunEndEncodedArray, run_index: usize) i64 {
+        std.debug.assert(self.data.children.len == 2);
+        const run_ends = self.data.children[0].data();
         const run_ty = self.data.data_type.run_end_encoded.run_end_type;
         return switch (run_ty.bit_width) {
             8 => if (run_ty.signed)
-                @as(i64, self.data.buffers[0].typedSlice(i8)[run_index])
+                @as(i64, run_ends.buffers[1].typedSlice(i8)[run_ends.offset + run_index])
             else
-                @as(i64, @intCast(self.data.buffers[0].typedSlice(u8)[run_index])),
+                @as(i64, @intCast(run_ends.buffers[1].typedSlice(u8)[run_ends.offset + run_index])),
             16 => if (run_ty.signed)
-                @as(i64, self.data.buffers[0].typedSlice(i16)[run_index])
+                @as(i64, run_ends.buffers[1].typedSlice(i16)[run_ends.offset + run_index])
             else
-                @as(i64, @intCast(self.data.buffers[0].typedSlice(u16)[run_index])),
+                @as(i64, @intCast(run_ends.buffers[1].typedSlice(u16)[run_ends.offset + run_index])),
             32 => if (run_ty.signed)
-                @as(i64, self.data.buffers[0].typedSlice(i32)[run_index])
+                @as(i64, run_ends.buffers[1].typedSlice(i32)[run_ends.offset + run_index])
             else
-                @as(i64, @intCast(self.data.buffers[0].typedSlice(u32)[run_index])),
+                @as(i64, @intCast(run_ends.buffers[1].typedSlice(u32)[run_ends.offset + run_index])),
             64 => if (run_ty.signed)
-                self.data.buffers[0].typedSlice(i64)[run_index]
+                run_ends.buffers[1].typedSlice(i64)[run_ends.offset + run_index]
             else
-                @as(i64, @intCast(self.data.buffers[0].typedSlice(u64)[run_index])),
+                @as(i64, @intCast(run_ends.buffers[1].typedSlice(u64)[run_ends.offset + run_index])),
             else => unreachable,
         };
     }
@@ -192,18 +194,28 @@ pub const RunEndEncodedArray = struct {
     /// Return the logical value view at the requested index.
     pub fn value(self: RunEndEncodedArray, i: usize) !ArrayRef {
         std.debug.assert(i < self.data.length);
-        std.debug.assert(self.data.children.len == 1);
+        std.debug.assert(self.data.children.len == 2);
         const run_idx = self.runIndexFor(self.data.offset + i);
         if (run_idx >= self.runCount()) return error.InvalidRunEnds;
-        return self.data.children[0].slice(run_idx, 1);
+        return self.data.children[1].slice(run_idx, 1);
     }
 
     /// Execute valuesRef logic for this type.
     pub fn valuesRef(self: RunEndEncodedArray) *const ArrayRef {
-        std.debug.assert(self.data.children.len == 1);
-        return &self.data.children[0];
+        std.debug.assert(self.data.children.len == 2);
+        return &self.data.children[1];
     }
 };
+
+fn dataTypeFromIntType(int_type: IntType) DataType {
+    return switch (int_type.bit_width) {
+        8 => if (int_type.signed) .{ .int8 = {} } else .{ .uint8 = {} },
+        16 => if (int_type.signed) .{ .int16 = {} } else .{ .uint16 = {} },
+        32 => if (int_type.signed) .{ .int32 = {} } else .{ .uint32 = {} },
+        64 => if (int_type.signed) .{ .int64 = {} } else .{ .uint64 = {} },
+        else => unreachable,
+    };
+}
 
 pub const MapBuilder = struct {
     allocator: std.mem.Allocator,
@@ -605,11 +617,24 @@ pub const RunEndEncodedBuilder = struct {
         const bytes = self.run_count * (@as(usize, self.run_end_type.bit_width) / 8);
         const run_ends_buf = try self.run_ends.toShared(bytes);
 
-        const buffers = try self.allocator.alloc(SharedBuffer, 1);
-        buffers[0] = run_ends_buf;
+        const run_end_dt = dataTypeFromIntType(self.run_end_type);
+        const run_end_buffers = try self.allocator.alloc(SharedBuffer, 2);
+        run_end_buffers[0] = SharedBuffer.empty;
+        run_end_buffers[1] = run_ends_buf;
 
-        const children = try self.allocator.alloc(ArrayRef, 1);
-        children[0] = values.retain();
+        var run_end_ref = try ArrayRef.fromOwnedUnsafe(self.allocator, .{
+            .data_type = run_end_dt,
+            .length = self.run_count,
+            .null_count = 0,
+            .buffers = run_end_buffers,
+        });
+        errdefer run_end_ref.release();
+
+        const buffers = try self.allocator.alloc(SharedBuffer, 0);
+
+        const children = try self.allocator.alloc(ArrayRef, 2);
+        children[0] = run_end_ref;
+        children[1] = values.retain();
 
         const data = ArrayData{
             .data_type = DataType{ .run_end_encoded = .{ .run_end_type = self.run_end_type, .value_type = self.value_type } },
@@ -802,6 +827,10 @@ test "run end encoded builder and array basic path" {
 
     var out = try builder.finish(values_ref);
     defer out.release();
+
+    try std.testing.expectEqual(@as(usize, 0), out.data().buffers.len);
+    try std.testing.expectEqual(@as(usize, 2), out.data().children.len);
+    try std.testing.expect(out.data().children[0].data().data_type == .int32);
 
     const ree = RunEndEncodedArray{ .data = out.data() };
     try std.testing.expectEqual(@as(usize, 5), ree.len());

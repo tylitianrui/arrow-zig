@@ -17,6 +17,7 @@ const WriterAdapter = struct {
 const FixtureCase = enum {
     canonical,
     dict_delta,
+    ree,
 };
 
 pub fn main() !void {
@@ -28,13 +29,14 @@ pub fn main() !void {
     defer args.deinit();
     _ = args.next(); // exe
     const out_path = args.next() orelse {
-        std.log.err("usage: interop-fixture-writer <out.arrow> [canonical|dict-delta]", .{});
+        std.log.err("usage: interop-fixture-writer <out.arrow> [canonical|dict-delta|ree]", .{});
         return error.InvalidArgs;
     };
     const fixture_case: FixtureCase = blk: {
         const mode = args.next() orelse break :blk .canonical;
         if (std.mem.eql(u8, mode, "canonical")) break :blk .canonical;
         if (std.mem.eql(u8, mode, "dict-delta")) break :blk .dict_delta;
+        if (std.mem.eql(u8, mode, "ree")) break :blk .ree;
         std.log.err("unknown fixture mode: {s}", .{mode});
         return error.InvalidArgs;
     };
@@ -50,8 +52,49 @@ pub fn main() !void {
     switch (fixture_case) {
         .canonical => try writeCanonicalFixture(allocator, &writer),
         .dict_delta => try writeDictionaryDeltaFixture(allocator, &writer),
+        .ree => try writeReeFixture(allocator, &writer),
     }
     try writer_adapter.flush();
+}
+
+fn writeReeFixture(allocator: std.mem.Allocator, writer: *zarrow.IpcStreamWriter(WriterAdapter)) !void {
+    const value_type = zarrow.DataType{ .int32 = {} };
+    const ree_type = zarrow.DataType{
+        .run_end_encoded = .{
+            .run_end_type = .{ .bit_width = 32, .signed = true },
+            .value_type = &value_type,
+        },
+    };
+    const fields = [_]zarrow.Field{
+        .{ .name = "ree", .data_type = &ree_type, .nullable = true },
+    };
+    const schema = zarrow.Schema{ .fields = fields[0..] };
+
+    var values_builder = try zarrow.Int32Builder.init(allocator, 2);
+    defer values_builder.deinit();
+    try values_builder.append(100);
+    try values_builder.append(200);
+    var values = try values_builder.finish();
+    defer values.release();
+
+    var ree_builder = try zarrow.RunEndEncodedBuilder.init(
+        allocator,
+        .{ .bit_width = 32, .signed = true },
+        &value_type,
+        2,
+    );
+    defer ree_builder.deinit();
+    try ree_builder.appendRunEnd(2);
+    try ree_builder.appendRunEnd(5);
+    var ree = try ree_builder.finish(values);
+    defer ree.release();
+
+    var batch = try zarrow.RecordBatch.init(allocator, schema, &[_]zarrow.ArrayRef{ree});
+    defer batch.deinit();
+
+    try writer.writeSchema(schema);
+    try writer.writeRecordBatch(batch);
+    try writer.writeEnd();
 }
 
 fn writeCanonicalFixture(allocator: std.mem.Allocator, writer: *zarrow.IpcStreamWriter(WriterAdapter)) !void {

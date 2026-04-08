@@ -108,6 +108,9 @@ jobs:
       - name: Generate zarrow dictionary-delta fixture
         run: zig build interop-fixture-writer -- .interop-fixtures/zarrow_dict_delta.arrow dict-delta
 
+      - name: Generate zarrow REE fixture
+        run: zig build interop-fixture-writer -- .interop-fixtures/zarrow_ree.arrow ree
+
       - name: PyArrow roundtrip checks
         run: |
           python tools/interop/pyarrow_generate.py .interop-fixtures/pyarrow.arrow
@@ -116,6 +119,9 @@ jobs:
           python tools/interop/pyarrow_generate.py .interop-fixtures/pyarrow_dict_delta.arrow dict-delta
           zig build interop-fixture-check -- .interop-fixtures/pyarrow_dict_delta.arrow dict-delta
           python tools/interop/pyarrow_validate.py .interop-fixtures/zarrow_dict_delta.arrow dict-delta
+          python tools/interop/pyarrow_generate.py .interop-fixtures/pyarrow_ree.arrow ree
+          zig build interop-fixture-check -- .interop-fixtures/pyarrow_ree.arrow ree
+          python tools/interop/pyarrow_validate.py .interop-fixtures/zarrow_ree.arrow ree
 
       - name: Arrow-RS roundtrip checks
         run: |
@@ -132,11 +138,13 @@ jobs:
           conda activate arrow-cpp-env
           ./.interop-bin/interop_cpp generate .interop-fixtures/arrow_cpp.arrow
           ./.interop-bin/interop_cpp generate .interop-fixtures/arrow_cpp_dict_delta.arrow dict-delta
+          ./.interop-bin/interop_cpp generate .interop-fixtures/arrow_cpp_ree.arrow ree
 
       - name: Validate Arrow C++ fixture with zarrow
         run: |
           zig build interop-fixture-check -- .interop-fixtures/arrow_cpp.arrow
           zig build interop-fixture-check -- .interop-fixtures/arrow_cpp_dict_delta.arrow dict-delta
+          zig build interop-fixture-check -- .interop-fixtures/arrow_cpp_ree.arrow ree
 
       - name: Arrow C++ validate zarrow fixture
         shell: bash -l {0}
@@ -144,3 +152,4 @@ jobs:
           conda activate arrow-cpp-env
           ./.interop-bin/interop_cpp validate .interop-fixtures/zarrow.arrow
           ./.interop-bin/interop_cpp validate .interop-fixtures/zarrow_dict_delta.arrow dict-delta
+          ./.interop-bin/interop_cpp validate .interop-fixtures/zarrow_ree.arrow ree

@@ -485,6 +485,16 @@ fn intTypeFromDataType(dt: DataType) StreamError!datatype.IntType {
     };
 }
 
+fn dataTypeFromIntType(int_type: datatype.IntType) DataType {
+    return switch (int_type.bit_width) {
+        8 => if (int_type.signed) .{ .int8 = {} } else .{ .uint8 = {} },
+        16 => if (int_type.signed) .{ .int16 = {} } else .{ .uint16 = {} },
+        32 => if (int_type.signed) .{ .int32 = {} } else .{ .uint32 = {} },
+        64 => if (int_type.signed) .{ .int64 = {} } else .{ .uint64 = {} },
+        else => unreachable,
+    };
+}
+
 fn buildRecordBatchFromFlatbuf(
     allocator: std.mem.Allocator,
     schema: Schema,
@@ -616,9 +626,19 @@ fn readArrayFromMeta(
             filled += 1;
         }
     } else if (dt == .run_end_encoded) {
-        children = try allocator.alloc(ArrayRef, 1);
-        errdefer allocator.free(children);
-        children[0] = try readArrayFromMeta(allocator, dt.run_end_encoded.value_type.*, nodes, buffers_meta, variadic_buffer_counts, body, node_index, buffer_index, variadic_index, dictionary_values);
+        children = try allocator.alloc(ArrayRef, 2);
+        var filled: usize = 0;
+        errdefer {
+            var j: usize = 0;
+            while (j < filled) : (j += 1) children[j].release();
+            allocator.free(children);
+        }
+
+        const run_end_dt = dataTypeFromIntType(dt.run_end_encoded.run_end_type);
+        children[0] = try readArrayFromMeta(allocator, run_end_dt, nodes, buffers_meta, variadic_buffer_counts, body, node_index, buffer_index, variadic_index, dictionary_values);
+        filled += 1;
+        children[1] = try readArrayFromMeta(allocator, dt.run_end_encoded.value_type.*, nodes, buffers_meta, variadic_buffer_counts, body, node_index, buffer_index, variadic_index, dictionary_values);
+        filled += 1;
     } else if (dt == .dictionary) {
         const dictionary_id = dt.dictionary.id orelse return StreamError.InvalidMetadata;
         const dict_ref = dictionary_values.get(dictionary_id) orelse return StreamError.InvalidMetadata;
@@ -668,7 +688,7 @@ fn bufferCountForType(dt: DataType, variadic_buffer_counts: []const i64, variadi
         .dictionary => 2,
         .sparse_union => 1,
         .dense_union => 2,
-        .run_end_encoded => 1,
+        .run_end_encoded => 0,
         else => StreamError.UnsupportedType,
     };
 }
@@ -1978,10 +1998,11 @@ test "ipc reader merges dictionary delta batches" {
     };
     defer msg_dict1.deinit(allocator);
     const dict1_body = [_]u8{
-        0, 0, 0, 0,
-        3, 0, 0, 0,
-        7, 0, 0, 0,
-        'r', 'e', 'd', 'b', 'l', 'u', 'e',
+        0,   0,   0,   0,
+        3,   0,   0,   0,
+        7,   0,   0,   0,
+        'r', 'e', 'd', 'b',
+        'l', 'u', 'e',
     };
     try appendEncodedMessage(allocator, out.writer(), msg_dict1, &dict1_body);
 
@@ -2012,9 +2033,10 @@ test "ipc reader merges dictionary delta batches" {
     };
     defer msg_dict2.deinit(allocator);
     const dict2_body = [_]u8{
-        0, 0, 0, 0,
-        5, 0, 0, 0,
-        'g', 'r', 'e', 'e', 'n',
+        0,   0,   0,   0,
+        5,   0,   0,   0,
+        'g', 'r', 'e', 'e',
+        'n',
     };
     try appendEncodedMessage(allocator, out.writer(), msg_dict2, &dict2_body);
 
@@ -2516,6 +2538,9 @@ test "ipc stream roundtrip run-end encoded int32 values" {
     try std.testing.expect(out_batch_opt != null);
     var out_batch = out_batch_opt.?;
     defer out_batch.deinit();
+
+    try std.testing.expectEqual(@as(usize, 0), out_batch.columns[0].data().buffers.len);
+    try std.testing.expectEqual(@as(usize, 2), out_batch.columns[0].data().children.len);
 
     const ree = @import("../array/advanced_array.zig").RunEndEncodedArray{ .data = out_batch.columns[0].data() };
     try std.testing.expectEqual(@as(usize, 5), ree.len());

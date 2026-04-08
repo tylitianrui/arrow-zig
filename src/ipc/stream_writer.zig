@@ -490,8 +490,11 @@ fn collectDictionaryArraysFromData(
         .list, .large_list, .fixed_size_list, .list_view, .large_list_view => {
             if (data.children.len == 1) try collectDictionaryArraysFromData(allocator, data.children[0].data(), out);
         },
-        .map, .run_end_encoded => {
+        .map => {
             if (data.children.len == 1) try collectDictionaryArraysFromData(allocator, data.children[0].data(), out);
+        },
+        .run_end_encoded => {
+            if (data.children.len == 2) try collectDictionaryArraysFromData(allocator, data.children[1].data(), out);
         },
         .struct_ => {
             for (data.children) |child| try collectDictionaryArraysFromData(allocator, child.data(), out);
@@ -777,8 +780,10 @@ fn appendArrayMeta(
         },
         .run_end_encoded => |ree| {
             _ = ree;
-            if (data.children.len != 1) return StreamError.InvalidMetadata;
+            if (data.buffers.len != 0) return StreamError.InvalidMetadata;
+            if (data.children.len != 2) return StreamError.InvalidMetadata;
             try appendArrayMeta(allocator, data.children[0].data(), nodes, buffers, variadic_buffer_counts, body_buffers, body_offset);
+            try appendArrayMeta(allocator, data.children[1].data(), nodes, buffers, variadic_buffer_counts, body_buffers, body_offset);
         },
         .dictionary => {},
         else => {},

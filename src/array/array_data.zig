@@ -44,7 +44,7 @@ pub const ValidationError = error{
 /// - Union (sparse): [type_ids], children = fields; no offsets buffer.
 /// - Union (dense): [type_ids], [offsets], children = fields.
 /// - Map: [validity], [i32 offsets], children[0] = struct of (key, item).
-/// - RunEndEncoded: [run_ends], children[0] = values (length == run count).
+/// - RunEndEncoded: no top-level buffers; children[0] = run_ends, children[1] = values.
 pub const ArrayData = struct {
     data_type: DataType,
     length: usize,
@@ -367,37 +367,52 @@ pub const ArrayData = struct {
                 if (self.buffers[1].len() < needed) return error.BufferTooSmall;
             },
             .run_end_encoded => {
-                if (self.buffers.len < 1) return error.InvalidBufferCount;
-                if (self.children.len != 1) return error.InvalidChildren;
+                if (self.buffers.len != 0) return error.InvalidBufferCount;
+                if (self.children.len != 2) return error.InvalidChildren;
+
+                const run_ends = self.children[0].data();
+                const values = self.children[1].data();
+                const run_end_dt = switch (self.data_type.run_end_encoded.run_end_type.bit_width) {
+                    8 => if (self.data_type.run_end_encoded.run_end_type.signed) DataType{ .int8 = {} } else DataType{ .uint8 = {} },
+                    16 => if (self.data_type.run_end_encoded.run_end_type.signed) DataType{ .int16 = {} } else DataType{ .uint16 = {} },
+                    32 => if (self.data_type.run_end_encoded.run_end_type.signed) DataType{ .int32 = {} } else DataType{ .uint32 = {} },
+                    64 => if (self.data_type.run_end_encoded.run_end_type.signed) DataType{ .int64 = {} } else DataType{ .uint64 = {} },
+                    else => return error.InvalidOffsetBuffer,
+                };
+                if (!std.meta.eql(run_ends.data_type, run_end_dt)) return error.InvalidChildren;
+                if (run_ends.buffers.len < 2) return error.InvalidChildren;
 
                 const byte_width = switch (self.data_type) {
                     .run_end_encoded => |ree| ree.run_end_type.bit_width / 8,
                     else => 0,
                 };
                 if (byte_width == 0) return error.InvalidOffsetBuffer;
-                if (self.buffers[0].len() % byte_width != 0) return error.InvalidOffsetBuffer;
+                if (run_ends.buffers[1].len() % byte_width != 0) return error.InvalidOffsetBuffer;
 
                 // One run end per value in the values child.
-                const run_count = self.buffers[0].len() / byte_width;
-                if (self.children[0].data().length != run_count) return error.InvalidChildren;
+                const run_count = run_ends.length;
+                if (values.length != run_count) return error.InvalidChildren;
+
+                const run_ends_slice_start = run_ends.offset;
+                const run_ends_slice_end = std.math.add(usize, run_ends.offset, run_ends.length) catch return error.InvalidOffsets;
 
                 switch (byte_width) {
                     1 => if (self.data_type.run_end_encoded.run_end_type.signed)
-                        try validateRunEndsSigned(i8, self.buffers[0].typedSlice(i8), total_len)
+                        try validateRunEndsSigned(i8, run_ends.buffers[1].typedSlice(i8)[run_ends_slice_start..run_ends_slice_end], total_len)
                     else
-                        try validateRunEndsUnsigned(u8, self.buffers[0].typedSlice(u8), total_len),
+                        try validateRunEndsUnsigned(u8, run_ends.buffers[1].typedSlice(u8)[run_ends_slice_start..run_ends_slice_end], total_len),
                     2 => if (self.data_type.run_end_encoded.run_end_type.signed)
-                        try validateRunEndsSigned(i16, self.buffers[0].typedSlice(i16), total_len)
+                        try validateRunEndsSigned(i16, run_ends.buffers[1].typedSlice(i16)[run_ends_slice_start..run_ends_slice_end], total_len)
                     else
-                        try validateRunEndsUnsigned(u16, self.buffers[0].typedSlice(u16), total_len),
+                        try validateRunEndsUnsigned(u16, run_ends.buffers[1].typedSlice(u16)[run_ends_slice_start..run_ends_slice_end], total_len),
                     4 => if (self.data_type.run_end_encoded.run_end_type.signed)
-                        try validateRunEndsSigned(i32, self.buffers[0].typedSlice(i32), total_len)
+                        try validateRunEndsSigned(i32, run_ends.buffers[1].typedSlice(i32)[run_ends_slice_start..run_ends_slice_end], total_len)
                     else
-                        try validateRunEndsUnsigned(u32, self.buffers[0].typedSlice(u32), total_len),
+                        try validateRunEndsUnsigned(u32, run_ends.buffers[1].typedSlice(u32)[run_ends_slice_start..run_ends_slice_end], total_len),
                     8 => if (self.data_type.run_end_encoded.run_end_type.signed)
-                        try validateRunEndsSigned(i64, self.buffers[0].typedSlice(i64), total_len)
+                        try validateRunEndsSigned(i64, run_ends.buffers[1].typedSlice(i64)[run_ends_slice_start..run_ends_slice_end], total_len)
                     else
-                        try validateRunEndsUnsigned(u64, self.buffers[0].typedSlice(u64), total_len),
+                        try validateRunEndsUnsigned(u64, run_ends.buffers[1].typedSlice(u64)[run_ends_slice_start..run_ends_slice_end], total_len),
                     else => return error.InvalidOffsetBuffer,
                 }
             },
@@ -679,28 +694,40 @@ test "array data validateLayout accepts run_end_encoded" {
 
     var child_values: [2 * @sizeOf(i32)]u8 align(buffer.ALIGNMENT) = undefined;
     @memcpy(child_values[0..], std.mem.sliceAsBytes(&[_]i32{ 10, 20 }));
-    const child = ArrayData{
+    const values_child = ArrayData{
         .data_type = value_type,
         .length = 2,
         .null_count = 0,
         .buffers = &[_]SharedBuffer{ SharedBuffer.empty, SharedBuffer.fromSlice(child_values[0..]) },
     };
-    var child_ref = try ArrayRef.fromBorrowed(std.testing.allocator, child);
-    defer child_ref.release();
-    const children = &[_]ArrayRef{child_ref.retain()};
-    defer {
-        var owned = children[0];
-        owned.release();
-    }
 
     const run_ends = [_]i32{ 2, 5 };
     var run_end_bytes: [run_ends.len * @sizeOf(i32)]u8 align(buffer.ALIGNMENT) = undefined;
     @memcpy(run_end_bytes[0..], std.mem.sliceAsBytes(run_ends[0..]));
 
+    const run_ends_child = ArrayData{
+        .data_type = .{ .int32 = {} },
+        .length = run_ends.len,
+        .null_count = 0,
+        .buffers = &[_]SharedBuffer{ SharedBuffer.empty, SharedBuffer.fromSlice(run_end_bytes[0..]) },
+    };
+
+    var run_ends_ref = try ArrayRef.fromBorrowed(std.testing.allocator, run_ends_child);
+    defer run_ends_ref.release();
+    var values_ref = try ArrayRef.fromBorrowed(std.testing.allocator, values_child);
+    defer values_ref.release();
+    const children = &[_]ArrayRef{ run_ends_ref.retain(), values_ref.retain() };
+    defer {
+        var run_ends_owned = children[0];
+        run_ends_owned.release();
+        var values_owned = children[1];
+        values_owned.release();
+    }
+
     const data = ArrayData{
         .data_type = ree_type,
         .length = 5,
-        .buffers = &[_]SharedBuffer{SharedBuffer.fromSlice(run_end_bytes[0..])},
+        .buffers = &[_]SharedBuffer{},
         .children = children,
     };
 
@@ -714,28 +741,40 @@ test "array data validateLayout rejects run_end_encoded nonmonotonic" {
 
     var child_values: [2 * @sizeOf(i32)]u8 align(buffer.ALIGNMENT) = undefined;
     @memcpy(child_values[0..], std.mem.sliceAsBytes(&[_]i32{ 10, 20 }));
-    const child = ArrayData{
+    const values_child = ArrayData{
         .data_type = value_type,
         .length = 2,
         .null_count = 0,
         .buffers = &[_]SharedBuffer{ SharedBuffer.empty, SharedBuffer.fromSlice(child_values[0..]) },
     };
-    var child_ref = try ArrayRef.fromBorrowed(std.testing.allocator, child);
-    defer child_ref.release();
-    const children = &[_]ArrayRef{child_ref.retain()};
-    defer {
-        var owned = children[0];
-        owned.release();
-    }
 
     const run_ends = [_]i32{ 3, 2 };
     var run_end_bytes: [run_ends.len * @sizeOf(i32)]u8 align(buffer.ALIGNMENT) = undefined;
     @memcpy(run_end_bytes[0..], std.mem.sliceAsBytes(run_ends[0..]));
 
+    const run_ends_child = ArrayData{
+        .data_type = .{ .int32 = {} },
+        .length = run_ends.len,
+        .null_count = 0,
+        .buffers = &[_]SharedBuffer{ SharedBuffer.empty, SharedBuffer.fromSlice(run_end_bytes[0..]) },
+    };
+
+    var run_ends_ref = try ArrayRef.fromBorrowed(std.testing.allocator, run_ends_child);
+    defer run_ends_ref.release();
+    var values_ref = try ArrayRef.fromBorrowed(std.testing.allocator, values_child);
+    defer values_ref.release();
+    const children = &[_]ArrayRef{ run_ends_ref.retain(), values_ref.retain() };
+    defer {
+        var run_ends_owned = children[0];
+        run_ends_owned.release();
+        var values_owned = children[1];
+        values_owned.release();
+    }
+
     const data = ArrayData{
         .data_type = ree_type,
         .length = 5,
-        .buffers = &[_]SharedBuffer{SharedBuffer.fromSlice(run_end_bytes[0..])},
+        .buffers = &[_]SharedBuffer{},
         .children = children,
     };
 

@@ -13,6 +13,7 @@ const ReaderAdapter = struct {
 const FixtureCase = enum {
     canonical,
     dict_delta,
+    ree,
 };
 
 pub fn main() !void {
@@ -24,13 +25,14 @@ pub fn main() !void {
     defer args.deinit();
     _ = args.next(); // exe
     const in_path = args.next() orelse {
-        std.log.err("usage: interop-fixture-check <in.arrow> [canonical|dict-delta]", .{});
+        std.log.err("usage: interop-fixture-check <in.arrow> [canonical|dict-delta|ree]", .{});
         return error.InvalidArgs;
     };
     const fixture_case: FixtureCase = blk: {
         const mode = args.next() orelse break :blk .canonical;
         if (std.mem.eql(u8, mode, "canonical")) break :blk .canonical;
         if (std.mem.eql(u8, mode, "dict-delta")) break :blk .dict_delta;
+        if (std.mem.eql(u8, mode, "ree")) break :blk .ree;
         std.log.err("unknown fixture mode: {s}", .{mode});
         return error.InvalidArgs;
     };
@@ -46,7 +48,36 @@ pub fn main() !void {
     switch (fixture_case) {
         .canonical => try checkCanonical(&reader),
         .dict_delta => try checkDictionaryDelta(&reader),
+        .ree => try checkRee(&reader),
     }
+}
+
+fn checkRee(reader: *zarrow.IpcStreamReader(ReaderAdapter)) !void {
+    const schema = try reader.readSchema();
+    if (schema.fields.len != 1) return error.InvalidSchema;
+    if (!std.mem.eql(u8, schema.fields[0].name, "ree")) return error.InvalidSchema;
+    if (schema.fields[0].data_type.* != .run_end_encoded) return error.InvalidSchema;
+    const ree_dt = schema.fields[0].data_type.run_end_encoded;
+    if (ree_dt.run_end_type.bit_width != 32 or !ree_dt.run_end_type.signed) return error.InvalidSchema;
+    if (ree_dt.value_type.* != .int32) return error.InvalidSchema;
+
+    const batch_opt = try reader.nextRecordBatch();
+    if (batch_opt == null) return error.MissingBatch;
+    var batch = batch_opt.?;
+    defer batch.deinit();
+    if (batch.numRows() != 5) return error.InvalidBatch;
+
+    const ree = zarrow.RunEndEncodedArray{ .data = batch.columns[0].data() };
+    const expected = [_]i32{ 100, 100, 200, 200, 200 };
+    for (expected, 0..) |want, i| {
+        var one = try ree.value(i);
+        defer one.release();
+        const ints = zarrow.Int32Array{ .data = one.data() };
+        if (ints.value(0) != want) return error.InvalidBatch;
+    }
+
+    const done = try reader.nextRecordBatch();
+    if (done != null) return error.UnexpectedExtraBatch;
 }
 
 fn checkCanonical(reader: *zarrow.IpcStreamReader(ReaderAdapter)) !void {

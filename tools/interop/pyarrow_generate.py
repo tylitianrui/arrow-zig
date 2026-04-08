@@ -47,9 +47,19 @@ def generate_dict_delta(out_path: pathlib.Path) -> None:
         writer.write_batch(batch_2)
 
 
+def generate_ree(out_path: pathlib.Path) -> None:
+    run_ends = pa.array([2, 5], type=pa.int32())
+    values = pa.array([100, 200], type=pa.int32())
+    col = pa.RunEndEncodedArray.from_arrays(run_ends, values)
+    schema = pa.schema([pa.field("ree", col.type, nullable=True)])
+    batch = pa.record_batch([col], schema=schema)
+    with ipc.new_stream(out_path, schema) as writer:
+        writer.write_batch(batch)
+
+
 def main() -> int:
     if len(sys.argv) not in (2, 3):
-        print("usage: pyarrow_generate.py <out.arrow> [canonical|dict-delta]", file=sys.stderr)
+        print("usage: pyarrow_generate.py <out.arrow> [canonical|dict-delta|ree]", file=sys.stderr)
         return 2
 
     out_path = pathlib.Path(sys.argv[1])
@@ -61,6 +71,9 @@ def main() -> int:
         return 0
     if mode == "dict-delta":
         generate_dict_delta(out_path)
+        return 0
+    if mode == "ree":
+        generate_ree(out_path)
         return 0
     print(f"unknown mode: {mode}", file=sys.stderr)
     return 2

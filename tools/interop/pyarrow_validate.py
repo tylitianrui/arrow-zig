@@ -74,9 +74,37 @@ def validate_dict_delta(in_path: pathlib.Path) -> None:
         raise RuntimeError("invalid second batch values")
 
 
+def validate_ree(in_path: pathlib.Path) -> None:
+    with ipc.open_stream(in_path) as reader:
+        schema = reader.schema
+        if len(schema) != 1:
+            raise RuntimeError("invalid schema field count")
+        if schema[0].name != "ree":
+            raise RuntimeError("invalid ree field name")
+        ree_type = schema[0].type
+        if not pa.types.is_run_end_encoded(ree_type):
+            raise RuntimeError("ree field must be run_end_encoded type")
+        if ree_type.run_end_type != pa.int32():
+            raise RuntimeError("ree run_end_type must be int32")
+        if ree_type.value_type != pa.int32():
+            raise RuntimeError("ree value_type must be int32")
+
+        batches = list(reader)
+    if len(batches) != 1:
+        raise RuntimeError("expected exactly one batch")
+
+    batch = batches[0]
+    if batch.num_rows != 5:
+        raise RuntimeError("invalid row count")
+
+    values = batch.column(0).to_pylist()
+    if values != [100, 100, 200, 200, 200]:
+        raise RuntimeError(f"invalid ree values: {values!r}")
+
+
 def main() -> int:
     if len(sys.argv) not in (2, 3):
-        print("usage: pyarrow_validate.py <in.arrow> [canonical|dict-delta]", file=sys.stderr)
+        print("usage: pyarrow_validate.py <in.arrow> [canonical|dict-delta|ree]", file=sys.stderr)
         return 2
 
     in_path = pathlib.Path(sys.argv[1])
@@ -86,6 +114,9 @@ def main() -> int:
         return 0
     if mode == "dict-delta":
         validate_dict_delta(in_path)
+        return 0
+    if mode == "ree":
+        validate_ree(in_path)
         return 0
     print(f"unknown mode: {mode}", file=sys.stderr)
     return 2

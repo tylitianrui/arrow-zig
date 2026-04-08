@@ -69,6 +69,30 @@ arrow::Status GenerateDictDelta(const std::string& path) {
   return out->Close();
 }
 
+arrow::Status GenerateRee(const std::string& path) {
+  auto ree_type = arrow::run_end_encoded(arrow::int32(), arrow::int32());
+  auto schema = arrow::schema({arrow::field("ree", ree_type, true)});
+
+  arrow::Int32Builder run_ends_builder;
+  ARROW_RETURN_NOT_OK(run_ends_builder.AppendValues({2, 5}));
+  std::shared_ptr<arrow::Array> run_ends;
+  ARROW_RETURN_NOT_OK(run_ends_builder.Finish(&run_ends));
+
+  arrow::Int32Builder values_builder;
+  ARROW_RETURN_NOT_OK(values_builder.AppendValues({100, 200}));
+  std::shared_ptr<arrow::Array> values;
+  ARROW_RETURN_NOT_OK(values_builder.Finish(&values));
+
+  ARROW_ASSIGN_OR_RAISE(auto ree_arr, arrow::RunEndEncodedArray::Make(run_ends, values));
+  auto batch = arrow::RecordBatch::Make(schema, 5, {ree_arr});
+
+  ARROW_ASSIGN_OR_RAISE(auto out, arrow::io::FileOutputStream::Open(path));
+  ARROW_ASSIGN_OR_RAISE(auto writer, arrow::ipc::MakeStreamWriter(out.get(), schema));
+  ARROW_RETURN_NOT_OK(writer->WriteRecordBatch(*batch));
+  ARROW_RETURN_NOT_OK(writer->Close());
+  return out->Close();
+}
+
 arrow::Status Validate(const std::string& path) {
   ARROW_ASSIGN_OR_RAISE(auto in, arrow::io::ReadableFile::Open(path));
   ARROW_ASSIGN_OR_RAISE(auto reader, arrow::ipc::RecordBatchStreamReader::Open(in));
@@ -142,11 +166,50 @@ arrow::Status ValidateDictDelta(const std::string& path) {
   return arrow::Status::OK();
 }
 
+arrow::Status ValidateRee(const std::string& path) {
+  ARROW_ASSIGN_OR_RAISE(auto in, arrow::io::ReadableFile::Open(path));
+  ARROW_ASSIGN_OR_RAISE(auto reader, arrow::ipc::RecordBatchStreamReader::Open(in));
+  auto schema = reader->schema();
+  if (schema->num_fields() != 1) return arrow::Status::Invalid("invalid field count");
+  if (schema->field(0)->name() != "ree") return arrow::Status::Invalid("invalid ree field");
+  if (schema->field(0)->type()->id() != arrow::Type::RUN_END_ENCODED) {
+    return arrow::Status::Invalid("ree field must be run_end_encoded type");
+  }
+
+  auto ree_type = std::static_pointer_cast<arrow::RunEndEncodedType>(schema->field(0)->type());
+  if (ree_type->run_end_type()->id() != arrow::Type::INT32) {
+    return arrow::Status::Invalid("ree run_end_type must be int32");
+  }
+  if (ree_type->value_type()->id() != arrow::Type::INT32) {
+    return arrow::Status::Invalid("ree value_type must be int32");
+  }
+
+  std::shared_ptr<arrow::RecordBatch> batch;
+  ARROW_RETURN_NOT_OK(reader->ReadNext(&batch));
+  if (!batch) return arrow::Status::Invalid("missing batch");
+  if (batch->num_rows() != 5) return arrow::Status::Invalid("invalid row count");
+
+  const std::vector<int32_t> expected = {100, 100, 200, 200, 200};
+  auto ree = batch->column(0);
+  for (int64_t i = 0; i < static_cast<int64_t>(expected.size()); ++i) {
+    ARROW_ASSIGN_OR_RAISE(auto scalar, ree->GetScalar(i));
+    auto int_scalar = std::dynamic_pointer_cast<arrow::Int32Scalar>(scalar);
+    if (!int_scalar || !int_scalar->is_valid || int_scalar->value != expected[static_cast<size_t>(i)]) {
+      return arrow::Status::Invalid("invalid ree values");
+    }
+  }
+
+  std::shared_ptr<arrow::RecordBatch> extra;
+  ARROW_RETURN_NOT_OK(reader->ReadNext(&extra));
+  if (extra) return arrow::Status::Invalid("unexpected extra batch");
+  return arrow::Status::OK();
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
   if (argc != 3 && argc != 4) {
-    std::cerr << "usage: interop_cpp <generate|validate> <path.arrow> [canonical|dict-delta]\n";
+    std::cerr << "usage: interop_cpp <generate|validate> <path.arrow> [canonical|dict-delta|ree]\n";
     return 2;
   }
   const std::string mode = argv[1];
@@ -158,6 +221,8 @@ int main(int argc, char** argv) {
   if (mode == "validate" && case_name == "canonical") st = Validate(path);
   if (mode == "generate" && case_name == "dict-delta") st = GenerateDictDelta(path);
   if (mode == "validate" && case_name == "dict-delta") st = ValidateDictDelta(path);
+  if (mode == "generate" && case_name == "ree") st = GenerateRee(path);
+  if (mode == "validate" && case_name == "ree") st = ValidateRee(path);
   if (!st.ok()) {
     std::cerr << st.ToString() << "\n";
     return 1;

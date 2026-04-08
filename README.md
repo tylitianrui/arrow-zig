@@ -71,6 +71,8 @@ Helper commands:
 
 - Generate canonical zarrow fixture: `zig build interop-fixture-writer -- .interop-fixtures/zarrow.arrow`
 - Validate fixture with zarrow: `zig build interop-fixture-check -- .interop-fixtures/pyarrow.arrow`
+- Generate REE zarrow fixture: `zig build interop-fixture-writer -- .interop-fixtures/zarrow_ree.arrow ree`
+- Validate REE fixture with zarrow: `zig build interop-fixture-check -- .interop-fixtures/pyarrow_ree.arrow ree`
 
 CI runs the full matrix in `.github/workflows/ci.yml` job:
 `IPC Interop Matrix (zarrow <-> pyarrow/arrow-rs/arrow-cpp)`.
