@@ -217,14 +217,24 @@ arrow::Status ValidateRee(const std::string& path) {
   if (!batch) return arrow::Status::Invalid("missing batch");
   if (batch->num_rows() != 5) return arrow::Status::Invalid("invalid row count");
 
-  const std::vector<int32_t> expected = {100, 100, 200, 200, 200};
-  auto ree = batch->column(0);
-  for (int64_t i = 0; i < static_cast<int64_t>(expected.size()); ++i) {
-    ARROW_ASSIGN_OR_RAISE(auto scalar, ree->GetScalar(i));
-    auto int_scalar = std::dynamic_pointer_cast<arrow::Int32Scalar>(scalar);
-    if (!int_scalar || !int_scalar->is_valid || int_scalar->value != expected[static_cast<size_t>(i)]) {
-      return arrow::Status::Invalid("invalid ree values");
-    }
+  auto ree_data = batch->column(0)->data();
+  if (ree_data->child_data.size() != 2) {
+    return arrow::Status::Invalid("invalid ree child count");
+  }
+
+  auto run_ends_any = arrow::MakeArray(ree_data->child_data[0]);
+  auto values_any = arrow::MakeArray(ree_data->child_data[1]);
+  auto run_ends = std::dynamic_pointer_cast<arrow::Int32Array>(run_ends_any);
+  auto values = std::dynamic_pointer_cast<arrow::Int32Array>(values_any);
+  if (!run_ends || !values) {
+    return arrow::Status::Invalid("invalid ree child types");
+  }
+  if (run_ends->length() != 2 || values->length() != 2) {
+    return arrow::Status::Invalid("invalid ree child lengths");
+  }
+  if (run_ends->Value(0) != 2 || run_ends->Value(1) != 5 || values->Value(0) != 100 ||
+      values->Value(1) != 200) {
+    return arrow::Status::Invalid("invalid ree values");
   }
 
   std::shared_ptr<arrow::RecordBatch> extra;
