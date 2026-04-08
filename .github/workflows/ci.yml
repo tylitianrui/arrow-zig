@@ -117,10 +117,18 @@ jobs:
           zig build interop-fixture-check -- .interop-fixtures/arrow_rs.arrow
           cargo run --manifest-path tools/interop/arrow-rs/Cargo.toml -- validate .interop-fixtures/zarrow.arrow
 
-      - name: Arrow C++ roundtrip checks
+      - name: Arrow C++ generate fixture
         shell: bash -l {0}
         run: |
           conda activate arrow-cpp-env
           ./.interop-bin/interop_cpp generate .interop-fixtures/arrow_cpp.arrow
+
+      - name: Validate Arrow C++ fixture with zarrow
+        run: |
           zig build interop-fixture-check -- .interop-fixtures/arrow_cpp.arrow
+
+      - name: Arrow C++ validate zarrow fixture
+        shell: bash -l {0}
+        run: |
+          conda activate arrow-cpp-env
           ./.interop-bin/interop_cpp validate .interop-fixtures/zarrow.arrow
