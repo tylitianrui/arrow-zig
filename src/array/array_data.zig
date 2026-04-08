@@ -116,6 +116,10 @@ pub const ArrayData = struct {
     /// Execute nullCount logic for this type.
     pub fn nullCount(self: *Self) usize {
         if (self.null_count) |count| return count;
+        if (self.data_type == .null) {
+            self.null_count = self.length;
+            return self.length;
+        }
         const validity_bitmap = self.validity() orelse {
             self.null_count = 0;
             return 0;
@@ -268,7 +272,12 @@ pub const ArrayData = struct {
     /// Execute validateLayout logic for this type.
     pub fn validateLayout(self: Self) ValidationError!void {
         if (self.null_count) |count| {
-            if (count != 0 and (self.buffers.len == 0 or self.buffers[0].isEmpty())) return error.InvalidNullCount;
+            // Null arrays have no validity bitmap; all elements are implicitly null.
+            if (self.data_type == .null) {
+                if (count != self.length) return error.InvalidNullCount;
+            } else {
+                if (count != 0 and (self.buffers.len == 0 or self.buffers[0].isEmpty())) return error.InvalidNullCount;
+            }
         }
 
         const total_len = std.math.add(usize, self.offset, self.length) catch return error.InvalidOffsets;
@@ -492,6 +501,18 @@ test "array data hasNulls handles no validity" {
     try std.testing.expect(!data.hasNulls());
 }
 
+test "array data nullCount for null type without validity uses length" {
+    var data = ArrayData{
+        .data_type = DataType{ .null = {} },
+        .length = 4,
+        .null_count = null,
+        .buffers = &[_]SharedBuffer{},
+    };
+
+    try std.testing.expectEqual(@as(usize, 4), data.nullCount());
+    try std.testing.expectEqual(@as(?usize, 4), data.null_count);
+}
+
 test "array data slice on unknown null count" {
     const dtype = DataType{ .int32 = {} };
     const data = ArrayData{
@@ -532,6 +553,28 @@ test "array data validateLayout rejects null count without validity" {
         .length = 1,
         .null_count = 1,
         .buffers = &[_]SharedBuffer{ SharedBuffer.empty, SharedBuffer.fromSlice(values_bytes[0..]) },
+    };
+
+    try std.testing.expectError(error.InvalidNullCount, data.validateLayout());
+}
+
+test "array data validateLayout accepts null type without validity bitmap" {
+    const data = ArrayData{
+        .data_type = DataType{ .null = {} },
+        .length = 3,
+        .null_count = 3,
+        .buffers = &[_]SharedBuffer{},
+    };
+
+    try data.validateLayout();
+}
+
+test "array data validateLayout rejects null type invalid null count" {
+    const data = ArrayData{
+        .data_type = DataType{ .null = {} },
+        .length = 3,
+        .null_count = 2,
+        .buffers = &[_]SharedBuffer{},
     };
 
     try std.testing.expectError(error.InvalidNullCount, data.validateLayout());
