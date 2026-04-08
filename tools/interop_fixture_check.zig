@@ -10,6 +10,11 @@ const ReaderAdapter = struct {
     }
 };
 
+const FixtureCase = enum {
+    canonical,
+    dict_delta,
+};
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -19,7 +24,14 @@ pub fn main() !void {
     defer args.deinit();
     _ = args.next(); // exe
     const in_path = args.next() orelse {
-        std.log.err("usage: interop-fixture-check <in.arrow>", .{});
+        std.log.err("usage: interop-fixture-check <in.arrow> [canonical|dict-delta]", .{});
+        return error.InvalidArgs;
+    };
+    const fixture_case: FixtureCase = blk: {
+        const mode = args.next() orelse break :blk .canonical;
+        if (std.mem.eql(u8, mode, "canonical")) break :blk .canonical;
+        if (std.mem.eql(u8, mode, "dict-delta")) break :blk .dict_delta;
+        std.log.err("unknown fixture mode: {s}", .{mode});
         return error.InvalidArgs;
     };
 
@@ -31,6 +43,13 @@ pub fn main() !void {
     var reader = zarrow.IpcStreamReader(ReaderAdapter).init(allocator, reader_adapter);
     defer reader.deinit();
 
+    switch (fixture_case) {
+        .canonical => try checkCanonical(&reader),
+        .dict_delta => try checkDictionaryDelta(&reader),
+    }
+}
+
+fn checkCanonical(reader: *zarrow.IpcStreamReader(ReaderAdapter)) !void {
     const schema = try reader.readSchema();
     if (schema.fields.len != 2) return error.InvalidSchema;
     if (!std.mem.eql(u8, schema.fields[0].name, "id")) return error.InvalidSchema;
@@ -51,6 +70,37 @@ pub fn main() !void {
     if (!std.mem.eql(u8, names.value(0), "alice")) return error.InvalidBatch;
     if (!names.isNull(1)) return error.InvalidBatch;
     if (!std.mem.eql(u8, names.value(2), "bob")) return error.InvalidBatch;
+
+    const done = try reader.nextRecordBatch();
+    if (done != null) return error.UnexpectedExtraBatch;
+}
+
+fn checkDictionaryDelta(reader: *zarrow.IpcStreamReader(ReaderAdapter)) !void {
+    const schema = try reader.readSchema();
+    if (schema.fields.len != 1) return error.InvalidSchema;
+    if (!std.mem.eql(u8, schema.fields[0].name, "color")) return error.InvalidSchema;
+    if (schema.fields[0].data_type.* != .dictionary) return error.InvalidSchema;
+
+    const first_opt = try reader.nextRecordBatch();
+    if (first_opt == null) return error.MissingBatch;
+    var first = first_opt.?;
+    defer first.deinit();
+    if (first.numRows() != 2) return error.InvalidBatch;
+
+    const first_dict = zarrow.DictionaryArray{ .data = first.columns[0].data() };
+    const first_values = zarrow.StringArray{ .data = first_dict.dictionaryRef().data() };
+    if (!std.mem.eql(u8, first_values.value(@intCast(first_dict.index(0))), "red")) return error.InvalidBatch;
+    if (!std.mem.eql(u8, first_values.value(@intCast(first_dict.index(1))), "blue")) return error.InvalidBatch;
+
+    const second_opt = try reader.nextRecordBatch();
+    if (second_opt == null) return error.MissingBatch;
+    var second = second_opt.?;
+    defer second.deinit();
+    if (second.numRows() != 1) return error.InvalidBatch;
+
+    const second_dict = zarrow.DictionaryArray{ .data = second.columns[0].data() };
+    const second_values = zarrow.StringArray{ .data = second_dict.dictionaryRef().data() };
+    if (!std.mem.eql(u8, second_values.value(@intCast(second_dict.index(0))), "green")) return error.InvalidBatch;
 
     const done = try reader.nextRecordBatch();
     if (done != null) return error.UnexpectedExtraBatch;

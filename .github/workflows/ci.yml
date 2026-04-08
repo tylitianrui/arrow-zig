@@ -105,30 +105,42 @@ jobs:
       - name: Generate zarrow fixture
         run: zig build interop-fixture-writer -- .interop-fixtures/zarrow.arrow
 
+      - name: Generate zarrow dictionary-delta fixture
+        run: zig build interop-fixture-writer -- .interop-fixtures/zarrow_dict_delta.arrow dict-delta
+
       - name: PyArrow roundtrip checks
         run: |
           python tools/interop/pyarrow_generate.py .interop-fixtures/pyarrow.arrow
           zig build interop-fixture-check -- .interop-fixtures/pyarrow.arrow
           python tools/interop/pyarrow_validate.py .interop-fixtures/zarrow.arrow
+          python tools/interop/pyarrow_generate.py .interop-fixtures/pyarrow_dict_delta.arrow dict-delta
+          zig build interop-fixture-check -- .interop-fixtures/pyarrow_dict_delta.arrow dict-delta
+          python tools/interop/pyarrow_validate.py .interop-fixtures/zarrow_dict_delta.arrow dict-delta
 
       - name: Arrow-RS roundtrip checks
         run: |
           cargo run --manifest-path tools/interop/arrow-rs/Cargo.toml -- generate .interop-fixtures/arrow_rs.arrow
           zig build interop-fixture-check -- .interop-fixtures/arrow_rs.arrow
           cargo run --manifest-path tools/interop/arrow-rs/Cargo.toml -- validate .interop-fixtures/zarrow.arrow
+          cargo run --manifest-path tools/interop/arrow-rs/Cargo.toml -- generate .interop-fixtures/arrow_rs_dict_delta.arrow dict-delta
+          zig build interop-fixture-check -- .interop-fixtures/arrow_rs_dict_delta.arrow dict-delta
+          cargo run --manifest-path tools/interop/arrow-rs/Cargo.toml -- validate .interop-fixtures/zarrow_dict_delta.arrow dict-delta
 
       - name: Arrow C++ generate fixture
         shell: bash -l {0}
         run: |
           conda activate arrow-cpp-env
           ./.interop-bin/interop_cpp generate .interop-fixtures/arrow_cpp.arrow
+          ./.interop-bin/interop_cpp generate .interop-fixtures/arrow_cpp_dict_delta.arrow dict-delta
 
       - name: Validate Arrow C++ fixture with zarrow
         run: |
           zig build interop-fixture-check -- .interop-fixtures/arrow_cpp.arrow
+          zig build interop-fixture-check -- .interop-fixtures/arrow_cpp_dict_delta.arrow dict-delta
 
       - name: Arrow C++ validate zarrow fixture
         shell: bash -l {0}
         run: |
           conda activate arrow-cpp-env
           ./.interop-bin/interop_cpp validate .interop-fixtures/zarrow.arrow
+          ./.interop-bin/interop_cpp validate .interop-fixtures/zarrow_dict_delta.arrow dict-delta
