@@ -58,8 +58,12 @@ const fbs = struct {
     const Utf8T = arrow_fbs.org_apache_arrow_flatbuf_Utf8.Utf8T;
     const LargeBinaryT = arrow_fbs.org_apache_arrow_flatbuf_LargeBinary.LargeBinaryT;
     const LargeUtf8T = arrow_fbs.org_apache_arrow_flatbuf_LargeUtf8.LargeUtf8T;
+    const Utf8ViewT = arrow_fbs.org_apache_arrow_flatbuf_Utf8View.Utf8ViewT;
+    const BinaryViewT = arrow_fbs.org_apache_arrow_flatbuf_BinaryView.BinaryViewT;
     const ListT = arrow_fbs.org_apache_arrow_flatbuf_List.ListT;
     const LargeListT = arrow_fbs.org_apache_arrow_flatbuf_LargeList.LargeListT;
+    const ListViewT = arrow_fbs.org_apache_arrow_flatbuf_ListView.ListViewT;
+    const LargeListViewT = arrow_fbs.org_apache_arrow_flatbuf_LargeListView.LargeListViewT;
     const Struct_T = arrow_fbs.org_apache_arrow_flatbuf_Struct_.Struct_T;
     const NullT = arrow_fbs.org_apache_arrow_flatbuf_Null.NullT;
 };
@@ -119,12 +123,13 @@ pub fn StreamWriter(comptime WriterType: type) type {
 
             var nodes = try std.ArrayList(fbs.FieldNodeT).initCapacity(self.allocator, 0);
             var buffers = try std.ArrayList(fbs.BufferT).initCapacity(self.allocator, 0);
+            var variadic_buffer_counts = try std.ArrayList(i64).initCapacity(self.allocator, 0);
             var body_buffers = try std.ArrayList(array_data.SharedBuffer).initCapacity(self.allocator, 0);
             defer body_buffers.deinit(self.allocator);
 
             var body_offset: u64 = 0;
             for (batch.columns) |col| {
-                try appendArrayMeta(self.allocator, col.data(), &nodes, &buffers, &body_buffers, &body_offset);
+                try appendArrayMeta(self.allocator, col.data(), &nodes, &buffers, &variadic_buffer_counts, &body_buffers, &body_offset);
             }
 
             const record_batch_ptr = try self.allocator.create(fbs.RecordBatchT);
@@ -133,7 +138,7 @@ pub fn StreamWriter(comptime WriterType: type) type {
                 .length = @intCast(batch.numRows()),
                 .nodes = nodes,
                 .buffers = buffers,
-                .variadicBufferCounts = try std.ArrayList(i64).initCapacity(self.allocator, 0),
+                .variadicBufferCounts = variadic_buffer_counts,
             };
 
             var msg = fbs.MessageT{
@@ -206,6 +211,12 @@ fn buildFieldT(allocator: std.mem.Allocator, field: Field, next_dictionary_id: *
             try children.append(allocator, try buildFieldT(allocator, lst.value_field, next_dictionary_id));
         },
         .fixed_size_list => |lst| {
+            try children.append(allocator, try buildFieldT(allocator, lst.value_field, next_dictionary_id));
+        },
+        .list_view => |lst| {
+            try children.append(allocator, try buildFieldT(allocator, lst.value_field, next_dictionary_id));
+        },
+        .large_list_view => |lst| {
             try children.append(allocator, try buildFieldT(allocator, lst.value_field, next_dictionary_id));
         },
         .struct_ => |st| {
@@ -320,8 +331,12 @@ fn buildTypeT(allocator: std.mem.Allocator, dt: DataType) WriterError!fbs.TypeT 
         .binary => .{ .Binary = try allocT(allocator, fbs.BinaryT, .{}) },
         .large_string => .{ .LargeUtf8 = try allocT(allocator, fbs.LargeUtf8T, .{}) },
         .large_binary => .{ .LargeBinary = try allocT(allocator, fbs.LargeBinaryT, .{}) },
+        .string_view => .{ .Utf8View = try allocT(allocator, fbs.Utf8ViewT, .{}) },
+        .binary_view => .{ .BinaryView = try allocT(allocator, fbs.BinaryViewT, .{}) },
         .list => .{ .List = try allocT(allocator, fbs.ListT, .{}) },
         .large_list => .{ .LargeList = try allocT(allocator, fbs.LargeListT, .{}) },
+        .list_view => .{ .ListView = try allocT(allocator, fbs.ListViewT, .{}) },
+        .large_list_view => .{ .LargeListView = try allocT(allocator, fbs.LargeListViewT, .{}) },
         .struct_ => .{ .Struct_ = try allocT(allocator, fbs.Struct_T, .{}) },
         .fixed_size_binary => |fsb| .{ .FixedSizeBinary = try allocT(allocator, fbs.FixedSizeBinaryT, .{ .byteWidth = fsb.byte_width }) },
         .fixed_size_list => |fsl| .{ .FixedSizeList = try allocT(allocator, fbs.FixedSizeListT, .{ .listSize = fsl.list_size }) },
@@ -360,7 +375,7 @@ fn buildTypeT(allocator: std.mem.Allocator, dt: DataType) WriterError!fbs.TypeT 
             };
         },
         .run_end_encoded => .{ .RunEndEncoded = try allocT(allocator, fbs.RunEndEncodedT, .{}) },
-        .dictionary, .list_view, .large_list_view, .binary_view, .string_view, .extension => StreamError.UnsupportedType,
+        .dictionary, .extension => StreamError.UnsupportedType,
         else => StreamError.UnsupportedType,
     };
 }
@@ -423,7 +438,7 @@ fn collectDictionaryArraysFromData(
             if (data.dictionary == null) return;
             try out.append(allocator, data.dictionary.?.retain());
         },
-        .list, .large_list, .fixed_size_list => {
+        .list, .large_list, .fixed_size_list, .list_view, .large_list_view => {
             if (data.children.len == 1) try collectDictionaryArraysFromData(allocator, data.children[0].data(), out);
         },
         .struct_ => {
@@ -441,11 +456,12 @@ fn writeDictionaryBatch(
 ) (WriterError || @TypeOf(writer).Error)!void {
     var nodes = try std.ArrayList(fbs.FieldNodeT).initCapacity(allocator, 0);
     var buffers = try std.ArrayList(fbs.BufferT).initCapacity(allocator, 0);
+    var variadic_buffer_counts = try std.ArrayList(i64).initCapacity(allocator, 0);
     var body_buffers = try std.ArrayList(array_data.SharedBuffer).initCapacity(allocator, 0);
     defer body_buffers.deinit(allocator);
 
     var body_offset: u64 = 0;
-    try appendArrayMeta(allocator, dictionary_data, &nodes, &buffers, &body_buffers, &body_offset);
+    try appendArrayMeta(allocator, dictionary_data, &nodes, &buffers, &variadic_buffer_counts, &body_buffers, &body_offset);
 
     const record_batch_ptr = try allocator.create(fbs.RecordBatchT);
     errdefer allocator.destroy(record_batch_ptr);
@@ -453,7 +469,7 @@ fn writeDictionaryBatch(
         .length = @intCast(dictionary_data.length),
         .nodes = nodes,
         .buffers = buffers,
-        .variadicBufferCounts = try std.ArrayList(i64).initCapacity(allocator, 0),
+        .variadicBufferCounts = variadic_buffer_counts,
     };
 
     const dictionary_batch_ptr = try allocator.create(fbs.DictionaryBatchT);
@@ -480,6 +496,7 @@ fn appendArrayMeta(
     data: *const ArrayData,
     nodes: *std.ArrayList(fbs.FieldNodeT),
     buffers: *std.ArrayList(fbs.BufferT),
+    variadic_buffer_counts: *std.ArrayList(i64),
     body_buffers: *std.ArrayList(array_data.SharedBuffer),
     body_offset: *u64,
 ) WriterError!void {
@@ -491,26 +508,31 @@ fn appendArrayMeta(
         try body_buffers.append(allocator, buf);
         body_offset.* += @intCast(buffer.alignedSize(buf.len()));
     }
+    if (data.data_type == .string_view or data.data_type == .binary_view) {
+        if (data.buffers.len < 2) return StreamError.InvalidMetadata;
+        const variadic_count = std.math.sub(usize, data.buffers.len, 2) catch return StreamError.InvalidMetadata;
+        try variadic_buffer_counts.append(allocator, @intCast(variadic_count));
+    }
 
     switch (data.data_type) {
-        .list, .large_list, .fixed_size_list, .map => {
+        .list, .large_list, .fixed_size_list, .map, .list_view, .large_list_view => {
             if (data.children.len != 1) return StreamError.InvalidMetadata;
-            try appendArrayMeta(allocator, data.children[0].data(), nodes, buffers, body_buffers, body_offset);
+            try appendArrayMeta(allocator, data.children[0].data(), nodes, buffers, variadic_buffer_counts, body_buffers, body_offset);
         },
         .struct_ => {
             for (data.children) |child| {
-                try appendArrayMeta(allocator, child.data(), nodes, buffers, body_buffers, body_offset);
+                try appendArrayMeta(allocator, child.data(), nodes, buffers, variadic_buffer_counts, body_buffers, body_offset);
             }
         },
         .sparse_union, .dense_union => {
             for (data.children) |child| {
-                try appendArrayMeta(allocator, child.data(), nodes, buffers, body_buffers, body_offset);
+                try appendArrayMeta(allocator, child.data(), nodes, buffers, variadic_buffer_counts, body_buffers, body_offset);
             }
         },
         .run_end_encoded => |ree| {
             _ = ree;
             if (data.children.len != 1) return StreamError.InvalidMetadata;
-            try appendArrayMeta(allocator, data.children[0].data(), nodes, buffers, body_buffers, body_offset);
+            try appendArrayMeta(allocator, data.children[0].data(), nodes, buffers, variadic_buffer_counts, body_buffers, body_offset);
         },
         .dictionary => {},
         else => {},
@@ -569,4 +591,123 @@ test "ipc writer stream output matches golden fixture" {
     defer allocator.free(expected);
 
     try std.testing.expectEqualSlices(u8, expected, out.items);
+}
+
+test "ipc writer roundtrip supports view types and variadicBufferCounts" {
+    const allocator = std.testing.allocator;
+    const one = [_]u8{0};
+
+    const string_view_type = DataType{ .string_view = {} };
+    const binary_view_type = DataType{ .binary_view = {} };
+    const list_item_type = DataType{ .int32 = {} };
+    const list_item_field = Field{ .name = "item", .data_type = &list_item_type, .nullable = true };
+    const list_view_type = DataType{ .list_view = .{ .value_field = list_item_field } };
+    const large_list_view_type = DataType{ .large_list_view = .{ .value_field = list_item_field } };
+    const fields = [_]Field{
+        .{ .name = "sv", .data_type = &string_view_type, .nullable = true },
+        .{ .name = "bv", .data_type = &binary_view_type, .nullable = true },
+        .{ .name = "lv", .data_type = &list_view_type, .nullable = true },
+        .{ .name = "llv", .data_type = &large_list_view_type, .nullable = true },
+    };
+    const schema = Schema{ .fields = fields[0..] };
+
+    const empty_children = try allocator.alloc(ArrayRef, 0);
+
+    const sv_buffers = try allocator.alloc(array_data.SharedBuffer, 2);
+    sv_buffers[0] = array_data.SharedBuffer.empty;
+    sv_buffers[1] = array_data.SharedBuffer.empty;
+    var sv_ref = try ArrayRef.fromOwnedUnsafe(allocator, .{
+        .data_type = string_view_type,
+        .length = 0,
+        .null_count = 0,
+        .buffers = sv_buffers,
+        .children = empty_children,
+        .dictionary = null,
+    });
+    defer sv_ref.release();
+
+    const bv_buffers = try allocator.alloc(array_data.SharedBuffer, 3);
+    bv_buffers[0] = array_data.SharedBuffer.empty;
+    bv_buffers[1] = array_data.SharedBuffer.empty;
+    bv_buffers[2] = array_data.SharedBuffer.init(one[0..]); // one variadic buffer
+    const empty_children_bv = try allocator.alloc(ArrayRef, 0);
+    var bv_ref = try ArrayRef.fromOwnedUnsafe(allocator, .{
+        .data_type = binary_view_type,
+        .length = 0,
+        .null_count = 0,
+        .buffers = bv_buffers,
+        .children = empty_children_bv,
+        .dictionary = null,
+    });
+    defer bv_ref.release();
+
+    const child_buffers = try allocator.alloc(array_data.SharedBuffer, 2);
+    child_buffers[0] = array_data.SharedBuffer.empty;
+    child_buffers[1] = array_data.SharedBuffer.empty;
+    const child_children = try allocator.alloc(ArrayRef, 0);
+    var child_ref = try ArrayRef.fromOwnedUnsafe(allocator, .{
+        .data_type = list_item_type,
+        .length = 0,
+        .null_count = 0,
+        .buffers = child_buffers,
+        .children = child_children,
+        .dictionary = null,
+    });
+    defer child_ref.release();
+
+    const lv_buffers = try allocator.alloc(array_data.SharedBuffer, 3);
+    lv_buffers[0] = array_data.SharedBuffer.empty;
+    lv_buffers[1] = array_data.SharedBuffer.empty;
+    lv_buffers[2] = array_data.SharedBuffer.empty;
+    const lv_children = try allocator.alloc(ArrayRef, 1);
+    lv_children[0] = child_ref.retain();
+    var lv_ref = try ArrayRef.fromOwnedUnsafe(allocator, .{
+        .data_type = list_view_type,
+        .length = 0,
+        .null_count = 0,
+        .buffers = lv_buffers,
+        .children = lv_children,
+        .dictionary = null,
+    });
+    defer lv_ref.release();
+
+    const llv_buffers = try allocator.alloc(array_data.SharedBuffer, 3);
+    llv_buffers[0] = array_data.SharedBuffer.empty;
+    llv_buffers[1] = array_data.SharedBuffer.empty;
+    llv_buffers[2] = array_data.SharedBuffer.empty;
+    const llv_children = try allocator.alloc(ArrayRef, 1);
+    llv_children[0] = child_ref.retain();
+    var llv_ref = try ArrayRef.fromOwnedUnsafe(allocator, .{
+        .data_type = large_list_view_type,
+        .length = 0,
+        .null_count = 0,
+        .buffers = llv_buffers,
+        .children = llv_children,
+        .dictionary = null,
+    });
+    defer llv_ref.release();
+
+    var batch = try RecordBatch.init(allocator, schema, &[_]ArrayRef{ sv_ref, bv_ref, lv_ref, llv_ref });
+    defer batch.deinit();
+
+    var out = std.array_list.Managed(u8).init(allocator);
+    defer out.deinit();
+    var writer = StreamWriter(@TypeOf(out.writer())).init(allocator, out.writer());
+    try writer.writeSchema(schema);
+    try writer.writeRecordBatch(batch);
+    try writer.writeEnd();
+
+    var stream = std.io.fixedBufferStream(out.items);
+    var reader = @import("stream_reader.zig").StreamReader(@TypeOf(stream.reader())).init(allocator, stream.reader());
+    defer reader.deinit();
+    const out_schema = try reader.readSchema();
+    try std.testing.expect(out_schema.fields[0].data_type.* == .string_view);
+    try std.testing.expect(out_schema.fields[1].data_type.* == .binary_view);
+    try std.testing.expect(out_schema.fields[2].data_type.* == .list_view);
+    try std.testing.expect(out_schema.fields[3].data_type.* == .large_list_view);
+    const out_batch_opt = try reader.nextRecordBatch();
+    try std.testing.expect(out_batch_opt != null);
+    var out_batch = out_batch_opt.?;
+    defer out_batch.deinit();
+    try std.testing.expectEqual(@as(usize, 0), out_batch.numRows());
 }

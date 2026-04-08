@@ -6,6 +6,7 @@ const buffer = @import("../buffer.zig");
 const array_ref = @import("../array/array_ref.zig");
 const array_data = @import("../array/array_data.zig");
 const format = @import("format.zig");
+const bitmap = @import("../bitmap.zig");
 const fb = @import("flatbufferz");
 const arrow_fbs = @import("arrow_fbs");
 
@@ -702,13 +703,371 @@ fn ingestDictionaryBatch(
         return StreamError.InvalidMetadata;
     }
     if (variadic_index != record_batch_t.variadicBufferCounts.items.len) return StreamError.InvalidMetadata;
-    if (dictionary_batch_t.isDelta and self.dictionary_values.get(dictionary_batch_t.id) != null) return StreamError.UnsupportedType;
 
-    const previous = try self.dictionary_values.fetchPut(dictionary_batch_t.id, dictionary);
+    var incoming = dictionary;
+    if (dictionary_batch_t.isDelta) {
+        const previous_ref = self.dictionary_values.get(dictionary_batch_t.id) orelse return StreamError.InvalidMetadata;
+        incoming = try mergeDictionaryValues(self.allocator, previous_ref, dictionary);
+        dictionary.release();
+    }
+
+    const previous = try self.dictionary_values.fetchPut(dictionary_batch_t.id, incoming);
     if (previous) |entry| {
         var old = entry.value;
         old.release();
     }
+}
+
+fn mergeDictionaryValues(
+    allocator: std.mem.Allocator,
+    base: ArrayRef,
+    delta: ArrayRef,
+) (StreamError || array_data.ValidationError || error{OutOfMemory})!ArrayRef {
+    if (base.data().data_type.id() != delta.data().data_type.id()) return StreamError.InvalidMetadata;
+
+    const dt = base.data().data_type;
+    return switch (dt) {
+        .null => try concatNullArray(allocator, dt, base.data(), delta.data()),
+        .bool => try concatBooleanArray(allocator, dt, base.data(), delta.data()),
+        .uint8, .int8 => try concatFixedWidthArray(allocator, dt, base.data(), delta.data(), 1),
+        .uint16, .int16, .half_float => try concatFixedWidthArray(allocator, dt, base.data(), delta.data(), 2),
+        .uint32, .int32, .float, .date32, .time32, .interval_months, .decimal32 => try concatFixedWidthArray(allocator, dt, base.data(), delta.data(), 4),
+        .uint64, .int64, .double, .date64, .time64, .timestamp, .duration, .interval_day_time, .decimal64 => try concatFixedWidthArray(allocator, dt, base.data(), delta.data(), 8),
+        .decimal128, .interval_month_day_nano => try concatFixedWidthArray(allocator, dt, base.data(), delta.data(), 16),
+        .decimal256 => try concatFixedWidthArray(allocator, dt, base.data(), delta.data(), 32),
+        .fixed_size_binary => |fsb| blk: {
+            const byte_width = std.math.cast(usize, fsb.byte_width) orelse return StreamError.InvalidMetadata;
+            break :blk try concatFixedWidthArray(allocator, dt, base.data(), delta.data(), byte_width);
+        },
+        .string, .binary => try concatVariableBinaryArrayI32(allocator, dt, base.data(), delta.data()),
+        .large_string, .large_binary => try concatVariableBinaryArrayI64(allocator, dt, base.data(), delta.data()),
+        else => StreamError.UnsupportedType,
+    };
+}
+
+fn concatNullArray(
+    allocator: std.mem.Allocator,
+    dt: DataType,
+    left: *const ArrayData,
+    right: *const ArrayData,
+) (StreamError || array_data.ValidationError || error{OutOfMemory})!ArrayRef {
+    const total_len = std.math.add(usize, left.length, right.length) catch return StreamError.InvalidMetadata;
+    const buffers = try allocator.alloc(array_data.SharedBuffer, 0);
+    const children = try allocator.alloc(ArrayRef, 0);
+    const data = ArrayData{
+        .data_type = dt,
+        .length = total_len,
+        .null_count = total_len,
+        .buffers = buffers,
+        .children = children,
+        .dictionary = null,
+    };
+    try data.validateLayout();
+    return ArrayRef.fromOwnedUnsafe(allocator, data);
+}
+
+fn concatBooleanArray(
+    allocator: std.mem.Allocator,
+    dt: DataType,
+    left: *const ArrayData,
+    right: *const ArrayData,
+) (StreamError || array_data.ValidationError || error{OutOfMemory})!ArrayRef {
+    try requireBufferCount(left, 2);
+    try requireBufferCount(right, 2);
+
+    const total_len = std.math.add(usize, left.length, right.length) catch return StreamError.InvalidMetadata;
+    const null_count = std.math.add(usize, nullCountForArray(left), nullCountForArray(right)) catch return StreamError.InvalidMetadata;
+    const validity = try concatValidityBuffer(allocator, left, right, total_len, null_count);
+    errdefer if (!validity.isEmpty()) {
+        var owned = validity;
+        owned.release();
+    };
+
+    var values_owned = try buffer.OwnedBuffer.init(allocator, bitmap.byteLength(total_len));
+    const values_bytes = values_owned.data[0..bitmap.byteLength(total_len)];
+    @memset(values_bytes, 0);
+    var i: usize = 0;
+    while (i < left.length) : (i += 1) {
+        if (bitAt(left.buffers[1], left.offset + i)) bitmap.setBit(values_bytes, i);
+    }
+    i = 0;
+    while (i < right.length) : (i += 1) {
+        if (bitAt(right.buffers[1], right.offset + i)) bitmap.setBit(values_bytes, left.length + i);
+    }
+    var values = try values_owned.toShared(values_bytes.len);
+    errdefer values.release();
+
+    const buffers = try allocator.alloc(array_data.SharedBuffer, 2);
+    errdefer allocator.free(buffers);
+    buffers[0] = validity;
+    buffers[1] = values;
+    const children = try allocator.alloc(ArrayRef, 0);
+    errdefer allocator.free(children);
+
+    const data = ArrayData{
+        .data_type = dt,
+        .length = total_len,
+        .null_count = null_count,
+        .buffers = buffers,
+        .children = children,
+        .dictionary = null,
+    };
+    try data.validateLayout();
+    return ArrayRef.fromOwnedUnsafe(allocator, data);
+}
+
+fn concatFixedWidthArray(
+    allocator: std.mem.Allocator,
+    dt: DataType,
+    left: *const ArrayData,
+    right: *const ArrayData,
+    byte_width: usize,
+) (StreamError || array_data.ValidationError || error{OutOfMemory})!ArrayRef {
+    try requireBufferCount(left, 2);
+    try requireBufferCount(right, 2);
+
+    const total_len = std.math.add(usize, left.length, right.length) catch return StreamError.InvalidMetadata;
+    const null_count = std.math.add(usize, nullCountForArray(left), nullCountForArray(right)) catch return StreamError.InvalidMetadata;
+    const validity = try concatValidityBuffer(allocator, left, right, total_len, null_count);
+    errdefer if (!validity.isEmpty()) {
+        var owned = validity;
+        owned.release();
+    };
+
+    const left_bytes = try dataBytesForFixedWidth(left, byte_width);
+    const right_bytes = try dataBytesForFixedWidth(right, byte_width);
+    const total_data_len = std.math.add(usize, left_bytes.len, right_bytes.len) catch return StreamError.InvalidMetadata;
+    var values_owned = try buffer.OwnedBuffer.init(allocator, total_data_len);
+    @memcpy(values_owned.data[0..left_bytes.len], left_bytes);
+    @memcpy(values_owned.data[left_bytes.len .. left_bytes.len + right_bytes.len], right_bytes);
+    var values = try values_owned.toShared(total_data_len);
+    errdefer values.release();
+
+    const buffers = try allocator.alloc(array_data.SharedBuffer, 2);
+    errdefer allocator.free(buffers);
+    buffers[0] = validity;
+    buffers[1] = values;
+    const children = try allocator.alloc(ArrayRef, 0);
+    errdefer allocator.free(children);
+
+    const data = ArrayData{
+        .data_type = dt,
+        .length = total_len,
+        .null_count = null_count,
+        .buffers = buffers,
+        .children = children,
+        .dictionary = null,
+    };
+    try data.validateLayout();
+    return ArrayRef.fromOwnedUnsafe(allocator, data);
+}
+
+fn concatVariableBinaryArrayI32(
+    allocator: std.mem.Allocator,
+    dt: DataType,
+    left: *const ArrayData,
+    right: *const ArrayData,
+) (StreamError || array_data.ValidationError || error{OutOfMemory})!ArrayRef {
+    try requireBufferCount(left, 3);
+    try requireBufferCount(right, 3);
+
+    const total_len = std.math.add(usize, left.length, right.length) catch return StreamError.InvalidMetadata;
+    const null_count = std.math.add(usize, nullCountForArray(left), nullCountForArray(right)) catch return StreamError.InvalidMetadata;
+    const validity = try concatValidityBuffer(allocator, left, right, total_len, null_count);
+    errdefer if (!validity.isEmpty()) {
+        var owned = validity;
+        owned.release();
+    };
+
+    const left_offsets = left.buffers[1].typedSlice(i32);
+    const right_offsets = right.buffers[1].typedSlice(i32);
+    const left_start = std.math.cast(usize, left_offsets[left.offset]) orelse return StreamError.InvalidMetadata;
+    const left_end = std.math.cast(usize, left_offsets[left.offset + left.length]) orelse return StreamError.InvalidMetadata;
+    const right_start = std.math.cast(usize, right_offsets[right.offset]) orelse return StreamError.InvalidMetadata;
+    const right_end = std.math.cast(usize, right_offsets[right.offset + right.length]) orelse return StreamError.InvalidMetadata;
+    if (left_end < left_start or right_end < right_start) return StreamError.InvalidMetadata;
+
+    const left_data_len = std.math.sub(usize, left_end, left_start) catch return StreamError.InvalidMetadata;
+    const right_data_len = std.math.sub(usize, right_end, right_start) catch return StreamError.InvalidMetadata;
+    const total_data_len = std.math.add(usize, left_data_len, right_data_len) catch return StreamError.InvalidMetadata;
+
+    const offsets_len = std.math.add(usize, total_len, 1) catch return StreamError.InvalidMetadata;
+    var offsets_owned = try buffer.OwnedBuffer.init(allocator, offsets_len * @sizeOf(i32));
+    var out_offsets = offsets_owned.typedSlice(i32)[0..offsets_len];
+    out_offsets[0] = 0;
+    var i: usize = 0;
+    while (i < left.length) : (i += 1) {
+        const cur = std.math.sub(i32, left_offsets[left.offset + i + 1], left_offsets[left.offset]) catch return StreamError.InvalidMetadata;
+        out_offsets[i + 1] = cur;
+    }
+    const left_prefix = out_offsets[left.length];
+    while (i < total_len) : (i += 1) {
+        const right_idx = i - left.length;
+        const delta_off = std.math.sub(i32, right_offsets[right.offset + right_idx + 1], right_offsets[right.offset]) catch return StreamError.InvalidMetadata;
+        out_offsets[i + 1] = std.math.add(i32, left_prefix, delta_off) catch return StreamError.InvalidMetadata;
+    }
+    var offsets = try offsets_owned.toShared(offsets_len * @sizeOf(i32));
+    errdefer offsets.release();
+
+    var values_owned = try buffer.OwnedBuffer.init(allocator, total_data_len);
+    if (left_data_len > 0) {
+        @memcpy(values_owned.data[0..left_data_len], left.buffers[2].data[left_start..left_end]);
+    }
+    if (right_data_len > 0) {
+        @memcpy(values_owned.data[left_data_len .. left_data_len + right_data_len], right.buffers[2].data[right_start..right_end]);
+    }
+    var values = try values_owned.toShared(total_data_len);
+    errdefer values.release();
+
+    const buffers = try allocator.alloc(array_data.SharedBuffer, 3);
+    errdefer allocator.free(buffers);
+    buffers[0] = validity;
+    buffers[1] = offsets;
+    buffers[2] = values;
+    const children = try allocator.alloc(ArrayRef, 0);
+    errdefer allocator.free(children);
+
+    const data = ArrayData{
+        .data_type = dt,
+        .length = total_len,
+        .null_count = null_count,
+        .buffers = buffers,
+        .children = children,
+        .dictionary = null,
+    };
+    try data.validateLayout();
+    return ArrayRef.fromOwnedUnsafe(allocator, data);
+}
+
+fn concatVariableBinaryArrayI64(
+    allocator: std.mem.Allocator,
+    dt: DataType,
+    left: *const ArrayData,
+    right: *const ArrayData,
+) (StreamError || array_data.ValidationError || error{OutOfMemory})!ArrayRef {
+    try requireBufferCount(left, 3);
+    try requireBufferCount(right, 3);
+
+    const total_len = std.math.add(usize, left.length, right.length) catch return StreamError.InvalidMetadata;
+    const null_count = std.math.add(usize, nullCountForArray(left), nullCountForArray(right)) catch return StreamError.InvalidMetadata;
+    const validity = try concatValidityBuffer(allocator, left, right, total_len, null_count);
+    errdefer if (!validity.isEmpty()) {
+        var owned = validity;
+        owned.release();
+    };
+
+    const left_offsets = left.buffers[1].typedSlice(i64);
+    const right_offsets = right.buffers[1].typedSlice(i64);
+    const left_start = std.math.cast(usize, left_offsets[left.offset]) orelse return StreamError.InvalidMetadata;
+    const left_end = std.math.cast(usize, left_offsets[left.offset + left.length]) orelse return StreamError.InvalidMetadata;
+    const right_start = std.math.cast(usize, right_offsets[right.offset]) orelse return StreamError.InvalidMetadata;
+    const right_end = std.math.cast(usize, right_offsets[right.offset + right.length]) orelse return StreamError.InvalidMetadata;
+    if (left_end < left_start or right_end < right_start) return StreamError.InvalidMetadata;
+
+    const left_data_len = std.math.sub(usize, left_end, left_start) catch return StreamError.InvalidMetadata;
+    const right_data_len = std.math.sub(usize, right_end, right_start) catch return StreamError.InvalidMetadata;
+    const total_data_len = std.math.add(usize, left_data_len, right_data_len) catch return StreamError.InvalidMetadata;
+
+    const offsets_len = std.math.add(usize, total_len, 1) catch return StreamError.InvalidMetadata;
+    var offsets_owned = try buffer.OwnedBuffer.init(allocator, offsets_len * @sizeOf(i64));
+    var out_offsets = offsets_owned.typedSlice(i64)[0..offsets_len];
+    out_offsets[0] = 0;
+    var i: usize = 0;
+    while (i < left.length) : (i += 1) {
+        const cur = std.math.sub(i64, left_offsets[left.offset + i + 1], left_offsets[left.offset]) catch return StreamError.InvalidMetadata;
+        out_offsets[i + 1] = cur;
+    }
+    const left_prefix = out_offsets[left.length];
+    while (i < total_len) : (i += 1) {
+        const right_idx = i - left.length;
+        const delta_off = std.math.sub(i64, right_offsets[right.offset + right_idx + 1], right_offsets[right.offset]) catch return StreamError.InvalidMetadata;
+        out_offsets[i + 1] = std.math.add(i64, left_prefix, delta_off) catch return StreamError.InvalidMetadata;
+    }
+    var offsets = try offsets_owned.toShared(offsets_len * @sizeOf(i64));
+    errdefer offsets.release();
+
+    var values_owned = try buffer.OwnedBuffer.init(allocator, total_data_len);
+    if (left_data_len > 0) {
+        @memcpy(values_owned.data[0..left_data_len], left.buffers[2].data[left_start..left_end]);
+    }
+    if (right_data_len > 0) {
+        @memcpy(values_owned.data[left_data_len .. left_data_len + right_data_len], right.buffers[2].data[right_start..right_end]);
+    }
+    var values = try values_owned.toShared(total_data_len);
+    errdefer values.release();
+
+    const buffers = try allocator.alloc(array_data.SharedBuffer, 3);
+    errdefer allocator.free(buffers);
+    buffers[0] = validity;
+    buffers[1] = offsets;
+    buffers[2] = values;
+    const children = try allocator.alloc(ArrayRef, 0);
+    errdefer allocator.free(children);
+
+    const data = ArrayData{
+        .data_type = dt,
+        .length = total_len,
+        .null_count = null_count,
+        .buffers = buffers,
+        .children = children,
+        .dictionary = null,
+    };
+    try data.validateLayout();
+    return ArrayRef.fromOwnedUnsafe(allocator, data);
+}
+
+fn nullCountForArray(data: *const ArrayData) usize {
+    if (data.null_count) |count| return count;
+    if (data.validity()) |v| return v.countNulls();
+    return 0;
+}
+
+fn concatValidityBuffer(
+    allocator: std.mem.Allocator,
+    left: *const ArrayData,
+    right: *const ArrayData,
+    total_len: usize,
+    total_nulls: usize,
+) error{OutOfMemory}!array_data.SharedBuffer {
+    if (total_nulls == 0) return array_data.SharedBuffer.empty;
+    const used = bitmap.byteLength(total_len);
+    var owned = try buffer.OwnedBuffer.init(allocator, used);
+    const bytes = owned.data[0..used];
+    @memset(bytes, 0);
+    var i: usize = 0;
+    while (i < left.length) : (i += 1) {
+        if (isValidAt(left, i)) bitmap.setBit(bytes, i);
+    }
+    i = 0;
+    while (i < right.length) : (i += 1) {
+        if (isValidAt(right, i)) bitmap.setBit(bytes, left.length + i);
+    }
+    return owned.toShared(used);
+}
+
+fn isValidAt(data: *const ArrayData, index: usize) bool {
+    if (data.null_count) |count| {
+        if (count == 0) return true;
+        if (count == data.length) return false;
+    }
+    const validity = data.validity() orelse return true;
+    return validity.isValid(data.offset + index);
+}
+
+fn bitAt(buf: array_data.SharedBuffer, bit_index: usize) bool {
+    return bitmap.bitIsSet(buf.data, bit_index);
+}
+
+fn dataBytesForFixedWidth(data: *const ArrayData, byte_width: usize) StreamError![]const u8 {
+    const start = std.math.mul(usize, data.offset, byte_width) catch return StreamError.InvalidMetadata;
+    const data_len = std.math.mul(usize, data.length, byte_width) catch return StreamError.InvalidMetadata;
+    const end = std.math.add(usize, start, data_len) catch return StreamError.InvalidMetadata;
+    if (end > data.buffers[1].len()) return StreamError.InvalidMetadata;
+    return data.buffers[1].data[start..end];
+}
+
+fn requireBufferCount(data: *const ArrayData, min_count: usize) StreamError!void {
+    if (data.buffers.len < min_count) return StreamError.InvalidMetadata;
 }
 
 fn findDictionaryValueType(schema: Schema, dictionary_id: i64) ?DataType {
@@ -1219,6 +1578,143 @@ test "ipc stream roundtrip dictionary encoded string column" {
     const dict_view = @import("../array/string_array.zig").StringArray{ .data = out_dict.dictionaryRef().data() };
     try std.testing.expectEqualStrings("red", dict_view.value(0));
     try std.testing.expectEqualStrings("blue", dict_view.value(1));
+}
+
+test "ipc reader merges dictionary delta batches" {
+    const allocator = std.testing.allocator;
+
+    const value_type = DataType{ .string = {} };
+    const dict_type = DataType{
+        .dictionary = .{
+            .id = 0,
+            .index_type = .{ .bit_width = 32, .signed = true },
+            .value_type = &value_type,
+            .ordered = false,
+        },
+    };
+    const fields = [_]Field{
+        .{ .name = "color", .data_type = &dict_type, .nullable = false },
+    };
+    const schema = Schema{ .fields = fields[0..] };
+
+    var out = std.array_list.Managed(u8).init(allocator);
+    defer out.deinit();
+
+    var writer = @import("stream_writer.zig").StreamWriter(@TypeOf(out.writer())).init(allocator, out.writer());
+    try writer.writeSchema(schema);
+
+    var dict1_nodes = try std.ArrayList(fbs.FieldNodeT).initCapacity(allocator, 0);
+    try dict1_nodes.append(allocator, .{ .length = 2, .null_count = 0 });
+    var dict1_buffers = try std.ArrayList(fbs.BufferT).initCapacity(allocator, 0);
+    try dict1_buffers.append(allocator, .{ .offset = 0, .length = 0 });
+    try dict1_buffers.append(allocator, .{ .offset = 0, .length = 12 });
+    try dict1_buffers.append(allocator, .{ .offset = 12, .length = 7 });
+    const dict1_rb = try allocator.create(fbs.RecordBatchT);
+    dict1_rb.* = .{
+        .length = 2,
+        .nodes = dict1_nodes,
+        .buffers = dict1_buffers,
+        .variadicBufferCounts = try std.ArrayList(i64).initCapacity(allocator, 0),
+    };
+    const dict1_batch = try allocator.create(fbs.DictionaryBatchT);
+    dict1_batch.* = .{
+        .id = 0,
+        .data = dict1_rb,
+        .isDelta = false,
+    };
+    var msg_dict1 = fbs.MessageT{
+        .version = .V5,
+        .header = .{ .DictionaryBatch = dict1_batch },
+        .bodyLength = 19,
+        .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0),
+    };
+    defer msg_dict1.deinit(allocator);
+    const dict1_body = [_]u8{
+        0, 0, 0, 0,
+        3, 0, 0, 0,
+        7, 0, 0, 0,
+        'r', 'e', 'd', 'b', 'l', 'u', 'e',
+    };
+    try appendEncodedMessage(allocator, out.writer(), msg_dict1, &dict1_body);
+
+    var dict2_nodes = try std.ArrayList(fbs.FieldNodeT).initCapacity(allocator, 0);
+    try dict2_nodes.append(allocator, .{ .length = 1, .null_count = 0 });
+    var dict2_buffers = try std.ArrayList(fbs.BufferT).initCapacity(allocator, 0);
+    try dict2_buffers.append(allocator, .{ .offset = 0, .length = 0 });
+    try dict2_buffers.append(allocator, .{ .offset = 0, .length = 8 });
+    try dict2_buffers.append(allocator, .{ .offset = 8, .length = 5 });
+    const dict2_rb = try allocator.create(fbs.RecordBatchT);
+    dict2_rb.* = .{
+        .length = 1,
+        .nodes = dict2_nodes,
+        .buffers = dict2_buffers,
+        .variadicBufferCounts = try std.ArrayList(i64).initCapacity(allocator, 0),
+    };
+    const dict2_batch = try allocator.create(fbs.DictionaryBatchT);
+    dict2_batch.* = .{
+        .id = 0,
+        .data = dict2_rb,
+        .isDelta = true,
+    };
+    var msg_dict2 = fbs.MessageT{
+        .version = .V5,
+        .header = .{ .DictionaryBatch = dict2_batch },
+        .bodyLength = 13,
+        .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0),
+    };
+    defer msg_dict2.deinit(allocator);
+    const dict2_body = [_]u8{
+        0, 0, 0, 0,
+        5, 0, 0, 0,
+        'g', 'r', 'e', 'e', 'n',
+    };
+    try appendEncodedMessage(allocator, out.writer(), msg_dict2, &dict2_body);
+
+    var rb_nodes = try std.ArrayList(fbs.FieldNodeT).initCapacity(allocator, 0);
+    try rb_nodes.append(allocator, .{ .length = 2, .null_count = 0 });
+    var rb_buffers = try std.ArrayList(fbs.BufferT).initCapacity(allocator, 0);
+    try rb_buffers.append(allocator, .{ .offset = 0, .length = 0 });
+    try rb_buffers.append(allocator, .{ .offset = 0, .length = 8 });
+    const rb_ptr = try allocator.create(fbs.RecordBatchT);
+    rb_ptr.* = .{
+        .length = 2,
+        .nodes = rb_nodes,
+        .buffers = rb_buffers,
+        .variadicBufferCounts = try std.ArrayList(i64).initCapacity(allocator, 0),
+    };
+    var msg_rb = fbs.MessageT{
+        .version = .V5,
+        .header = .{ .RecordBatch = rb_ptr },
+        .bodyLength = 8,
+        .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0),
+    };
+    defer msg_rb.deinit(allocator);
+    const rb_body = [_]u8{
+        2, 0, 0, 0, // green
+        0, 0, 0, 0, // red
+    };
+    try appendEncodedMessage(allocator, out.writer(), msg_rb, &rb_body);
+    try writer.writeEnd();
+
+    var stream = std.io.fixedBufferStream(out.items);
+    var reader = StreamReader(@TypeOf(stream.reader())).init(allocator, stream.reader());
+    defer reader.deinit();
+
+    _ = try reader.readSchema();
+    const out_batch_opt = try reader.nextRecordBatch();
+    try std.testing.expect(out_batch_opt != null);
+    var out_batch = out_batch_opt.?;
+    defer out_batch.deinit();
+
+    const out_dict = @import("../array/dictionary_array.zig").DictionaryArray{ .data = out_batch.columns[0].data() };
+    try std.testing.expectEqual(@as(i64, 2), out_dict.index(0));
+    try std.testing.expectEqual(@as(i64, 0), out_dict.index(1));
+
+    const dict_view = @import("../array/string_array.zig").StringArray{ .data = out_dict.dictionaryRef().data() };
+    try std.testing.expectEqual(@as(usize, 3), dict_view.len());
+    try std.testing.expectEqualStrings("red", dict_view.value(0));
+    try std.testing.expectEqualStrings("blue", dict_view.value(1));
+    try std.testing.expectEqualStrings("green", dict_view.value(2));
 }
 
 test "ipc stream roundtrip map int32 to int32" {
