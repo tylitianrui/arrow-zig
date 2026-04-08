@@ -206,11 +206,10 @@ fn writeMessage(allocator: std.mem.Allocator, writer: anytype, msg: fbs.MessageT
     try writer.writeAll(metadata);
     try format.writePadding(writer, format.padLen(metadata.len));
 
-    var pad_bytes: [buffer.ALIGNMENT]u8 = [_]u8{0} ** buffer.ALIGNMENT;
+    var pad_bytes: [format.Alignment]u8 = [_]u8{0} ** format.Alignment;
     for (body_buffers) |buf| {
         if (buf.len() > 0) try writer.writeAll(buf.data);
-        const padded = buffer.alignedSize(buf.len());
-        const pad_len = padded - buf.len();
+        const pad_len = format.padLen(buf.len());
         if (pad_len > 0) try writer.writeAll(pad_bytes[0..pad_len]);
     }
 }
@@ -758,7 +757,7 @@ fn appendArrayMeta(
     for (data.buffers) |buf| {
         try buffers.append(allocator, .{ .offset = @intCast(body_offset.*), .length = @intCast(buf.len()) });
         try body_buffers.append(allocator, buf);
-        body_offset.* += @intCast(buffer.alignedSize(buf.len()));
+        body_offset.* += @intCast(format.paddedLen(buf.len()));
     }
     if (data.data_type == .string_view or data.data_type == .binary_view) {
         if (data.buffers.len < 2) return StreamError.InvalidMetadata;

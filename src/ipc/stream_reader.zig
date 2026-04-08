@@ -594,7 +594,14 @@ fn readArrayFromMeta(
         const len = std.math.cast(usize, meta.length) orelse return StreamError.InvalidBody;
         const end = std.math.add(usize, start, len) catch return StreamError.InvalidBody;
         if (end > body.len()) return StreamError.InvalidBody;
-        buffers[i] = if (meta.length == 0) array_data.SharedBuffer.empty else body.slice(start, end);
+        if (meta.length == 0) {
+            buffers[i] = array_data.SharedBuffer.empty;
+        } else {
+            var owned = try buffer.OwnedBuffer.init(allocator, len);
+            errdefer owned.deinit();
+            @memcpy(owned.data[0..len], body.data[start..end]);
+            buffers[i] = try owned.toShared(len);
+        }
         buf_count += 1;
     }
 
