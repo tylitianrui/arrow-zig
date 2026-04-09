@@ -35,15 +35,17 @@ Apache Arrow 的 Zig 实现。
 
 ### 1. 添加依赖
 
+在项目根目录下运行：
+
 ```sh
-zig fetch --save "git+https://github.com/tylitianrui/zarrow#5ede2689d054cbcf0d29c45c196d1aae344a50ae"
+zig fetch --save "git+https://github.com/tylitianrui/zarrow#master"
 ```
 
 ### 2. 配置 `build.zig`
 
 两种方式任选其一。
 
-**方式一（推荐）** — 添加预生成 `FlatBuffers` 代码的步骤，首次构建自动触发，后续无额外开销：
+**方式一（推荐）** — 在 `pub fn build(b: *std.Build) void` 中添加 zarrow 依赖，并加入预生成 FlatBuffers 代码的步骤。该步骤首次构建时自动触发，后续无额外开销：
 
 ```zig
 const zarrow_dep = b.dependency("zarrow", .{
@@ -65,7 +67,7 @@ std.fs.accessAbsolute(lib_zig_path, .{}) catch {
 exe.root_module.addImport("zarrow", zarrow_dep.module("zarrow"));
 ```
 
-**方式二（简易）** — 跳过预生成步骤，首次编译报错时手动触发一次：
+**方式二（简易）** — 在 `pub fn build(b: *std.Build) void` 中只添加 zarrow 依赖。跳过预生成步骤，首次构建失败时手动运行一次：
 
 ```zig
 const zarrow_dep = b.dependency("zarrow", .{
@@ -75,6 +77,7 @@ const zarrow_dep = b.dependency("zarrow", .{
 exe.root_module.addImport("zarrow", zarrow_dep.module("zarrow"));
 ```
 
+如果首次构建失败，请在依赖目录下手动运行一次：
 ```sh
 # 首次编译报错时，在依赖目录下执行一次即可
 cd ~/.cache/zig/p/zarrow-<version>-<hash>/
@@ -109,3 +112,8 @@ pub fn main() !void {
 }
 ```
 
+执行 `zig build run` 即可看到输出：
+
+```
+len=3, v0=10, isNull1=true, v2=30
+```
