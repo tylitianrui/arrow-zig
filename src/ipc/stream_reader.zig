@@ -185,12 +185,11 @@ fn readMessageOptional(self: anytype) (StreamError || fb.common.PackError || @Ty
     const msg = fbs.Message.GetRootAs(@constCast(metadata.data), 0);
     const opts: fb.common.PackOptions = .{ .allocator = self.allocator };
     const msg_t = try fbs.MessageT.Unpack(msg, opts);
-    if (msg_t.version != .V5 and msg_t.version != .V4) {
+    errdefer {
         var tmp = msg_t;
         tmp.deinit(self.allocator);
-        metadata.release();
-        return StreamError.InvalidMetadata;
     }
+    if (msg_t.version != .V5 and msg_t.version != .V4) return StreamError.InvalidMetadata;
 
     var body_shared: ?array_data.SharedBuffer = null;
     const body_len = std.math.cast(usize, msg_t.bodyLength) orelse return StreamError.InvalidBody;
@@ -2968,6 +2967,22 @@ test "ipc reader returns EndOfStream for truncated metadata payload" {
     try std.testing.expectError(error.EndOfStream, reader.readSchema());
 }
 
+test "ipc reader returns EndOfStream for truncated continuation marker length prefix" {
+    const allocator = std.testing.allocator;
+
+    var bytes = std.array_list.Managed(u8).init(allocator);
+    defer bytes.deinit();
+
+    // Continuation marker is present, but the required 4-byte message length is missing.
+    try format.writeInt(bytes.writer(), u32, format.ContinuationMarker);
+
+    var stream = std.io.fixedBufferStream(bytes.items);
+    var reader = StreamReader(@TypeOf(stream.reader())).init(allocator, stream.reader());
+    defer reader.deinit();
+
+    try std.testing.expectError(error.EndOfStream, reader.readSchema());
+}
+
 test "ipc reader rejects non-schema first message" {
     const allocator = std.testing.allocator;
 
@@ -3053,6 +3068,106 @@ test "ipc reader rejects record batch buffer offset beyond body" {
     try std.testing.expectError(StreamError.InvalidBody, reader.nextRecordBatch());
 }
 
+test "ipc reader rejects record batch buffer with negative offset" {
+    const allocator = std.testing.allocator;
+
+    const int_type = DataType{ .int32 = {} };
+    const fields = [_]Field{
+        .{ .name = "id", .data_type = &int_type, .nullable = false },
+    };
+    const schema = Schema{ .fields = fields[0..] };
+
+    var out = std.array_list.Managed(u8).init(allocator);
+    defer out.deinit();
+
+    var writer = @import("stream_writer.zig").StreamWriter(@TypeOf(out.writer())).init(allocator, out.writer());
+    defer writer.deinit();
+    try writer.writeSchema(schema);
+
+    var nodes = try std.ArrayList(fbs.FieldNodeT).initCapacity(allocator, 0);
+    try nodes.append(allocator, .{ .length = 1, .null_count = 0 });
+
+    var buffers = try std.ArrayList(fbs.BufferT).initCapacity(allocator, 0);
+    try buffers.append(allocator, .{ .offset = 0, .length = 0 });
+    try buffers.append(allocator, .{ .offset = -1, .length = 4 });
+
+    const batch_ptr = try allocator.create(fbs.RecordBatchT);
+    batch_ptr.* = .{
+        .length = 1,
+        .nodes = nodes,
+        .buffers = buffers,
+        .variadicBufferCounts = try std.ArrayList(i64).initCapacity(allocator, 0),
+    };
+
+    var malformed_msg = fbs.MessageT{
+        .version = .V5,
+        .header = .{ .RecordBatch = batch_ptr },
+        .bodyLength = 4,
+        .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0),
+    };
+    defer malformed_msg.deinit(allocator);
+
+    try appendEncodedMessage(allocator, out.writer(), malformed_msg, &[_]u8{ 1, 0, 0, 0 });
+    try writer.writeEnd();
+
+    var stream = std.io.fixedBufferStream(out.items);
+    var reader = StreamReader(@TypeOf(stream.reader())).init(allocator, stream.reader());
+    defer reader.deinit();
+
+    _ = try reader.readSchema();
+    try std.testing.expectError(StreamError.InvalidBody, reader.nextRecordBatch());
+}
+
+test "ipc reader rejects record batch buffer with negative length" {
+    const allocator = std.testing.allocator;
+
+    const int_type = DataType{ .int32 = {} };
+    const fields = [_]Field{
+        .{ .name = "id", .data_type = &int_type, .nullable = false },
+    };
+    const schema = Schema{ .fields = fields[0..] };
+
+    var out = std.array_list.Managed(u8).init(allocator);
+    defer out.deinit();
+
+    var writer = @import("stream_writer.zig").StreamWriter(@TypeOf(out.writer())).init(allocator, out.writer());
+    defer writer.deinit();
+    try writer.writeSchema(schema);
+
+    var nodes = try std.ArrayList(fbs.FieldNodeT).initCapacity(allocator, 0);
+    try nodes.append(allocator, .{ .length = 1, .null_count = 0 });
+
+    var buffers = try std.ArrayList(fbs.BufferT).initCapacity(allocator, 0);
+    try buffers.append(allocator, .{ .offset = 0, .length = 0 });
+    try buffers.append(allocator, .{ .offset = 0, .length = -1 });
+
+    const batch_ptr = try allocator.create(fbs.RecordBatchT);
+    batch_ptr.* = .{
+        .length = 1,
+        .nodes = nodes,
+        .buffers = buffers,
+        .variadicBufferCounts = try std.ArrayList(i64).initCapacity(allocator, 0),
+    };
+
+    var malformed_msg = fbs.MessageT{
+        .version = .V5,
+        .header = .{ .RecordBatch = batch_ptr },
+        .bodyLength = 4,
+        .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0),
+    };
+    defer malformed_msg.deinit(allocator);
+
+    try appendEncodedMessage(allocator, out.writer(), malformed_msg, &[_]u8{ 1, 0, 0, 0 });
+    try writer.writeEnd();
+
+    var stream = std.io.fixedBufferStream(out.items);
+    var reader = StreamReader(@TypeOf(stream.reader())).init(allocator, stream.reader());
+    defer reader.deinit();
+
+    _ = try reader.readSchema();
+    try std.testing.expectError(StreamError.InvalidBody, reader.nextRecordBatch());
+}
+
 test "ipc reader rejects record batch with trailing metadata entries" {
     const allocator = std.testing.allocator;
 
@@ -3106,6 +3221,76 @@ test "ipc reader rejects record batch with trailing metadata entries" {
 
     _ = try reader.readSchema();
     try std.testing.expectError(StreamError.InvalidMetadata, reader.nextRecordBatch());
+}
+
+test "ipc reader maps parse failures to deterministic errors" {
+    const allocator = std.testing.allocator;
+
+    // Case 1: malformed length prefix maps to EndOfStream.
+    {
+        var bytes = std.array_list.Managed(u8).init(allocator);
+        defer bytes.deinit();
+        try format.writeInt(bytes.writer(), u32, format.ContinuationMarker);
+
+        var stream = std.io.fixedBufferStream(bytes.items);
+        var reader = StreamReader(@TypeOf(stream.reader())).init(allocator, stream.reader());
+        defer reader.deinit();
+        try std.testing.expectError(error.EndOfStream, reader.readSchema());
+    }
+
+    // Case 2: invalid metadata version maps to InvalidMetadata.
+    {
+        var bytes = std.array_list.Managed(u8).init(allocator);
+        defer bytes.deinit();
+        try appendSchemaMessageWithBody(allocator, bytes.writer(), .V1, 0, null);
+
+        var stream = std.io.fixedBufferStream(bytes.items);
+        var reader = StreamReader(@TypeOf(stream.reader())).init(allocator, stream.reader());
+        defer reader.deinit();
+        try std.testing.expectError(StreamError.InvalidMetadata, reader.readSchema());
+    }
+
+    // Case 3: negative body length maps to InvalidBody.
+    {
+        var bytes = std.array_list.Managed(u8).init(allocator);
+        defer bytes.deinit();
+        try appendSchemaMessageWithBody(allocator, bytes.writer(), .V5, -1, null);
+
+        var stream = std.io.fixedBufferStream(bytes.items);
+        var reader = StreamReader(@TypeOf(stream.reader())).init(allocator, stream.reader());
+        defer reader.deinit();
+        try std.testing.expectError(StreamError.InvalidBody, reader.readSchema());
+    }
+
+    // Case 4: first non-schema message maps to InvalidMessage.
+    {
+        var bytes = std.array_list.Managed(u8).init(allocator);
+        defer bytes.deinit();
+
+        const nodes = try std.ArrayList(fbs.FieldNodeT).initCapacity(allocator, 0);
+        const buffers = try std.ArrayList(fbs.BufferT).initCapacity(allocator, 0);
+        const batch_ptr = try allocator.create(fbs.RecordBatchT);
+        batch_ptr.* = .{
+            .length = 0,
+            .nodes = nodes,
+            .buffers = buffers,
+            .variadicBufferCounts = try std.ArrayList(i64).initCapacity(allocator, 0),
+        };
+
+        var msg = fbs.MessageT{
+            .version = .V5,
+            .header = .{ .RecordBatch = batch_ptr },
+            .bodyLength = 0,
+            .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0),
+        };
+        defer msg.deinit(allocator);
+
+        try appendEncodedMessage(allocator, bytes.writer(), msg, &.{});
+        var stream = std.io.fixedBufferStream(bytes.items);
+        var reader = StreamReader(@TypeOf(stream.reader())).init(allocator, stream.reader());
+        defer reader.deinit();
+        try std.testing.expectError(StreamError.InvalidMessage, reader.readSchema());
+    }
 }
 
 test "ipc reader rejects unexpected variadic buffer counts" {
@@ -3179,6 +3364,26 @@ fn appendEncodedMessage(allocator: std.mem.Allocator, writer: anytype, msg: fbs.
 }
 
 fn appendValidTestMessageWithBody(allocator: std.mem.Allocator, writer: anytype, body_len: usize, fill: u8) !void {
+    const body_len_i64: i64 = @intCast(body_len);
+    var body: ?[]const u8 = null;
+    if (body_len > 0) {
+        const owned = try allocator.alloc(u8, body_len);
+        defer allocator.free(owned);
+        @memset(owned, fill);
+        body = owned;
+        try appendSchemaMessageWithBody(allocator, writer, .V5, body_len_i64, body);
+        return;
+    }
+    try appendSchemaMessageWithBody(allocator, writer, .V5, body_len_i64, null);
+}
+
+fn appendSchemaMessageWithBody(
+    allocator: std.mem.Allocator,
+    writer: anytype,
+    version: fbs.MetadataVersion,
+    body_length: i64,
+    body_opt: ?[]const u8,
+) !void {
     var builder = fb.Builder.init(allocator);
     defer builder.deinitAll();
 
@@ -3192,9 +3397,9 @@ fn appendValidTestMessageWithBody(allocator: std.mem.Allocator, writer: anytype,
     };
 
     var msg = fbs.MessageT{
-        .version = .V5,
+        .version = version,
         .header = .{ .Schema = schema_ptr },
-        .bodyLength = @intCast(body_len),
+        .bodyLength = body_length,
         .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0),
     };
     defer msg.deinit(allocator);
@@ -3208,10 +3413,7 @@ fn appendValidTestMessageWithBody(allocator: std.mem.Allocator, writer: anytype,
     try writer.writeAll(metadata);
     try format.writePadding(writer, format.padLen(metadata.len));
 
-    if (body_len > 0) {
-        const body = try allocator.alloc(u8, body_len);
-        defer allocator.free(body);
-        @memset(body, fill);
+    if (body_opt) |body| {
         try writer.writeAll(body);
     }
 }

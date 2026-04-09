@@ -87,9 +87,9 @@ Goal: Build a production-usable Zig implementation of Apache Arrow core memory m
 
 ### B4. IPC Robustness
 
-- [ ] B4.1 Add malformed header/message length tests.
-- [ ] B4.2 Add invalid offset/length payload tests.
-- [ ] B4.3 Add deterministic error mapping for parse failures.
+- [x] B4.1 Add malformed header/message length tests.
+- [x] B4.2 Add invalid offset/length payload tests.
+- [x] B4.3 Add deterministic error mapping for parse failures.
 
 ### B5. IPC Type Coverage Expansion
 
