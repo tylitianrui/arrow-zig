@@ -52,6 +52,7 @@ pub const OwnedSchema = struct {
 pub const Error = error{
     UnsupportedType,
     InvalidFormat,
+    TopLevelSchemaMustBeStruct,
     InvalidChildren,
     InvalidBufferCount,
     InvalidLength,
@@ -121,7 +122,7 @@ pub fn importSchemaOwned(allocator: std.mem.Allocator, c_schema: *ArrowSchema) E
     const a = arena.allocator();
 
     const fmt = cString(c_schema.format) orelse return error.InvalidFormat;
-    if (!std.mem.eql(u8, fmt, "+s")) return error.InvalidFormat;
+    if (!std.mem.eql(u8, fmt, "+s")) return error.TopLevelSchemaMustBeStruct;
 
     const children = childPtrsSchema(c_schema) orelse return error.InvalidChildren;
     const fields = try a.alloc(Field, children.len);
@@ -1415,5 +1416,128 @@ test "c data map import validates offsets and entries values explicitly" {
     try std.testing.expect(items_arr.isNull(1));
     try std.testing.expectEqual(@as(i32, 30), items_arr.value(2));
 
+    try std.testing.expect(c_array.release == null);
+}
+
+fn testNoopReleaseSchema(raw: ?*ArrowSchema) callconv(.c) void {
+    if (raw == null) return;
+    raw.?.release = null;
+    raw.?.private_data = null;
+}
+
+test "c data import schema returns explicit top-level struct error" {
+    const allocator = std.testing.allocator;
+
+    var c_schema = ArrowSchema{
+        .format = "i",
+        .name = null,
+        .metadata = null,
+        .flags = 0,
+        .n_children = 0,
+        .children = null,
+        .dictionary = null,
+        .release = testNoopReleaseSchema,
+        .private_data = null,
+    };
+
+    try std.testing.expectError(error.TopLevelSchemaMustBeStruct, importSchemaOwned(allocator, &c_schema));
+}
+
+test "c data import schema rejects released input" {
+    const allocator = std.testing.allocator;
+
+    var c_schema = ArrowSchema{
+        .format = "+s",
+        .name = null,
+        .metadata = null,
+        .flags = 0,
+        .n_children = 0,
+        .children = null,
+        .dictionary = null,
+        .release = null,
+        .private_data = null,
+    };
+    try std.testing.expectError(error.Released, importSchemaOwned(allocator, &c_schema));
+}
+
+test "c data export schema rejects non-little-endian" {
+    const int_ty = DataType{ .int32 = {} };
+    const fields = [_]Field{
+        .{ .name = "id", .data_type = &int_ty, .nullable = true },
+    };
+    const schema = Schema{
+        .fields = fields[0..],
+        .endianness = .big,
+    };
+
+    try std.testing.expectError(error.UnsupportedType, exportSchema(std.testing.allocator, schema));
+}
+
+test "c data import array rejects released input" {
+    const allocator = std.testing.allocator;
+
+    const int_ty = DataType{ .int32 = {} };
+    var c_array = ArrowArray{
+        .length = 0,
+        .null_count = 0,
+        .offset = 0,
+        .n_buffers = 2,
+        .n_children = 0,
+        .buffers = null,
+        .children = null,
+        .dictionary = null,
+        .release = null,
+        .private_data = null,
+    };
+
+    try std.testing.expectError(error.Released, importArray(allocator, &int_ty, &c_array));
+}
+
+test "c data map import requires entries_type in target datatype" {
+    const allocator = std.testing.allocator;
+
+    const key_ty = DataType{ .int32 = {} };
+    const item_ty = DataType{ .int32 = {} };
+    const key_field = Field{ .name = "key", .data_type = &key_ty, .nullable = false };
+    const item_field = Field{ .name = "item", .data_type = &item_ty, .nullable = true };
+
+    var keys_builder = try @import("../array/primitive_array.zig").PrimitiveBuilder(i32, DataType{ .int32 = {} }).init(allocator, 2);
+    defer keys_builder.deinit();
+    try keys_builder.append(1);
+    try keys_builder.append(2);
+    var keys_ref = try keys_builder.finish();
+    defer keys_ref.release();
+
+    var items_builder = try @import("../array/primitive_array.zig").PrimitiveBuilder(i32, DataType{ .int32 = {} }).init(allocator, 2);
+    defer items_builder.deinit();
+    try items_builder.append(10);
+    try items_builder.append(20);
+    var items_ref = try items_builder.finish();
+    defer items_ref.release();
+
+    var entries_builder = @import("../array/struct_array.zig").StructBuilder.init(allocator, &[_]Field{ key_field, item_field });
+    defer entries_builder.deinit();
+    try entries_builder.appendValid();
+    try entries_builder.appendValid();
+    var entries_ref = try entries_builder.finish(&[_]ArrayRef{ keys_ref, items_ref });
+    defer entries_ref.release();
+
+    var map_builder = try @import("../array/advanced_array.zig").MapBuilder.init(allocator, 1, key_field, item_field, false);
+    defer map_builder.deinit();
+    try map_builder.appendLen(2);
+    var map_ref = try map_builder.finish(entries_ref);
+    defer map_ref.release();
+
+    var c_array = try exportArray(allocator, map_ref);
+    const map_ty_no_entries = DataType{
+        .map = .{
+            .key_field = key_field,
+            .item_field = item_field,
+            .keys_sorted = false,
+            .entries_type = null,
+        },
+    };
+
+    try std.testing.expectError(error.UnsupportedType, importArray(allocator, &map_ty_no_entries, &c_array));
     try std.testing.expect(c_array.release == null);
 }
