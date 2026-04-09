@@ -237,10 +237,13 @@ pub fn build(b: *std.Build) !void {
     var bench_ci_step = b.step("benchmark-ci", "Run all benchmarks in CI CSV mode");
     var matrix_header_done = false;
     var ci_header_done = false;
+    var prev_matrix_run: ?*std.Build.Step = null;
+    var prev_ci_run: ?*std.Build.Step = null;
     var bench_it = benches.iterate();
     while (bench_it.next() catch null) |entry| {
         if (entry.kind != .file) continue;
         if (!std.mem.endsWith(u8, entry.name, ".zig")) continue;
+        if (!std.mem.endsWith(u8, entry.name, "_benchmark.zig")) continue;
 
         const base_name = entry.name[0 .. entry.name.len - 4];
         const bench_path = b.fmt("benchmarks/{s}", .{entry.name});
@@ -269,21 +272,25 @@ pub fn build(b: *std.Build) !void {
         bench_full_step.dependOn(&run_bench_full.step);
 
         const run_bench_matrix = b.addRunArtifact(bench_exe);
+        if (prev_matrix_run) |prev| run_bench_matrix.step.dependOn(prev);
         if (!matrix_header_done) {
             run_bench_matrix.addArg("matrix");
             matrix_header_done = true;
         } else {
             run_bench_matrix.addArg("matrix-no-header");
         }
+        prev_matrix_run = &run_bench_matrix.step;
         bench_matrix_step.dependOn(&run_bench_matrix.step);
 
         const run_bench_ci = b.addRunArtifact(bench_exe);
+        if (prev_ci_run) |prev| run_bench_ci.step.dependOn(prev);
         if (!ci_header_done) {
             run_bench_ci.addArg("ci");
             ci_header_done = true;
         } else {
             run_bench_ci.addArg("ci-no-header");
         }
+        prev_ci_run = &run_bench_ci.step;
         bench_ci_step.dependOn(&run_bench_ci.step);
     }
 }

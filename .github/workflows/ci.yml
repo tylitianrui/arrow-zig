@@ -45,6 +45,34 @@ jobs:
       - name: Run tests
         run: zig build test
 
+  benchmark-ci-check:
+    name: Benchmark CI CSV Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: "0.15.2"
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Generate benchmark CI CSV
+        run: |
+          export ZARROW_GIT_SHA="$(git rev-parse --short=12 HEAD)"
+          zig build benchmark-ci 2>&1 | tee benchmark-ci.csv
+
+      - name: Validate benchmark CI CSV format
+        run: python3 tools/benchmark_ci_check.py benchmark-ci.csv
+
+      - name: Run benchmark CI checker unit tests
+        run: python3 tools/test_benchmark_ci_check.py
+
   pyarrow-fixture-check:
     name: PyArrow Fixture Check
     runs-on: ubuntu-latest

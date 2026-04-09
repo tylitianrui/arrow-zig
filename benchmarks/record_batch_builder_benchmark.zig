@@ -1,5 +1,6 @@
 const std = @import("std");
 const zarrow = @import("zarrow");
+const csv_meta = @import("csv_meta.zig");
 
 const Mode = enum { default, smoke, full, matrix, matrix_no_header, ci, ci_no_header };
 
@@ -25,7 +26,7 @@ fn parseMode(allocator: std.mem.Allocator) !Mode {
 }
 
 fn printCsvHeader() void {
-    std.debug.print("benchmark,rows,iterations,elapsed_ns,rows_per_sec,ns_per_row,checksum\n", .{});
+    std.debug.print("benchmark,rows,iterations,elapsed_ns,rows_per_sec,ns_per_row,checksum,git_sha,timestamp\n", .{});
 }
 
 fn runOnce(allocator: std.mem.Allocator, batch_builder: *zarrow.RecordBatchBuilder, rows: usize, checksum: *usize) !void {
@@ -61,7 +62,7 @@ fn runOnce(allocator: std.mem.Allocator, batch_builder: *zarrow.RecordBatchBuild
     try batch_builder.reset();
 }
 
-fn runBenchmark(allocator: std.mem.Allocator, cfg: BenchConfig, emit_csv: bool) !void {
+fn runBenchmark(allocator: std.mem.Allocator, cfg: BenchConfig, emit_csv: bool, meta: csv_meta.CsvMeta) !void {
     const int_type = zarrow.DataType{ .int32 = {} };
     const bool_type = zarrow.DataType{ .bool = {} };
     const fields = [_]zarrow.Field{
@@ -90,13 +91,15 @@ fn runBenchmark(allocator: std.mem.Allocator, cfg: BenchConfig, emit_csv: bool) 
     const final_checksum = checksum + warmup;
 
     if (emit_csv) {
-        std.debug.print("record_batch_builder,{d},{d},{d},{d:.2},{d:.2},{d}\n", .{
+        std.debug.print("record_batch_builder,{d},{d},{d},{d:.2},{d:.2},{d},{s},{d}\n", .{
             cfg.rows,
             cfg.iterations,
             elapsed_ns,
             rows_per_sec,
             ns_per_row,
             final_checksum,
+            meta.git_sha,
+            meta.timestamp,
         });
         return;
     }
@@ -115,32 +118,34 @@ fn runBenchmark(allocator: std.mem.Allocator, cfg: BenchConfig, emit_csv: bool) 
 pub fn main() !void {
     const allocator = std.heap.page_allocator;
     const mode = try parseMode(allocator);
+    const meta = try csv_meta.resolve(allocator);
+    defer meta.deinit(allocator);
 
     switch (mode) {
-        .smoke => try runBenchmark(allocator, .{ .rows = 5_000, .iterations = 30 }, false),
-        .full => try runBenchmark(allocator, .{ .rows = 80_000, .iterations = 180 }, false),
+        .smoke => try runBenchmark(allocator, .{ .rows = 5_000, .iterations = 30 }, false, meta),
+        .full => try runBenchmark(allocator, .{ .rows = 80_000, .iterations = 180 }, false, meta),
         .matrix => {
             printCsvHeader();
-            try runBenchmark(allocator, .{ .rows = 1_000, .iterations = 300 }, true);
-            try runBenchmark(allocator, .{ .rows = 10_000, .iterations = 120 }, true);
-            try runBenchmark(allocator, .{ .rows = 100_000, .iterations = 24 }, true);
+            try runBenchmark(allocator, .{ .rows = 1_000, .iterations = 300 }, true, meta);
+            try runBenchmark(allocator, .{ .rows = 10_000, .iterations = 120 }, true, meta);
+            try runBenchmark(allocator, .{ .rows = 100_000, .iterations = 24 }, true, meta);
         },
         .matrix_no_header => {
-            try runBenchmark(allocator, .{ .rows = 1_000, .iterations = 300 }, true);
-            try runBenchmark(allocator, .{ .rows = 10_000, .iterations = 120 }, true);
-            try runBenchmark(allocator, .{ .rows = 100_000, .iterations = 24 }, true);
+            try runBenchmark(allocator, .{ .rows = 1_000, .iterations = 300 }, true, meta);
+            try runBenchmark(allocator, .{ .rows = 10_000, .iterations = 120 }, true, meta);
+            try runBenchmark(allocator, .{ .rows = 100_000, .iterations = 24 }, true, meta);
         },
         .ci => {
             printCsvHeader();
-            try runBenchmark(allocator, .{ .rows = 1_000, .iterations = 80 }, true);
-            try runBenchmark(allocator, .{ .rows = 10_000, .iterations = 24 }, true);
-            try runBenchmark(allocator, .{ .rows = 100_000, .iterations = 5 }, true);
+            try runBenchmark(allocator, .{ .rows = 1_000, .iterations = 80 }, true, meta);
+            try runBenchmark(allocator, .{ .rows = 10_000, .iterations = 24 }, true, meta);
+            try runBenchmark(allocator, .{ .rows = 100_000, .iterations = 5 }, true, meta);
         },
         .ci_no_header => {
-            try runBenchmark(allocator, .{ .rows = 1_000, .iterations = 80 }, true);
-            try runBenchmark(allocator, .{ .rows = 10_000, .iterations = 24 }, true);
-            try runBenchmark(allocator, .{ .rows = 100_000, .iterations = 5 }, true);
+            try runBenchmark(allocator, .{ .rows = 1_000, .iterations = 80 }, true, meta);
+            try runBenchmark(allocator, .{ .rows = 10_000, .iterations = 24 }, true, meta);
+            try runBenchmark(allocator, .{ .rows = 100_000, .iterations = 5 }, true, meta);
         },
-        .default => try runBenchmark(allocator, .{ .rows = 20_000, .iterations = 120 }, false),
+        .default => try runBenchmark(allocator, .{ .rows = 20_000, .iterations = 120 }, false, meta),
     }
 }
