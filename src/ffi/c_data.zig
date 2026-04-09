@@ -509,6 +509,26 @@ fn importDataType(allocator: std.mem.Allocator, c_schema: *ArrowSchema) Error!Da
             },
         };
     }
+    if (std.mem.startsWith(u8, fmt, "+us:") or std.mem.startsWith(u8, fmt, "+ud:")) {
+        const mode: datatype.UnionMode = if (std.mem.startsWith(u8, fmt, "+us:")) .sparse else .dense;
+        const ids = try parseUnionTypeIds(allocator, fmt[4..]);
+        const child_ptrs = childPtrsSchema(c_schema) orelse return error.InvalidChildren;
+        if (child_ptrs.len != ids.len) return error.InvalidChildren;
+        const fields = try allocator.alloc(Field, child_ptrs.len);
+        for (child_ptrs, 0..) |child_ptr, i| {
+            if (child_ptr == null) return error.InvalidChildren;
+            fields[i] = try importField(allocator, child_ptr.?);
+        }
+        const union_ty = datatype.UnionType{
+            .type_ids = ids,
+            .fields = fields,
+            .mode = mode,
+        };
+        return switch (mode) {
+            .sparse => DataType{ .sparse_union = union_ty },
+            .dense => DataType{ .dense_union = union_ty },
+        };
+    }
     if (std.mem.eql(u8, fmt, "+s")) {
         const child_ptrs = childPtrsSchema(c_schema) orelse return error.InvalidChildren;
         const fields = try allocator.alloc(Field, child_ptrs.len);
@@ -690,6 +710,15 @@ fn neededBufferLen(
             if (idx == 1) return (total_len + 1) * @sizeOf(i32);
             return null;
         },
+        .sparse_union => {
+            if (idx == 0) return total_len;
+            return null;
+        },
+        .dense_union => {
+            if (idx == 0) return total_len;
+            if (idx == 1) return total_len * @sizeOf(i32);
+            return null;
+        },
         .large_string, .large_binary, .large_list => {
             if (idx == 1) return (total_len + 1) * @sizeOf(i64);
             if (idx == 2) {
@@ -715,6 +744,8 @@ fn expectedBufferCount(dt: DataType) ?i64 {
     return switch (dt) {
         .null => 0,
         .struct_, .fixed_size_list => 1,
+        .sparse_union => 1,
+        .dense_union => 2,
         .bool => 2,
         .int8,
         .uint8,
@@ -753,6 +784,8 @@ fn expectedChildrenCount(dt: DataType) i64 {
     return switch (dt) {
         .list, .large_list, .fixed_size_list, .map => 1,
         .struct_ => |s| @intCast(s.fields.len),
+        .sparse_union => |u| @intCast(u.fields.len),
+        .dense_union => |u| @intCast(u.fields.len),
         else => 0,
     };
 }
@@ -783,6 +816,16 @@ fn childTypesForDataType(allocator: std.mem.Allocator, dt: DataType) Error![]con
             const entries_type = m.entries_type orelse return error.UnsupportedType;
             const out = try allocator.alloc(*const DataType, 1);
             out[0] = entries_type;
+            break :blk out;
+        },
+        .sparse_union => |u| blk: {
+            const out = try allocator.alloc(*const DataType, u.fields.len);
+            for (u.fields, 0..) |f, i| out[i] = f.data_type;
+            break :blk out;
+        },
+        .dense_union => |u| blk: {
+            const out = try allocator.alloc(*const DataType, u.fields.len);
+            for (u.fields, 0..) |f, i| out[i] = f.data_type;
             break :blk out;
         },
         else => try allocator.alloc(*const DataType, 0),
@@ -818,6 +861,16 @@ fn childFieldsForDataType(allocator: std.mem.Allocator, dt: DataType) Error![]co
             } else {
                 return error.UnsupportedType;
             }
+            break :blk out;
+        },
+        .sparse_union => |u| blk: {
+            const out = try allocator.alloc(Field, u.fields.len);
+            @memcpy(out, u.fields);
+            break :blk out;
+        },
+        .dense_union => |u| blk: {
+            const out = try allocator.alloc(Field, u.fields.len);
+            @memcpy(out, u.fields);
             break :blk out;
         },
         else => try allocator.alloc(Field, 0),
@@ -869,6 +922,8 @@ fn formatFromDataType(allocator: std.mem.Allocator, dt: DataType) Error![:0]u8 {
         .list => try allocator.dupeZ(u8, "+l"),
         .large_list => try allocator.dupeZ(u8, "+L"),
         .map => try allocator.dupeZ(u8, "+m"),
+        .sparse_union => |u| formatUnion(allocator, true, u.type_ids),
+        .dense_union => |u| formatUnion(allocator, false, u.type_ids),
         .struct_ => try allocator.dupeZ(u8, "+s"),
         .fixed_size_list => |fsl| allocPrintZ(allocator, "+w:{d}", .{fsl.list_size}),
         .dictionary => |d| formatFromIntType(allocator, d.index_type),
@@ -994,6 +1049,37 @@ fn parseDecimalFormat(fmt: []const u8) ?ParsedDecimal {
         .scale = scale,
         .bit_width = bit_width,
     };
+}
+
+fn parseUnionTypeIds(allocator: std.mem.Allocator, payload: []const u8) Error![]i8 {
+    if (payload.len == 0) return error.InvalidFormat;
+    var count: usize = 1;
+    for (payload) |c| if (c == ',') count += 1;
+    const out = allocator.alloc(i8, count) catch return error.OutOfMemory;
+    errdefer allocator.free(out);
+    var it = std.mem.splitScalar(u8, payload, ',');
+    var i: usize = 0;
+    while (it.next()) |part| : (i += 1) {
+        if (part.len == 0) return error.InvalidFormat;
+        out[i] = std.fmt.parseInt(i8, part, 10) catch return error.InvalidFormat;
+    }
+    if (i != count) return error.InvalidFormat;
+    return out;
+}
+
+fn formatUnion(allocator: std.mem.Allocator, sparse: bool, ids: []const i8) Error![:0]u8 {
+    if (ids.len == 0) return error.InvalidFormat;
+    var list = std.ArrayList(u8).init(allocator);
+    defer list.deinit();
+
+    try list.appendSlice(if (sparse) "+us:" else "+ud:");
+    for (ids, 0..) |id, i| {
+        if (i != 0) try list.append(',');
+        const s = std.fmt.allocPrint(allocator, "{d}", .{id}) catch return error.OutOfMemory;
+        defer allocator.free(s);
+        try list.appendSlice(s);
+    }
+    return allocator.dupeZ(u8, list.items) catch error.OutOfMemory;
 }
 
 fn allocPrintZ(allocator: std.mem.Allocator, comptime fmt: []const u8, args: anytype) Error![:0]u8 {
