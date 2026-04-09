@@ -228,19 +228,41 @@ fn exportFieldSchema(allocator: std.mem.Allocator, field: Field) Error!ArrowSche
         .dict_storage = null,
     };
 
-    const children = try childFieldsForDataType(allocator, field.data_type.*);
-    defer allocator.free(children);
-
-    if (children.len > 0) {
-        priv.children_storage = try allocator.alloc(ArrowSchema, children.len);
+    if (field.data_type.* == .map) {
+        const map_t = field.data_type.map;
+        priv.children_storage = try allocator.alloc(ArrowSchema, 1);
         errdefer allocator.free(priv.children_storage);
-
-        priv.children_ptrs = try allocator.alloc(?*ArrowSchema, children.len);
+        priv.children_ptrs = try allocator.alloc(?*ArrowSchema, 1);
         errdefer allocator.free(priv.children_ptrs);
 
-        for (children, 0..) |child, i| {
-            priv.children_storage[i] = try exportFieldSchema(allocator, child);
-            priv.children_ptrs[i] = &priv.children_storage[i];
+        if (map_t.entries_type) |entries_type| {
+            const entries_field = Field{ .name = "entries", .data_type = entries_type, .nullable = false };
+            priv.children_storage[0] = try exportFieldSchema(allocator, entries_field);
+        } else {
+            const entry_fields = [_]Field{
+                map_t.key_field,
+                map_t.item_field,
+            };
+            const entries_dt = DataType{ .struct_ = .{ .fields = entry_fields[0..] } };
+            const entries_field = Field{ .name = "entries", .data_type = &entries_dt, .nullable = false };
+            priv.children_storage[0] = try exportFieldSchema(allocator, entries_field);
+        }
+        priv.children_ptrs[0] = &priv.children_storage[0];
+    } else {
+        const children = try childFieldsForDataType(allocator, field.data_type.*);
+        defer allocator.free(children);
+
+        if (children.len > 0) {
+            priv.children_storage = try allocator.alloc(ArrowSchema, children.len);
+            errdefer allocator.free(priv.children_storage);
+
+            priv.children_ptrs = try allocator.alloc(?*ArrowSchema, children.len);
+            errdefer allocator.free(priv.children_ptrs);
+
+            for (children, 0..) |child, i| {
+                priv.children_storage[i] = try exportFieldSchema(allocator, child);
+                priv.children_ptrs[i] = &priv.children_storage[i];
+            }
         }
     }
 
@@ -471,6 +493,21 @@ fn importDataType(allocator: std.mem.Allocator, c_schema: *ArrowSchema) Error!Da
         const child_field = try importField(allocator, child);
         return DataType{ .large_list = .{ .value_field = child_field } };
     }
+    if (std.mem.eql(u8, fmt, "+m")) {
+        const child = singleChildSchema(c_schema) orelse return error.InvalidChildren;
+        const entries_field = try importField(allocator, child);
+        if (entries_field.data_type.* != .struct_) return error.InvalidChildren;
+        const entry_fields = entries_field.data_type.struct_.fields;
+        if (entry_fields.len != 2) return error.InvalidChildren;
+        return DataType{
+            .map = .{
+                .key_field = entry_fields[0],
+                .item_field = entry_fields[1],
+                .keys_sorted = (c_schema.flags & ARROW_FLAG_MAP_KEYS_SORTED) != 0,
+                .entries_type = entries_field.data_type,
+            },
+        };
+    }
     if (std.mem.eql(u8, fmt, "+s")) {
         const child_ptrs = childPtrsSchema(c_schema) orelse return error.InvalidChildren;
         const fields = try allocator.alloc(Field, child_ptrs.len);
@@ -648,6 +685,10 @@ fn neededBufferLen(
             }
             return null;
         },
+        .map => {
+            if (idx == 1) return (total_len + 1) * @sizeOf(i32);
+            return null;
+        },
         .large_string, .large_binary, .large_list => {
             if (idx == 1) return (total_len + 1) * @sizeOf(i64);
             if (idx == 2) {
@@ -700,6 +741,7 @@ fn expectedBufferCount(dt: DataType) ?i64 {
         .decimal256,
         .fixed_size_binary,
         .dictionary,
+        .map,
         => 2,
         .string, .binary, .large_string, .large_binary, .list, .large_list => 3,
         else => null,
@@ -708,7 +750,7 @@ fn expectedBufferCount(dt: DataType) ?i64 {
 
 fn expectedChildrenCount(dt: DataType) i64 {
     return switch (dt) {
-        .list, .large_list, .fixed_size_list => 1,
+        .list, .large_list, .fixed_size_list, .map => 1,
         .struct_ => |s| @intCast(s.fields.len),
         else => 0,
     };
@@ -736,6 +778,12 @@ fn childTypesForDataType(allocator: std.mem.Allocator, dt: DataType) Error![]con
             for (s.fields, 0..) |f, i| out[i] = f.data_type;
             break :blk out;
         },
+        .map => |m| blk: {
+            const entries_type = m.entries_type orelse return error.UnsupportedType;
+            const out = try allocator.alloc(*const DataType, 1);
+            out[0] = entries_type;
+            break :blk out;
+        },
         else => try allocator.alloc(*const DataType, 0),
     };
 }
@@ -760,6 +808,15 @@ fn childFieldsForDataType(allocator: std.mem.Allocator, dt: DataType) Error![]co
         .struct_ => |s| blk: {
             const out = try allocator.alloc(Field, s.fields.len);
             @memcpy(out, s.fields);
+            break :blk out;
+        },
+        .map => |m| blk: {
+            const out = try allocator.alloc(Field, 1);
+            if (m.entries_type) |entries_type| {
+                out[0] = Field{ .name = "entries", .data_type = entries_type, .nullable = false };
+            } else {
+                return error.UnsupportedType;
+            }
             break :blk out;
         },
         else => try allocator.alloc(Field, 0),
@@ -810,6 +867,7 @@ fn formatFromDataType(allocator: std.mem.Allocator, dt: DataType) Error![:0]u8 {
         .fixed_size_binary => |fsb| allocPrintZ(allocator, "w:{d}", .{fsb.byte_width}),
         .list => try allocator.dupeZ(u8, "+l"),
         .large_list => try allocator.dupeZ(u8, "+L"),
+        .map => try allocator.dupeZ(u8, "+m"),
         .struct_ => try allocator.dupeZ(u8, "+s"),
         .fixed_size_list => |fsl| allocPrintZ(allocator, "+w:{d}", .{fsl.list_size}),
         .dictionary => |d| formatFromIntType(allocator, d.index_type),
@@ -1162,4 +1220,200 @@ test "c data import parses explicit decimal widths and empty timestamp timezone"
     try std.testing.expect(dec256_dt == .decimal256);
     try std.testing.expectEqual(@as(u8, 76), dec256_dt.decimal256.precision);
     try std.testing.expectEqual(@as(i32, 20), dec256_dt.decimal256.scale);
+}
+
+test "c data schema supports map format" {
+    const allocator = std.testing.allocator;
+
+    const key_ty = DataType{ .int32 = {} };
+    const item_ty = DataType{ .string = {} };
+    const key_field = Field{ .name = "key", .data_type = &key_ty, .nullable = false };
+    const item_field = Field{ .name = "item", .data_type = &item_ty, .nullable = true };
+    const map_ty = DataType{
+        .map = .{
+            .key_field = key_field,
+            .item_field = item_field,
+            .keys_sorted = true,
+            .entries_type = null,
+        },
+    };
+    const fields = [_]Field{
+        .{ .name = "attrs", .data_type = &map_ty, .nullable = true },
+    };
+    const schema = Schema{ .fields = fields[0..] };
+
+    var c_schema = try exportSchema(allocator, schema);
+    defer if (c_schema.release) |release_fn| release_fn(&c_schema);
+
+    const root_children = childPtrsSchema(&c_schema).?;
+    try std.testing.expectEqual(@as(usize, 1), root_children.len);
+    const map_schema = root_children[0].?;
+    try std.testing.expectEqualStrings("+m", cString(map_schema.format).?);
+    try std.testing.expect((map_schema.flags & ARROW_FLAG_MAP_KEYS_SORTED) != 0);
+
+    const map_children = childPtrsSchema(map_schema).?;
+    try std.testing.expectEqual(@as(usize, 1), map_children.len);
+    try std.testing.expectEqualStrings("+s", cString(map_children[0].?.format).?);
+
+    var imported = try importSchemaOwned(allocator, &c_schema);
+    defer imported.deinit();
+    try std.testing.expect(imported.schema.fields[0].data_type.* == .map);
+    try std.testing.expect(imported.schema.fields[0].data_type.map.keys_sorted);
+    try std.testing.expect(imported.schema.fields[0].data_type.map.key_field.data_type.* == .int32);
+    try std.testing.expect(imported.schema.fields[0].data_type.map.item_field.data_type.* == .string);
+}
+
+test "c data array import supports map with entries_type" {
+    const allocator = std.testing.allocator;
+
+    const key_ty = DataType{ .int32 = {} };
+    const item_ty = DataType{ .int32 = {} };
+    const key_field = Field{ .name = "key", .data_type = &key_ty, .nullable = false };
+    const item_field = Field{ .name = "item", .data_type = &item_ty, .nullable = true };
+
+    var keys_builder = try @import("../array/primitive_array.zig").PrimitiveBuilder(i32, DataType{ .int32 = {} }).init(allocator, 3);
+    defer keys_builder.deinit();
+    try keys_builder.append(1);
+    try keys_builder.append(2);
+    try keys_builder.append(3);
+    var keys_ref = try keys_builder.finish();
+    defer keys_ref.release();
+
+    var items_builder = try @import("../array/primitive_array.zig").PrimitiveBuilder(i32, DataType{ .int32 = {} }).init(allocator, 3);
+    defer items_builder.deinit();
+    try items_builder.append(10);
+    try items_builder.appendNull();
+    try items_builder.append(30);
+    var items_ref = try items_builder.finish();
+    defer items_ref.release();
+
+    var entries_builder = @import("../array/struct_array.zig").StructBuilder.init(allocator, &[_]Field{ key_field, item_field });
+    defer entries_builder.deinit();
+    try entries_builder.appendValid();
+    try entries_builder.appendValid();
+    try entries_builder.appendValid();
+    var entries_ref = try entries_builder.finish(&[_]ArrayRef{ keys_ref, items_ref });
+    defer entries_ref.release();
+
+    var map_builder = try @import("../array/advanced_array.zig").MapBuilder.init(allocator, 2, key_field, item_field, false);
+    defer map_builder.deinit();
+    try map_builder.appendLen(2);
+    try map_builder.appendLen(1);
+    var map_ref = try map_builder.finish(entries_ref);
+    defer map_ref.release();
+
+    var c_array = try exportArray(allocator, map_ref);
+    const entries_ty_ptr: *const DataType = &entries_ref.data().data_type;
+    const map_ty = DataType{
+        .map = .{
+            .key_field = key_field,
+            .item_field = item_field,
+            .keys_sorted = false,
+            .entries_type = entries_ty_ptr,
+        },
+    };
+
+    var imported = try importArray(allocator, &map_ty, &c_array);
+    defer imported.release();
+
+    try std.testing.expect(imported.data().data_type == .map);
+    try std.testing.expectEqual(@as(usize, 2), imported.data().length);
+    try std.testing.expectEqual(@as(usize, 1), imported.data().children.len);
+    try std.testing.expect(c_array.release == null);
+}
+
+test "c data map import validates offsets and entries values explicitly" {
+    const allocator = std.testing.allocator;
+
+    const key_ty = DataType{ .int32 = {} };
+    const item_ty = DataType{ .int32 = {} };
+    const key_field = Field{ .name = "key", .data_type = &key_ty, .nullable = false };
+    const item_field = Field{ .name = "item", .data_type = &item_ty, .nullable = true };
+
+    // entries: (1,10), (2,null), (3,30)
+    var keys_builder = try @import("../array/primitive_array.zig").PrimitiveBuilder(i32, DataType{ .int32 = {} }).init(allocator, 3);
+    defer keys_builder.deinit();
+    try keys_builder.append(1);
+    try keys_builder.append(2);
+    try keys_builder.append(3);
+    var keys_ref = try keys_builder.finish();
+    defer keys_ref.release();
+
+    var items_builder = try @import("../array/primitive_array.zig").PrimitiveBuilder(i32, DataType{ .int32 = {} }).init(allocator, 3);
+    defer items_builder.deinit();
+    try items_builder.append(10);
+    try items_builder.appendNull();
+    try items_builder.append(30);
+    var items_ref = try items_builder.finish();
+    defer items_ref.release();
+
+    var entries_builder = @import("../array/struct_array.zig").StructBuilder.init(allocator, &[_]Field{ key_field, item_field });
+    defer entries_builder.deinit();
+    try entries_builder.appendValid();
+    try entries_builder.appendValid();
+    try entries_builder.appendValid();
+    var entries_ref = try entries_builder.finish(&[_]ArrayRef{ keys_ref, items_ref });
+    defer entries_ref.release();
+
+    // map rows:
+    // row0 => 2 entries (0..2)
+    // row1 => null, 0 entries (2..2)
+    // row2 => 1 entry  (2..3)
+    var map_builder = try @import("../array/advanced_array.zig").MapBuilder.init(allocator, 3, key_field, item_field, false);
+    defer map_builder.deinit();
+    try map_builder.appendLen(2);
+    try map_builder.appendNull();
+    try map_builder.appendLen(1);
+    var map_ref = try map_builder.finish(entries_ref);
+    defer map_ref.release();
+
+    var c_array = try exportArray(allocator, map_ref);
+    const entries_ty_ptr: *const DataType = &entries_ref.data().data_type;
+    const map_ty = DataType{
+        .map = .{
+            .key_field = key_field,
+            .item_field = item_field,
+            .keys_sorted = false,
+            .entries_type = entries_ty_ptr,
+        },
+    };
+
+    var imported = try importArray(allocator, &map_ty, &c_array);
+    defer imported.release();
+
+    const map_view = @import("../array/advanced_array.zig").MapArray{ .data = imported.data() };
+    try std.testing.expectEqual(@as(usize, 3), map_view.len());
+    try std.testing.expect(!map_view.isNull(0));
+    try std.testing.expect(map_view.isNull(1));
+    try std.testing.expect(!map_view.isNull(2));
+
+    const offsets = imported.data().buffers[1].typedSlice(i32);
+    try std.testing.expectEqual(@as(i32, 0), offsets[0]);
+    try std.testing.expectEqual(@as(i32, 2), offsets[1]);
+    try std.testing.expectEqual(@as(i32, 2), offsets[2]);
+    try std.testing.expectEqual(@as(i32, 3), offsets[3]);
+
+    var row0 = try map_view.value(0);
+    defer row0.release();
+    var row2 = try map_view.value(2);
+    defer row2.release();
+    try std.testing.expectEqual(@as(usize, 2), row0.data().length);
+    try std.testing.expectEqual(@as(usize, 1), row2.data().length);
+
+    const entries_struct = @import("../array/struct_array.zig").StructArray{ .data = imported.data().children[0].data() };
+    var keys_all = try entries_struct.field(0);
+    defer keys_all.release();
+    var items_all = try entries_struct.field(1);
+    defer items_all.release();
+    const keys_arr = @import("../array/primitive_array.zig").PrimitiveArray(i32){ .data = keys_all.data() };
+    const items_arr = @import("../array/primitive_array.zig").PrimitiveArray(i32){ .data = items_all.data() };
+
+    try std.testing.expectEqual(@as(i32, 1), keys_arr.value(0));
+    try std.testing.expectEqual(@as(i32, 2), keys_arr.value(1));
+    try std.testing.expectEqual(@as(i32, 3), keys_arr.value(2));
+    try std.testing.expectEqual(@as(i32, 10), items_arr.value(0));
+    try std.testing.expect(items_arr.isNull(1));
+    try std.testing.expectEqual(@as(i32, 30), items_arr.value(2));
+
+    try std.testing.expect(c_array.release == null);
 }
