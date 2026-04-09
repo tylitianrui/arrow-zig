@@ -1,89 +1,111 @@
 # zarrow
 
-[English](../README.md) | [中文](README-ZH.md)  
-
+[English](../README.md) | [中文](README-ZH.md)
 
 Apache Arrow 的 Zig 实现。
 
-## 目标
+## 状态
 
-zarrow 致力于提供 Apache Arrow 内存模型的 Zig 实现，重点关注：
+- 开发状态：Active development（持续迭代中）
+- 稳定性：核心功能可用，但 API 与覆盖范围仍在完善
+- 测试基线：提交前应保证 `zig build test` 通过
 
-- 清晰的所有权与生命周期语义
-- 正确表达 Arrow 物理布局
-- 显式校验数组结构与缓冲区布局
-- 零拷贝切片与共享只读缓冲区
-- 在 Zig 中构建 Arrow 数组的易用 Builder
+## 元数据
 
-## 项目状态
+| 项目 | 值 |
+|---|---|
+| 名称 | `zarrow` |
+| 当前版本 | `0.0.1` |
+| 最低 Zig 版本 | `0.15.2` |
+| 依赖是否清晰 | 是（`build.zig.zon` 中声明） |
+| 当前直接依赖 | `flatbufferz` |
 
-zarrow 目前处于积极开发阶段。
+说明：版本、最低 Zig 版本与依赖来源于 [build.zig.zon](../build.zig.zon)。
 
-所有权模型和 API 仍在演进，但 IPC 路径现在对非法输入的处理已更严格、更明确。
+## 已支持
 
-当前状态（2026 年 4 月）：
+- Arrow 核心内存模型与数组构建（Builders）
+- 布局校验（ArrayData validate）
+- 零拷贝切片与共享只读 buffer
+- IPC Stream Reader：Schema / RecordBatch / DictionaryBatch
+- IPC Stream Writer：Schema / RecordBatch / DictionaryBatch（含 REE、dictionary delta 场景）
+- 互操作矩阵：PyArrow、arrow-rs、Arrow C++（双向读写验证）
 
-- 已实现 Arrow 核心内存模型、数组 Builder、布局校验与零拷贝切片。
-- IPC 流读取器支持解析 schema + record batch + dictionary batch，支持 V4/V5 元数据版本（仅支持小端 schema）。
-- IPC 读取器对 body 长度、buffer 偏移/长度、node 长度执行显式范围/转换/溢出检查；损坏输入会映射为 `StreamError`/校验错误，而不是触发 trap。
-- RecordBatch 元数据现在要求“完全消费”（`nodes`、`buffers`、`variadicBufferCounts` 都必须耗尽），避免接受尾部垃圾元数据。
-- Dictionary schema 元数据已严格校验索引位宽（仅允许 `8/16/32/64`）。
+## 使用方法
 
-已知限制：
+### 1. 添加依赖
 
-- IPC writer 仍不支持输出 view 类型（`string_view`、`binary_view`、`list_view`、`large_list_view`）及 `extension` 类型。
-- Dictionary delta 更新尚未完整实现；当 dictionary id 已存在时，delta 会被拒绝。
-- Arrow IPC 的完整特性覆盖仍在推进中（当前尚未覆盖所有可选 IPC 特性）。
+```sh
+zig fetch --save "git+https://github.com/tylitianrui/zarrow#5ede2689d054cbcf0d29c45c196d1aae344a50ae"
+```
 
-验证基线：
+### 2. 配置 `build.zig`
 
-- 合并前应确保仓库内 `zig build test` 通过。
+两种方式任选其一。
 
-## 生成 IPC Fixtures（PyArrow）
+**方式一（推荐）** — 添加预生成 `FlatBuffers` 代码的步骤，首次构建自动触发，后续无额外开销：
 
-IPC 兼容性测试可使用由 PyArrow 生成的 fixture。可在本地按以下步骤生成：
+```zig
+const zarrow_dep = b.dependency("zarrow", .{
+    .target = target,
+    .optimize = optimize,
+});
+const zarrow_path = zarrow_dep.builder.build_root.path.?;
+const lib_zig_path = std.fs.path.join(b.allocator, &.{
+    zarrow_path, ".zig-cache", "flatc-zig", "lib.zig",
+}) catch @panic("OOM");
+std.fs.accessAbsolute(lib_zig_path, .{}) catch {
+    var child = std.process.Child.init(
+        &.{ b.graph.zig_exe, "build", "test" },
+        b.allocator,
+    );
+    child.cwd = zarrow_path;
+    _ = child.spawnAndWait() catch @panic("zarrow: failed to pre-generate FlatBuffers code");
+};
+exe.root_module.addImport("zarrow", zarrow_dep.module("zarrow"));
+```
 
-1. 创建独立虚拟环境（要求 Python 3.11）：  
-   `python3.11 -m venv .venv-pyarrow`
-2. 安装 PyArrow：  
-   `./.venv-pyarrow/bin/python -m pip install pyarrow==23.0.1`
-3. 生成 fixture：  
-   `./.venv-pyarrow/bin/python tools/generate_ipc_fixtures.py`
+**方式二（简易）** — 跳过预生成步骤，首次编译报错时手动触发一次：
 
-该脚本会把 `.arrow` fixture 写入 `src/ipc/testdata/`，并把 PyArrow 版本写入 `src/ipc/testdata/pyarrow_version.txt`。  
-当 fixture 变更时，嵌入这些 fixture 的 IPC reader 测试也会变化。若脚本或 PyArrow 输出变化，请重新生成并提交更新后的 `.arrow` 文件，以保持测试同步。
+```zig
+const zarrow_dep = b.dependency("zarrow", .{
+    .target = target,
+    .optimize = optimize,
+});
+exe.root_module.addImport("zarrow", zarrow_dep.module("zarrow"));
+```
 
-## 跨实现 IPC 兼容矩阵
+```sh
+# 首次编译报错时，在依赖目录下执行一次即可
+cd ~/.cache/zig/p/zarrow-<version>-<hash>/
+zig build test
+```
 
-仓库已提供跨实现互操作矩阵，用于验证 zarrow 与以下实现的 roundtrip 兼容性：
+### 3. 示例
 
-- PyArrow
-- arrow-rs
-- Arrow C++
+```zig
+const std = @import("std");
+const zarrow = @import("zarrow");
 
-矩阵同时覆盖两个方向：
+pub fn main() !void {
+    var builder = try zarrow.Int32Builder.init(std.heap.page_allocator, 3);
+    defer builder.deinit();
 
-- 读别人：由外部实现生成 fixture，再由 zarrow 校验读取。
-- 写给别人：由 zarrow 生成 fixture，再由外部实现校验读取。
+    try builder.append(10);
+    try builder.appendNull();
+    try builder.append(30);
 
-辅助命令：
+    var arr_ref = try builder.finish();
+    defer arr_ref.release();
 
-- 用 zarrow 生成标准 fixture：`zig build interop-fixture-writer -- .interop-fixtures/zarrow.arrow`
-- 用 zarrow 校验 fixture：`zig build interop-fixture-check -- .interop-fixtures/pyarrow.arrow`
-- 用 zarrow 生成 REE fixture：`zig build interop-fixture-writer -- .interop-fixtures/zarrow_ree.arrow ree`
-- 用 zarrow 校验 REE fixture：`zig build interop-fixture-check -- .interop-fixtures/pyarrow_ree.arrow ree`
+    const arr = zarrow.Int32Array{ .data = arr_ref.data() };
 
-CI 已在 `.github/workflows/ci.yml` 中接入完整矩阵任务：
-`IPC Interop Matrix (zarrow <-> pyarrow/arrow-rs/arrow-cpp)`。
+    std.debug.print("len={d}, v0={d}, isNull1={any}, v2={d}\n", .{
+        arr.len(),
+        arr.value(0),
+        arr.isNull(1),
+        arr.value(2),
+    });
+}
+```
 
-## 基准测试
-
-- 运行全部基准（默认）：`zig build benchmark -Doptimize=ReleaseFast`
-- 运行全部基准（smoke）：`zig build benchmark-smoke -Doptimize=ReleaseFast`
-- 运行全部基准（full）：`zig build benchmark-full -Doptimize=ReleaseFast`
-- 运行全部基准（matrix CSV）：`zig build benchmark-matrix -Doptimize=ReleaseFast`
-- 运行全部基准（CI CSV）：`zig build benchmark-ci -Doptimize=ReleaseFast`
-- 运行单个基准：`zig build benchmark-primitive_builder_benchmark -Doptimize=ReleaseFast`
-- 以指定模式运行单个基准：`zig build benchmark-primitive_builder_benchmark -Doptimize=ReleaseFast -- matrix`
-
-基准测试位于 `benchmarks/`，与示例代码分离维护。
