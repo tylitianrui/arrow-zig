@@ -511,6 +511,16 @@ fn importDataType(allocator: std.mem.Allocator, c_schema: *ArrowSchema) Error!Da
         const child_field = try importField(allocator, child);
         return DataType{ .large_list = .{ .value_field = child_field } };
     }
+    if (std.mem.eql(u8, fmt, "+vl")) {
+        const child = singleChildSchema(c_schema) orelse return error.InvalidChildren;
+        const child_field = try importField(allocator, child);
+        return DataType{ .list_view = .{ .value_field = child_field } };
+    }
+    if (std.mem.eql(u8, fmt, "+vL")) {
+        const child = singleChildSchema(c_schema) orelse return error.InvalidChildren;
+        const child_field = try importField(allocator, child);
+        return DataType{ .large_list_view = .{ .value_field = child_field } };
+    }
     if (std.mem.eql(u8, fmt, "+r")) {
         const children = childPtrsSchema(c_schema) orelse return error.InvalidChildren;
         if (children.len != 2) return error.InvalidChildren;
@@ -755,6 +765,16 @@ fn neededBufferLen(
             if (idx == 1) return (total_len + 1) * @sizeOf(i32);
             return null;
         },
+        .list_view => {
+            if (idx == 1) return total_len * @sizeOf(i32);
+            if (idx == 2) return total_len * @sizeOf(i32);
+            return null;
+        },
+        .large_list_view => {
+            if (idx == 1) return total_len * @sizeOf(i64);
+            if (idx == 2) return total_len * @sizeOf(i64);
+            return null;
+        },
         .sparse_union => {
             if (idx == 0) return total_len;
             return null;
@@ -821,14 +841,14 @@ fn expectedBufferCount(dt: DataType) ?i64 {
         .dictionary,
         .map,
         => 2,
-        .string, .binary, .large_string, .large_binary, .list, .large_list => 3,
+        .string, .binary, .large_string, .large_binary, .list, .large_list, .list_view, .large_list_view => 3,
         else => null,
     };
 }
 
 fn expectedChildrenCount(dt: DataType) i64 {
     return switch (dt) {
-        .list, .large_list, .fixed_size_list, .map => 1,
+        .list, .large_list, .fixed_size_list, .map, .list_view, .large_list_view => 1,
         .run_end_encoded => 2,
         .struct_ => |s| @intCast(s.fields.len),
         .sparse_union => |u| @intCast(u.fields.len),
@@ -845,6 +865,16 @@ fn childTypesForDataType(allocator: std.mem.Allocator, dt: DataType) Error![]con
             break :blk out;
         },
         .large_list => |l| blk: {
+            const out = try allocator.alloc(*const DataType, 1);
+            out[0] = l.value_field.data_type;
+            break :blk out;
+        },
+        .list_view => |l| blk: {
+            const out = try allocator.alloc(*const DataType, 1);
+            out[0] = l.value_field.data_type;
+            break :blk out;
+        },
+        .large_list_view => |l| blk: {
             const out = try allocator.alloc(*const DataType, 1);
             out[0] = l.value_field.data_type;
             break :blk out;
@@ -887,6 +917,16 @@ fn childFieldsForDataType(allocator: std.mem.Allocator, dt: DataType) Error![]co
             break :blk out;
         },
         .large_list => |l| blk: {
+            const out = try allocator.alloc(Field, 1);
+            out[0] = l.value_field;
+            break :blk out;
+        },
+        .list_view => |l| blk: {
+            const out = try allocator.alloc(Field, 1);
+            out[0] = l.value_field;
+            break :blk out;
+        },
+        .large_list_view => |l| blk: {
             const out = try allocator.alloc(Field, 1);
             out[0] = l.value_field;
             break :blk out;
@@ -968,6 +1008,8 @@ fn formatFromDataType(allocator: std.mem.Allocator, dt: DataType) Error![:0]u8 {
         .fixed_size_binary => |fsb| allocPrintZ(allocator, "w:{d}", .{fsb.byte_width}),
         .list => try allocator.dupeZ(u8, "+l"),
         .large_list => try allocator.dupeZ(u8, "+L"),
+        .list_view => try allocator.dupeZ(u8, "+vl"),
+        .large_list_view => try allocator.dupeZ(u8, "+vL"),
         .map => try allocator.dupeZ(u8, "+m"),
         .run_end_encoded => try allocator.dupeZ(u8, "+r"),
         .sparse_union => |u| formatUnion(allocator, true, u.type_ids),
@@ -1841,4 +1883,107 @@ test "c data array import supports run-end-encoded" {
     try std.testing.expectEqual(@as(i32, 7), values.value(0));
     try std.testing.expectEqual(@as(i32, 9), values.value(1));
     try std.testing.expect(c_array.release == null);
+}
+
+test "c data schema supports list_view and large_list_view formats" {
+    const allocator = std.testing.allocator;
+
+    const item_ty = DataType{ .int32 = {} };
+    const item_field = Field{ .name = "item", .data_type = &item_ty, .nullable = true };
+    const lv_ty = DataType{ .list_view = .{ .value_field = item_field } };
+    const llv_ty = DataType{ .large_list_view = .{ .value_field = item_field } };
+    const fields = [_]Field{
+        .{ .name = "lv", .data_type = &lv_ty, .nullable = true },
+        .{ .name = "llv", .data_type = &llv_ty, .nullable = true },
+    };
+    const schema = Schema{ .fields = fields[0..] };
+
+    var c_schema = try exportSchema(allocator, schema);
+    defer if (c_schema.release) |release_fn| release_fn(&c_schema);
+
+    const root_children = childPtrsSchema(&c_schema).?;
+    try std.testing.expectEqual(@as(usize, 2), root_children.len);
+    try std.testing.expectEqualStrings("+vl", cString(root_children[0].?.format).?);
+    try std.testing.expectEqualStrings("+vL", cString(root_children[1].?.format).?);
+
+    var imported = try importSchemaOwned(allocator, &c_schema);
+    defer imported.deinit();
+    try std.testing.expect(imported.schema.fields[0].data_type.* == .list_view);
+    try std.testing.expect(imported.schema.fields[1].data_type.* == .large_list_view);
+}
+
+test "c data array import supports list_view and large_list_view" {
+    const allocator = std.testing.allocator;
+
+    var child_values = [_]i32{ 11, 22, 33, 44, 55 };
+    const child_bytes = std.mem.sliceAsBytes(child_values[0..]);
+    const child_layout = ArrayData{
+        .data_type = DataType{ .int32 = {} },
+        .length = child_values.len,
+        .null_count = 0,
+        .buffers = &[_]SharedBuffer{ SharedBuffer.empty, SharedBuffer.fromSlice(child_bytes) },
+    };
+    var child_ref = try ArrayRef.fromBorrowed(allocator, child_layout);
+    defer child_ref.release();
+
+    const item_ty = DataType{ .int32 = {} };
+    const item_field = Field{ .name = "item", .data_type = &item_ty, .nullable = true };
+
+    var lv_offsets = [_]i32{ 0, 2 };
+    var lv_sizes = [_]i32{ 2, 3 };
+    const lv_layout = ArrayData{
+        .data_type = DataType{ .list_view = .{ .value_field = item_field } },
+        .length = 2,
+        .buffers = &[_]SharedBuffer{
+            SharedBuffer.empty,
+            SharedBuffer.fromSlice(std.mem.sliceAsBytes(lv_offsets[0..])),
+            SharedBuffer.fromSlice(std.mem.sliceAsBytes(lv_sizes[0..])),
+        },
+        .children = &[_]ArrayRef{child_ref},
+    };
+    var lv_ref = try ArrayRef.fromBorrowed(allocator, lv_layout);
+    defer lv_ref.release();
+
+    var lv_c_array = try exportArray(allocator, lv_ref);
+    var lv_imported = try importArray(allocator, &lv_ref.data().data_type, &lv_c_array);
+    defer lv_imported.release();
+    try std.testing.expect(lv_imported.data().data_type == .list_view);
+    try std.testing.expectEqual(@as(usize, 2), lv_imported.data().length);
+    try std.testing.expectEqual(@as(usize, 3), lv_imported.data().buffers.len);
+    const lv_offs = lv_imported.data().buffers[1].typedSlice(i32);
+    const lv_szs = lv_imported.data().buffers[2].typedSlice(i32);
+    try std.testing.expectEqual(@as(i32, 0), lv_offs[0]);
+    try std.testing.expectEqual(@as(i32, 2), lv_offs[1]);
+    try std.testing.expectEqual(@as(i32, 2), lv_szs[0]);
+    try std.testing.expectEqual(@as(i32, 3), lv_szs[1]);
+    try std.testing.expect(lv_c_array.release == null);
+
+    var llv_offsets = [_]i64{ 1, 3 };
+    var llv_sizes = [_]i64{ 2, 2 };
+    const llv_layout = ArrayData{
+        .data_type = DataType{ .large_list_view = .{ .value_field = item_field } },
+        .length = 2,
+        .buffers = &[_]SharedBuffer{
+            SharedBuffer.empty,
+            SharedBuffer.fromSlice(std.mem.sliceAsBytes(llv_offsets[0..])),
+            SharedBuffer.fromSlice(std.mem.sliceAsBytes(llv_sizes[0..])),
+        },
+        .children = &[_]ArrayRef{child_ref},
+    };
+    var llv_ref = try ArrayRef.fromBorrowed(allocator, llv_layout);
+    defer llv_ref.release();
+
+    var llv_c_array = try exportArray(allocator, llv_ref);
+    var llv_imported = try importArray(allocator, &llv_ref.data().data_type, &llv_c_array);
+    defer llv_imported.release();
+    try std.testing.expect(llv_imported.data().data_type == .large_list_view);
+    try std.testing.expectEqual(@as(usize, 2), llv_imported.data().length);
+    try std.testing.expectEqual(@as(usize, 3), llv_imported.data().buffers.len);
+    const llv_offs = llv_imported.data().buffers[1].typedSlice(i64);
+    const llv_szs = llv_imported.data().buffers[2].typedSlice(i64);
+    try std.testing.expectEqual(@as(i64, 1), llv_offs[0]);
+    try std.testing.expectEqual(@as(i64, 3), llv_offs[1]);
+    try std.testing.expectEqual(@as(i64, 2), llv_szs[0]);
+    try std.testing.expectEqual(@as(i64, 2), llv_szs[1]);
+    try std.testing.expect(llv_c_array.release == null);
 }
