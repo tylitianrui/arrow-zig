@@ -112,9 +112,9 @@ Goal: Build a production-usable Zig implementation of Apache Arrow core memory m
 
 ### C2. Fuzzing
 
-- [ ] C2.1 Add fuzz target for ArrayData.validateLayout.
-- [ ] C2.2 Add fuzz target for IPC reader message parsing.
-- [ ] C2.3 Seed corpus with malformed and edge payloads.
+- [x] C2.1 Add fuzz target for ArrayData.validateLayout.
+- [x] C2.2 Add fuzz target for IPC reader message parsing.
+- [x] C2.3 Seed corpus with malformed and edge payloads.
 
 ### C3. Benchmark Reliability
 

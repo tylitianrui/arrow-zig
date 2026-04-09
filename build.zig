@@ -85,6 +85,76 @@ pub fn build(b: *std.Build) !void {
     const test_step = b.step("test", "Run zarrow unit tests");
     test_step.dependOn(&run_tests.step);
 
+    // Fuzz harnesses for parser/layout robustness.
+    const fuzz_layout_exe = b.addExecutable(.{
+        .name = "fuzz-array-validate-layout",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/fuzz_array_validate_layout.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    fuzz_layout_exe.step.dependOn(&run_fix_flatc_lib.step);
+    fuzz_layout_exe.root_module.addImport("zarrow", b.modules.get("zarrow").?);
+
+    const run_fuzz_layout = b.addRunArtifact(fuzz_layout_exe);
+    if (b.args) |args| run_fuzz_layout.addArgs(args);
+    const fuzz_layout_step = b.step("fuzz-array-layout", "Run ArrayData.validateLayout fuzz harness");
+    fuzz_layout_step.dependOn(&run_fuzz_layout.step);
+
+    const fuzz_ipc_exe = b.addExecutable(.{
+        .name = "fuzz-ipc-reader",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/fuzz_ipc_reader.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    fuzz_ipc_exe.step.dependOn(&run_fix_flatc_lib.step);
+    fuzz_ipc_exe.root_module.addImport("zarrow", b.modules.get("zarrow").?);
+
+    const run_fuzz_ipc = b.addRunArtifact(fuzz_ipc_exe);
+    if (b.args) |args| run_fuzz_ipc.addArgs(args);
+    const fuzz_ipc_step = b.step("fuzz-ipc-reader", "Run IPC reader fuzz harness");
+    fuzz_ipc_step.dependOn(&run_fuzz_ipc.step);
+
+    const fuzz_corpus_step = b.step("fuzz-corpus", "Replay built-in fuzz seed corpus");
+    const fuzz_corpus_root = b.path("fuzz/corpus").getPath(b);
+
+    var corpus_layout_dir = std.fs.openDirAbsolute(
+        b.pathJoin(&.{ fuzz_corpus_root, "array-validate-layout" }),
+        .{ .iterate = true },
+    ) catch null;
+    if (corpus_layout_dir) |*dir_handle| {
+        defer dir_handle.close();
+        var it_corpus_layout = dir_handle.iterate();
+        while (it_corpus_layout.next() catch null) |entry| {
+            if (entry.kind != .file) continue;
+            const run_one = b.addRunArtifact(fuzz_layout_exe);
+            run_one.addFileArg(b.path(b.fmt("fuzz/corpus/array-validate-layout/{s}", .{entry.name})));
+            fuzz_corpus_step.dependOn(&run_one.step);
+        }
+    } else {
+        std.debug.print("warning: fuzz corpus missing: fuzz/corpus/array-validate-layout\n", .{});
+    }
+
+    var corpus_ipc_dir = std.fs.openDirAbsolute(
+        b.pathJoin(&.{ fuzz_corpus_root, "ipc-reader" }),
+        .{ .iterate = true },
+    ) catch null;
+    if (corpus_ipc_dir) |*dir_handle| {
+        defer dir_handle.close();
+        var it_corpus_ipc = dir_handle.iterate();
+        while (it_corpus_ipc.next() catch null) |entry| {
+            if (entry.kind != .file) continue;
+            const run_one = b.addRunArtifact(fuzz_ipc_exe);
+            run_one.addFileArg(b.path(b.fmt("fuzz/corpus/ipc-reader/{s}", .{entry.name})));
+            fuzz_corpus_step.dependOn(&run_one.step);
+        }
+    } else {
+        std.debug.print("warning: fuzz corpus missing: fuzz/corpus/ipc-reader\n", .{});
+    }
+
     var run_default: ?*std.Build.Step = null;
     var run_all_step = b.step("examples", "Run all examples");
     var it = dir.iterate();

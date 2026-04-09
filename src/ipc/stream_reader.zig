@@ -182,6 +182,8 @@ fn readMessageOptional(self: anytype) (StreamError || fb.common.PackError || @Ty
     errdefer metadata.release();
     try format.skipPadding(self.reader, format.padLen(meta_len));
 
+    if (!isSaneFlatbufferTable(metadata.data)) return StreamError.InvalidMetadata;
+
     const msg = fbs.Message.GetRootAs(@constCast(metadata.data), 0);
     const opts: fb.common.PackOptions = .{ .allocator = self.allocator };
     const msg_t = try fbs.MessageT.Unpack(msg, opts);
@@ -202,6 +204,41 @@ fn readMessageOptional(self: anytype) (StreamError || fb.common.PackError || @Ty
     try format.skipPadding(self.reader, format.padLen(body_len));
 
     return .{ .metadata = metadata, .msg = msg_t, .body_len = body_len, .body = body_shared };
+}
+
+fn isSaneFlatbufferTable(buf: []const u8) bool {
+    if (buf.len < 8) return false;
+
+    const root_u32 = std.mem.readInt(u32, buf[0..4], .little);
+    const root = std.math.cast(usize, root_u32) orelse return false;
+    if (root > buf.len - 4) return false;
+
+    const rel = std.mem.readInt(i32, @ptrCast(buf[root .. root + 4]), .little);
+    if (rel <= 0) return false;
+    const rel_usize = std.math.cast(usize, rel) orelse return false;
+    if (rel_usize > root) return false;
+
+    const vtable = root - rel_usize;
+    if (vtable > buf.len - 4) return false;
+
+    const vtable_len = std.mem.readInt(u16, @ptrCast(buf[vtable .. vtable + 2]), .little);
+    const object_len = std.mem.readInt(u16, @ptrCast(buf[vtable + 2 .. vtable + 4]), .little);
+    if (vtable_len < 4) return false;
+
+    const vtable_len_usize = @as(usize, vtable_len);
+    const object_len_usize = @as(usize, object_len);
+    if (vtable + vtable_len_usize > buf.len) return false;
+    if (root + object_len_usize > buf.len) return false;
+
+    return true;
+}
+
+test "ipc reader flatbuffer sanity guard rejects out-of-bounds root offset" {
+    const malformed = [_]u8{
+        0x10, 0x00, 0x00, 0x00, // root offset (16) is out of range for this buffer
+        0xff, 0xff, 0xff, 0xff,
+    };
+    try std.testing.expect(!isSaneFlatbufferTable(malformed[0..]));
 }
 
 fn readMessage(self: anytype) (StreamError || fb.common.PackError || @TypeOf(self.reader).Error || error{ EndOfStream, OutOfMemory })!MessageWithBody {

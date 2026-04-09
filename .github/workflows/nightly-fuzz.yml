@@ -1,0 +1,48 @@
+name: Nightly Fuzz
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  random-fuzz:
+    name: Random Fuzz (nightly)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: "0.15.2"
+
+      - name: Replay known seed corpus first
+        run: zig build fuzz-corpus
+
+      - name: Random fuzz for ArrayData.validateLayout
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .fuzz-random
+          for i in $(seq 1 200); do
+            size=$(( (RANDOM % 512) + 1 ))
+            head -c "$size" /dev/urandom > .fuzz-random/layout.bin
+            zig build fuzz-array-layout -- .fuzz-random/layout.bin
+          done
+
+      - name: Random fuzz for IPC reader
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .fuzz-random
+          for i in $(seq 1 200); do
+            size=$(( (RANDOM % 4096) + 1 ))
+            head -c "$size" /dev/urandom > .fuzz-random/ipc.bin
+            zig build fuzz-ipc-reader -- .fuzz-random/ipc.bin
+          done
