@@ -433,6 +433,21 @@ fn importDataType(allocator: std.mem.Allocator, c_schema: *ArrowSchema) Error!Da
     if (std.mem.eql(u8, fmt, "ttm")) return DataType{ .time32 = .{ .unit = .millisecond } };
     if (std.mem.eql(u8, fmt, "ttu")) return DataType{ .time64 = .{ .unit = .microsecond } };
     if (std.mem.eql(u8, fmt, "ttn")) return DataType{ .time64 = .{ .unit = .nanosecond } };
+    if (std.mem.startsWith(u8, fmt, "ts")) {
+        const parsed = parseTimestampFormat(fmt) orelse return error.InvalidFormat;
+        const tz = if (parsed.timezone.len == 0) null else try allocator.dupe(u8, parsed.timezone);
+        return DataType{ .timestamp = .{ .unit = parsed.unit, .timezone = tz } };
+    }
+    if (std.mem.startsWith(u8, fmt, "d:")) {
+        const parsed = parseDecimalFormat(fmt) orelse return error.InvalidFormat;
+        return switch (parsed.bit_width) {
+            32 => DataType{ .decimal32 = .{ .precision = parsed.precision, .scale = parsed.scale } },
+            64 => DataType{ .decimal64 = .{ .precision = parsed.precision, .scale = parsed.scale } },
+            128 => DataType{ .decimal128 = .{ .precision = parsed.precision, .scale = parsed.scale } },
+            256 => DataType{ .decimal256 = .{ .precision = parsed.precision, .scale = parsed.scale } },
+            else => error.InvalidFormat,
+        };
+    }
 
     if (std.mem.startsWith(u8, fmt, "w:")) {
         const bw = std.fmt.parseInt(i32, fmt[2..], 10) catch return error.InvalidFormat;
@@ -765,6 +780,7 @@ fn formatFromDataType(allocator: std.mem.Allocator, dt: DataType) Error![:0]u8 {
         .large_binary => try allocator.dupeZ(u8, "Z"),
         .date32 => try allocator.dupeZ(u8, "tdD"),
         .date64 => try allocator.dupeZ(u8, "tdm"),
+        .timestamp => |ts| formatTimestamp(allocator, ts.unit, ts.timezone),
         .time32 => |t| switch (t.unit) {
             .second => try allocator.dupeZ(u8, "tts"),
             .millisecond => try allocator.dupeZ(u8, "ttm"),
@@ -781,6 +797,10 @@ fn formatFromDataType(allocator: std.mem.Allocator, dt: DataType) Error![:0]u8 {
         .struct_ => try allocator.dupeZ(u8, "+s"),
         .fixed_size_list => |fsl| allocPrintZ(allocator, "+w:{d}", .{fsl.list_size}),
         .dictionary => |d| formatFromIntType(allocator, d.index_type),
+        .decimal32 => |d| allocPrintZ(allocator, "d:{d},{d},32", .{ d.precision, d.scale }),
+        .decimal64 => |d| allocPrintZ(allocator, "d:{d},{d},64", .{ d.precision, d.scale }),
+        .decimal128 => |d| allocPrintZ(allocator, "d:{d},{d}", .{ d.precision, d.scale }),
+        .decimal256 => |d| allocPrintZ(allocator, "d:{d},{d},256", .{ d.precision, d.scale }),
         else => error.UnsupportedType,
     };
 }
@@ -836,6 +856,69 @@ fn cString(ptr: [*c]const u8) ?[]const u8 {
 fn toUsize(v: i64) ?usize {
     if (v < 0) return null;
     return std.math.cast(usize, v);
+}
+
+fn formatTimestamp(allocator: std.mem.Allocator, unit: TimeUnit, timezone: ?[]const u8) Error![:0]u8 {
+    const unit_c: u8 = switch (unit) {
+        .second => 's',
+        .millisecond => 'm',
+        .microsecond => 'u',
+        .nanosecond => 'n',
+    };
+    const tz = timezone orelse "";
+    return allocPrintZ(allocator, "ts{c}:{s}", .{ unit_c, tz });
+}
+
+const ParsedTimestamp = struct {
+    unit: TimeUnit,
+    timezone: []const u8,
+};
+
+fn parseTimestampFormat(fmt: []const u8) ?ParsedTimestamp {
+    // C Data Interface timestamp: ts{unit}:{timezone}
+    if (fmt.len < 4) return null;
+    if (!std.mem.startsWith(u8, fmt, "ts")) return null;
+    const unit = switch (fmt[2]) {
+        's' => TimeUnit.second,
+        'm' => TimeUnit.millisecond,
+        'u' => TimeUnit.microsecond,
+        'n' => TimeUnit.nanosecond,
+        else => return null,
+    };
+    if (fmt[3] != ':') return null;
+    return .{ .unit = unit, .timezone = fmt[4..] };
+}
+
+const ParsedDecimal = struct {
+    precision: u8,
+    scale: i32,
+    bit_width: u16,
+};
+
+fn parseDecimalFormat(fmt: []const u8) ?ParsedDecimal {
+    // C Data Interface decimal:
+    // - decimal128: d:precision,scale
+    // - explicit widths: d:precision,scale,32|64|128|256
+    if (!std.mem.startsWith(u8, fmt, "d:")) return null;
+    const payload = fmt[2..];
+    var it = std.mem.splitScalar(u8, payload, ',');
+    const precision_s = it.next() orelse return null;
+    const scale_s = it.next() orelse return null;
+    const width_s = it.next();
+    if (it.next() != null) return null;
+
+    const precision = std.fmt.parseInt(u8, precision_s, 10) catch return null;
+    const scale = std.fmt.parseInt(i32, scale_s, 10) catch return null;
+    const bit_width: u16 = if (width_s) |w|
+        std.fmt.parseInt(u16, w, 10) catch return null
+    else
+        128;
+
+    return .{
+        .precision = precision,
+        .scale = scale,
+        .bit_width = bit_width,
+    };
 }
 
 fn allocPrintZ(allocator: std.mem.Allocator, comptime fmt: []const u8, args: anytype) Error![:0]u8 {
@@ -903,4 +986,30 @@ test "c data array export/import zero-copy smoke" {
 
     // importArray should transfer ownership and clear producer release hook.
     try std.testing.expect(c_array.release == null);
+}
+
+test "c data schema supports timestamp and decimal128 formats" {
+    const allocator = std.testing.allocator;
+
+    const ts_ty = DataType{ .timestamp = .{ .unit = .microsecond, .timezone = "UTC" } };
+    const dec_ty = DataType{ .decimal128 = .{ .precision = 38, .scale = 10 } };
+    const fields = [_]Field{
+        .{ .name = "event_time", .data_type = &ts_ty, .nullable = true },
+        .{ .name = "amount", .data_type = &dec_ty, .nullable = false },
+    };
+    const schema = Schema{ .fields = fields[0..] };
+
+    var c_schema = try exportSchema(allocator, schema);
+    defer if (c_schema.release) |release_fn| release_fn(&c_schema);
+
+    var imported = try importSchemaOwned(allocator, &c_schema);
+    defer imported.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), imported.schema.fields.len);
+    try std.testing.expect(imported.schema.fields[0].data_type.* == .timestamp);
+    try std.testing.expectEqual(TimeUnit.microsecond, imported.schema.fields[0].data_type.timestamp.unit);
+    try std.testing.expectEqualStrings("UTC", imported.schema.fields[0].data_type.timestamp.timezone.?);
+    try std.testing.expect(imported.schema.fields[1].data_type.* == .decimal128);
+    try std.testing.expectEqual(@as(u8, 38), imported.schema.fields[1].data_type.decimal128.precision);
+    try std.testing.expectEqual(@as(i32, 10), imported.schema.fields[1].data_type.decimal128.scale);
 }
