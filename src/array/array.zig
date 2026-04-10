@@ -22,6 +22,10 @@ pub const Time32Array = PrimitiveArray(i32);
 pub const Time64Array = PrimitiveArray(i64);
 pub const TimestampArray = PrimitiveArray(i64);
 pub const DurationArray = PrimitiveArray(i64);
+pub const Decimal32Array = PrimitiveArray(i32);
+pub const Decimal64Array = PrimitiveArray(i64);
+pub const Decimal128Array = PrimitiveArray(i128);
+pub const Decimal256Array = PrimitiveArray(i256);
 pub const UInt8Array = PrimitiveArray(u8);
 pub const UInt16Array = PrimitiveArray(u16);
 pub const UInt32Array = PrimitiveArray(u32);
@@ -45,6 +49,18 @@ pub fn TimestampBuilder(comptime unit: datatype.TimeUnit, comptime timezone: ?[]
 }
 pub fn DurationBuilder(comptime unit: datatype.TimeUnit) type {
     return PrimitiveBuilder(i64, DataType{ .duration = .{ .unit = unit } });
+}
+pub fn Decimal32Builder(comptime params: datatype.DecimalParams) type {
+    return PrimitiveBuilder(i32, DataType{ .decimal32 = params });
+}
+pub fn Decimal64Builder(comptime params: datatype.DecimalParams) type {
+    return PrimitiveBuilder(i64, DataType{ .decimal64 = params });
+}
+pub fn Decimal128Builder(comptime params: datatype.DecimalParams) type {
+    return PrimitiveBuilder(i128, DataType{ .decimal128 = params });
+}
+pub fn Decimal256Builder(comptime params: datatype.DecimalParams) type {
+    return PrimitiveBuilder(i256, DataType{ .decimal256 = params });
 }
 pub const UInt8Builder = PrimitiveBuilder(u8, DataType{ .uint8 = {} });
 pub const UInt16Builder = PrimitiveBuilder(u16, DataType{ .uint16 = {} });
@@ -232,4 +248,88 @@ test "duration builder alias keeps unit across finishReset reuse" {
     try std.testing.expectEqual(@as(i64, 11), built.value(0));
     try std.testing.expect(second.data().data_type == .duration);
     try std.testing.expectEqual(datatype.TimeUnit.millisecond, second.data().data_type.duration.unit);
+}
+
+test "decimal32 builder alias builds primitive i32 with decimal32 params" {
+    const params = datatype.DecimalParams{ .precision = 9, .scale = 2 };
+    var builder = try Decimal32Builder(params).init(std.testing.allocator, 2);
+    defer builder.deinit();
+
+    try builder.append(12_345);
+    try builder.appendNull();
+    try builder.append(-67_890);
+
+    var array_handle = try builder.finish();
+    defer array_handle.release();
+
+    const built = Decimal32Array{ .data = array_handle.data() };
+    try std.testing.expectEqual(@as(usize, 3), built.len());
+    try std.testing.expect(built.isNull(1));
+    try std.testing.expectEqual(@as(i32, -67_890), built.value(2));
+    try std.testing.expect(array_handle.data().data_type == .decimal32);
+    try std.testing.expectEqual(@as(u8, 9), array_handle.data().data_type.decimal32.precision);
+    try std.testing.expectEqual(@as(i32, 2), array_handle.data().data_type.decimal32.scale);
+}
+
+test "decimal64 builder alias builds primitive i64 with decimal64 params" {
+    const params = datatype.DecimalParams{ .precision = 18, .scale = 4 };
+    var builder = try Decimal64Builder(params).init(std.testing.allocator, 2);
+    defer builder.deinit();
+
+    try builder.append(1_234_567_890_123);
+    try builder.appendNull();
+    try builder.append(-9_876_543_210_987);
+
+    var array_handle = try builder.finish();
+    defer array_handle.release();
+
+    const built = Decimal64Array{ .data = array_handle.data() };
+    try std.testing.expectEqual(@as(usize, 3), built.len());
+    try std.testing.expect(built.isNull(1));
+    try std.testing.expectEqual(@as(i64, -9_876_543_210_987), built.value(2));
+    try std.testing.expect(array_handle.data().data_type == .decimal64);
+    try std.testing.expectEqual(@as(u8, 18), array_handle.data().data_type.decimal64.precision);
+    try std.testing.expectEqual(@as(i32, 4), array_handle.data().data_type.decimal64.scale);
+}
+
+test "decimal128 builder alias builds primitive i128 with decimal128 params" {
+    const params = datatype.DecimalParams{ .precision = 38, .scale = 10 };
+    var builder = try Decimal128Builder(params).init(std.testing.allocator, 2);
+    defer builder.deinit();
+
+    try builder.append(@as(i128, 123_456_789_012_345_678));
+    try builder.appendNull();
+    try builder.append(@as(i128, -987_654_321_098_765_432));
+
+    var array_handle = try builder.finish();
+    defer array_handle.release();
+
+    const built = Decimal128Array{ .data = array_handle.data() };
+    try std.testing.expectEqual(@as(usize, 3), built.len());
+    try std.testing.expect(built.isNull(1));
+    try std.testing.expectEqual(@as(i128, -987_654_321_098_765_432), built.value(2));
+    try std.testing.expect(array_handle.data().data_type == .decimal128);
+    try std.testing.expectEqual(@as(u8, 38), array_handle.data().data_type.decimal128.precision);
+    try std.testing.expectEqual(@as(i32, 10), array_handle.data().data_type.decimal128.scale);
+}
+
+test "decimal256 builder alias builds primitive i256 with decimal256 params" {
+    const params = datatype.DecimalParams{ .precision = 76, .scale = 20 };
+    var builder = try Decimal256Builder(params).init(std.testing.allocator, 2);
+    defer builder.deinit();
+
+    try builder.append(@as(i256, 123_456_789_012_345_678_901_234_567_890));
+    try builder.appendNull();
+    try builder.append(@as(i256, -987_654_321_098_765_432_109_876_543_210));
+
+    var array_handle = try builder.finish();
+    defer array_handle.release();
+
+    const built = Decimal256Array{ .data = array_handle.data() };
+    try std.testing.expectEqual(@as(usize, 3), built.len());
+    try std.testing.expect(built.isNull(1));
+    try std.testing.expectEqual(@as(i256, -987_654_321_098_765_432_109_876_543_210), built.value(2));
+    try std.testing.expect(array_handle.data().data_type == .decimal256);
+    try std.testing.expectEqual(@as(u8, 76), array_handle.data().data_type.decimal256.precision);
+    try std.testing.expectEqual(@as(i32, 20), array_handle.data().data_type.decimal256.scale);
 }
