@@ -209,19 +209,6 @@ fn parseStreamForFooter(allocator: std.mem.Allocator, stream_bytes: []const u8) 
             return error.InvalidMessage;
         }
 
-        // Arrow file header = magic (6) + padding (2) = 8 bytes before stream data.
-        // Block.metaDataLength must include continuation prefix + metadata + metadata padding.
-        const block = fbs.BlockT{
-            .offset = std.math.cast(i64, FileMagic.len + 2 + message_offset) orelse {
-                msg_t.deinit(allocator);
-                return error.InvalidMessage;
-            },
-            .metaDataLength = std.math.cast(i32, prefix_len + format.paddedLen(metadata_len)) orelse {
-                msg_t.deinit(allocator);
-                return error.InvalidMessage;
-            },
-            .bodyLength = msg_t.bodyLength,
-        };
         switch (msg_t.header) {
             .Schema => {
                 if (schema_msg != null) {
@@ -232,12 +219,28 @@ fn parseStreamForFooter(allocator: std.mem.Allocator, stream_bytes: []const u8) 
                 owned_msg.* = msg_t;
                 schema_msg = owned_msg;
             },
-            .DictionaryBatch => {
-                try dict_blocks.append(allocator, block);
-                msg_t.deinit(allocator);
-            },
-            .RecordBatch => {
-                try rb_blocks.append(allocator, block);
+            .DictionaryBatch, .RecordBatch => {
+                // Arrow file header = magic (6) + padding (2) = 8 bytes before stream data.
+                // Block.offset = absolute file offset of the message preamble.
+                // Block.metaDataLength = prefix (8) + metadata + metadata padding per spec.
+                const file_offset = std.math.cast(i64, FileMagic.len + 2 + message_offset) orelse {
+                    msg_t.deinit(allocator);
+                    return error.InvalidMessage;
+                };
+                const meta_data_length = std.math.cast(i32, prefix_len + format.paddedLen(metadata_len)) orelse {
+                    msg_t.deinit(allocator);
+                    return error.InvalidMessage;
+                };
+                const block = fbs.BlockT{
+                    .offset = file_offset,
+                    .metaDataLength = meta_data_length,
+                    .bodyLength = msg_t.bodyLength,
+                };
+                if (msg_t.header == .DictionaryBatch) {
+                    try dict_blocks.append(allocator, block);
+                } else {
+                    try rb_blocks.append(allocator, block);
+                }
                 msg_t.deinit(allocator);
             },
             else => {
