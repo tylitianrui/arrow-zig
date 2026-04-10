@@ -133,6 +133,11 @@ const IndexedBlock = struct {
     total_len: usize,
 };
 
+const FoundSchema = struct {
+    offset: usize,
+    parsed: ParsedMessage,
+};
+
 fn buildIndexedStreamFromFile(allocator: std.mem.Allocator, bytes: []const u8) FileError![]u8 {
     // Arrow IPC file header: magic (6 bytes) + 2 padding bytes = 8 bytes total.
     const header_len = FileMagic.len + 2;
@@ -158,9 +163,10 @@ fn buildIndexedStreamFromFile(allocator: std.mem.Allocator, bytes: []const u8) F
     defer footer_t.deinit(allocator);
     if (footer_t.schema == null) return error.InvalidFile;
 
-    // First encapsulated message in Arrow file must be Schema.
-    const schema_msg = try parseMessageAt(allocator, bytes, header_len, footer_start);
-    if (schema_msg.header != .schema) return error.InvalidFile;
+    const schema_search_limit = try findSchemaSearchLimit(footer_t, header_len, footer_start);
+    const found_schema = try findSchemaMessage(allocator, bytes, header_len, schema_search_limit);
+    const schema_offset = found_schema.offset;
+    const schema_msg = found_schema.parsed;
 
     // Validate every block's absolute file offsets against [header_len, footer_start).
     // block.offset           = absolute file offset of the message preamble
@@ -182,7 +188,7 @@ fn buildIndexedStreamFromFile(allocator: std.mem.Allocator, bytes: []const u8) F
     const out = try allocator.alloc(u8, total_len);
     var cursor: usize = 0;
 
-    @memcpy(out[cursor .. cursor + schema_bytes_len], bytes[header_len .. header_len + schema_bytes_len]);
+    @memcpy(out[cursor .. cursor + schema_bytes_len], bytes[schema_offset .. schema_offset + schema_bytes_len]);
     cursor += schema_bytes_len;
     for (indexed_blocks.items) |blk| {
         @memcpy(out[cursor .. cursor + blk.total_len], bytes[blk.offset .. blk.offset + blk.total_len]);
@@ -194,6 +200,51 @@ fn buildIndexedStreamFromFile(allocator: std.mem.Allocator, bytes: []const u8) F
     @memcpy(out[cursor .. cursor + eos.len], eos[0..]);
 
     return out;
+}
+
+fn findSchemaSearchLimit(footer_t: fbs.FooterT, header_len: usize, footer_start: usize) FileError!usize {
+    var limit = footer_start;
+    for (footer_t.dictionaries.items) |block| {
+        if (block.offset < 0) return error.InvalidFile;
+        const off = std.math.cast(usize, block.offset) orelse return error.InvalidFile;
+        if (off < header_len or off >= footer_start) return error.InvalidFile;
+        if (off < limit) limit = off;
+    }
+    for (footer_t.recordBatches.items) |block| {
+        if (block.offset < 0) return error.InvalidFile;
+        const off = std.math.cast(usize, block.offset) orelse return error.InvalidFile;
+        if (off < header_len or off >= footer_start) return error.InvalidFile;
+        if (off < limit) limit = off;
+    }
+    if (limit <= header_len) return error.InvalidFile;
+    return limit;
+}
+
+fn findSchemaMessage(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    search_start: usize,
+    search_limit: usize,
+) FileError!FoundSchema {
+    if (search_start >= search_limit) return error.InvalidFile;
+    if (search_limit > bytes.len) return error.InvalidFile;
+
+    var off = search_start;
+    while (off + 4 <= search_limit) : (off += 1) {
+        const first = readU32Le(bytes[off .. off + 4]);
+        if (first == 0) continue;
+
+        const parsed = parseMessageAt(allocator, bytes, off, search_limit) catch |err| switch (err) {
+            error.InvalidFile => continue,
+            else => return err,
+        };
+        if (parsed.header != .schema) return error.InvalidFile;
+        return .{
+            .offset = off,
+            .parsed = parsed,
+        };
+    }
+    return error.InvalidFile;
 }
 
 fn collectIndexedBlocks(
@@ -607,4 +658,93 @@ test "ipc file reader reconstructs stream from footer block index" {
     try std.testing.expectEqual(@as(i32, 7), id_arr.value(0));
     try std.testing.expectEqual(@as(i32, 8), id_arr.value(1));
     try std.testing.expectEqual(@as(i32, 9), id_arr.value(2));
+}
+
+test "ipc file reader accepts file with leading padding before schema message" {
+    const allocator = std.testing.allocator;
+
+    const zarray = @import("../array/array_ref.zig");
+    const prim = @import("../array/primitive_array.zig");
+    const DataType = @import("../datatype.zig").DataType;
+    const Field = @import("../datatype.zig").Field;
+
+    const id_type = DataType{ .int32 = {} };
+    const fields = [_]Field{
+        .{ .name = "id", .data_type = &id_type, .nullable = false },
+    };
+    const schema = Schema{ .fields = fields[0..] };
+
+    var id_builder = try prim.PrimitiveBuilder(i32, DataType{ .int32 = {} }).init(allocator, 2);
+    defer id_builder.deinit();
+    try id_builder.append(11);
+    try id_builder.append(22);
+    var ids = try id_builder.finish();
+    defer ids.release();
+
+    var batch = try RecordBatch.init(allocator, schema, &[_]zarray.ArrayRef{ids});
+    defer batch.deinit();
+
+    var file_bytes = std.ArrayList(u8){};
+    defer file_bytes.deinit(allocator);
+    const Sink = struct {
+        allocator: std.mem.Allocator,
+        out: *std.ArrayList(u8),
+        pub const Error = error{OutOfMemory};
+        pub fn writeAll(self: @This(), data: []const u8) Error!void {
+            try self.out.appendSlice(self.allocator, data);
+        }
+    };
+    var fw = try file_writer.FileWriter(Sink).init(allocator, .{ .allocator = allocator, .out = &file_bytes });
+    defer fw.deinit();
+    try fw.writeSchema(schema);
+    try fw.writeRecordBatch(batch);
+    try fw.writeEnd();
+
+    const trailer_len = 4 + FileMagic.len;
+    const footer_len_pos = file_bytes.items.len - trailer_len;
+    const footer_len_u32 = std.mem.readInt(u32, file_bytes.items[footer_len_pos..][0..4], .little);
+    const footer_end = footer_len_pos;
+    const footer_start = footer_end - @as(usize, footer_len_u32);
+    const footer_bytes_orig = file_bytes.items[footer_start..footer_end];
+
+    const footer_fb = fbs.Footer.GetRootAs(@constCast(footer_bytes_orig), 0);
+    const opts: fb.common.PackOptions = .{ .allocator = allocator };
+    var footer_t = try fbs.FooterT.Unpack(footer_fb, opts);
+    defer footer_t.deinit(allocator);
+
+    const header_len = FileMagic.len + 2;
+    const lead_pad_len: i64 = 56;
+    for (footer_t.dictionaries.items) |*blk| blk.offset += lead_pad_len;
+    for (footer_t.recordBatches.items) |*blk| blk.offset += lead_pad_len;
+
+    var builder = fb.Builder.init(allocator);
+    defer builder.deinitAll();
+    const footer_off = try fbs.FooterT.Pack(footer_t, &builder, opts);
+    try fbs.Footer.FinishBuffer(&builder, footer_off);
+    const footer_bytes_new = try builder.finishedBytes();
+
+    var rewritten = std.ArrayList(u8){};
+    defer rewritten.deinit(allocator);
+    try rewritten.appendSlice(allocator, file_bytes.items[0..header_len]);
+    try rewritten.appendNTimes(allocator, 0, @intCast(lead_pad_len));
+    try rewritten.appendSlice(allocator, file_bytes.items[header_len..footer_start]);
+    try rewritten.appendSlice(allocator, footer_bytes_new);
+    var new_footer_len: [4]u8 = undefined;
+    std.mem.writeInt(u32, &new_footer_len, @intCast(footer_bytes_new.len), .little);
+    try rewritten.appendSlice(allocator, new_footer_len[0..]);
+    try rewritten.appendSlice(allocator, FileMagic);
+
+    var fixed = std.io.fixedBufferStream(rewritten.items);
+    var fr = FileReader(@TypeOf(fixed.reader())).init(allocator, fixed.reader());
+    defer fr.deinit();
+
+    const out_schema = try fr.readSchema();
+    try std.testing.expectEqual(@as(usize, 1), out_schema.fields.len);
+    const out_batch_opt = try fr.nextRecordBatch();
+    try std.testing.expect(out_batch_opt != null);
+    var out_batch = out_batch_opt.?;
+    defer out_batch.deinit();
+    const id_arr = prim.PrimitiveArray(i32){ .data = out_batch.columns[0].data() };
+    try std.testing.expectEqual(@as(i32, 11), id_arr.value(0));
+    try std.testing.expectEqual(@as(i32, 22), id_arr.value(1));
 }
