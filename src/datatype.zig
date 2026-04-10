@@ -256,7 +256,6 @@ pub const DataType = union(TypeId) {
     large_list_view: ListViewType,
     decimal32: DecimalParams,
     decimal64: DecimalParams,
-    max_id: void,
 
     /// Execute id logic for this type.
     pub fn id(self: DataType) TypeId {
@@ -311,7 +310,6 @@ pub const DataType = union(TypeId) {
             .large_binary => "large_binary",
             .string_view => "utf8_view",
             .binary_view => "binary_view",
-            .max_id => "max_id",
         };
     }
 
@@ -378,7 +376,6 @@ pub fn dataTypeEql(lhs: DataType, rhs: DataType) bool {
         .large_binary,
         .string_view,
         .binary_view,
-        .max_id,
         => true,
         .fixed_size_binary => |l| l.byte_width == rhs.fixed_size_binary.byte_width,
         .timestamp => |l| blk: {
