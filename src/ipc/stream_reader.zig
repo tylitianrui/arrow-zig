@@ -149,7 +149,13 @@ pub fn StreamReader(comptime ReaderType: type) type {
                 switch (msg.msg.header) {
                     .DictionaryBatch => {
                         if (msg.body == null) return StreamError.InvalidBody;
-                        try ingestDictionaryBatch(self, schema_ref.schema().*, msg.msg.header.DictionaryBatch.?, msg.body.?);
+                        try ingestDictionaryBatchWithMap(
+                            self.allocator,
+                            &self.dictionary_values,
+                            schema_ref.schema().*,
+                            msg.msg.header.DictionaryBatch.?,
+                            msg.body.?,
+                        );
                     },
                     .RecordBatch => {
                         if (msg.body == null) return StreamError.InvalidBody;
@@ -250,6 +256,55 @@ fn readMessage(self: anytype) (StreamError || fb.common.PackError || @TypeOf(sel
     const msg_opt = try readMessageOptional(self);
     if (msg_opt == null) return StreamError.InvalidMessage;
     return msg_opt.?;
+}
+
+fn unpackMessageFromMetadata(
+    allocator: std.mem.Allocator,
+    metadata: []const u8,
+) (StreamError || fb.common.PackError || error{OutOfMemory})!fbs.MessageT {
+    if (!isSaneFlatbufferTable(metadata)) return StreamError.InvalidMetadata;
+    const msg = fbs.Message.GetRootAs(@constCast(metadata), 0);
+    const opts: fb.common.PackOptions = .{ .allocator = allocator };
+    var msg_t = try fbs.MessageT.Unpack(msg, opts);
+    errdefer msg_t.deinit(allocator);
+    if (msg_t.version != .V5 and msg_t.version != .V4) return StreamError.InvalidMetadata;
+    return msg_t;
+}
+
+pub fn decodeSchemaFromMessageMetadata(
+    allocator: std.mem.Allocator,
+    metadata: []const u8,
+) (StreamError || fb.common.PackError || error{OutOfMemory})!Schema {
+    var msg_t = try unpackMessageFromMetadata(allocator, metadata);
+    defer msg_t.deinit(allocator);
+    if (msg_t.header != .Schema) return StreamError.InvalidMessage;
+    return try buildSchemaFromFlatbuf(allocator, msg_t.header.Schema.?);
+}
+
+pub fn ingestDictionaryBatchFromMessageMetadata(
+    allocator: std.mem.Allocator,
+    schema: Schema,
+    dictionary_values: *std.AutoHashMap(i64, ArrayRef),
+    metadata: []const u8,
+    body: array_data.SharedBuffer,
+) (StreamError || array_data.ValidationError || fb.common.PackError || error{OutOfMemory})!void {
+    var msg_t = try unpackMessageFromMetadata(allocator, metadata);
+    defer msg_t.deinit(allocator);
+    if (msg_t.header != .DictionaryBatch) return StreamError.InvalidMessage;
+    try ingestDictionaryBatchWithMap(allocator, dictionary_values, schema, msg_t.header.DictionaryBatch.?, body);
+}
+
+pub fn buildRecordBatchFromMessageMetadata(
+    allocator: std.mem.Allocator,
+    schema_ref: SchemaRef,
+    dictionary_values: *const std.AutoHashMap(i64, ArrayRef),
+    metadata: []const u8,
+    body: array_data.SharedBuffer,
+) (StreamError || array_data.ValidationError || record_batch.RecordBatchError || fb.common.PackError || error{OutOfMemory})!RecordBatch {
+    var msg_t = try unpackMessageFromMetadata(allocator, metadata);
+    defer msg_t.deinit(allocator);
+    if (msg_t.header != .RecordBatch) return StreamError.InvalidMessage;
+    return try buildRecordBatchFromFlatbuf(allocator, schema_ref, msg_t.header.RecordBatch.?, body, dictionary_values);
 }
 
 fn buildSchemaFromFlatbuf(allocator: std.mem.Allocator, schema_t: *fbs.SchemaT) (StreamError || error{OutOfMemory})!Schema {
@@ -892,8 +947,9 @@ fn bufferCountForType(dt: DataType, variadic_buffer_counts: []const i64, variadi
     };
 }
 
-fn ingestDictionaryBatch(
-    self: anytype,
+fn ingestDictionaryBatchWithMap(
+    allocator: std.mem.Allocator,
+    dictionary_values: *std.AutoHashMap(i64, ArrayRef),
     schema: Schema,
     dictionary_batch_t: *fbs.DictionaryBatchT,
     body: array_data.SharedBuffer,
@@ -905,7 +961,7 @@ fn ingestDictionaryBatch(
     var buffer_index: usize = 0;
     var variadic_index: usize = 0;
     var dictionary = try readArrayFromMeta(
-        self.allocator,
+        allocator,
         value_type,
         record_batch_t.nodes.items,
         record_batch_t.buffers.items,
@@ -914,7 +970,7 @@ fn ingestDictionaryBatch(
         &node_index,
         &buffer_index,
         &variadic_index,
-        &self.dictionary_values,
+        dictionary_values,
     );
     errdefer dictionary.release();
 
@@ -925,12 +981,12 @@ fn ingestDictionaryBatch(
 
     var incoming = dictionary;
     if (dictionary_batch_t.isDelta) {
-        const previous_ref = self.dictionary_values.get(dictionary_batch_t.id) orelse return StreamError.InvalidMetadata;
-        incoming = try mergeDictionaryValues(self.allocator, previous_ref, dictionary);
+        const previous_ref = dictionary_values.get(dictionary_batch_t.id) orelse return StreamError.InvalidMetadata;
+        incoming = try mergeDictionaryValues(allocator, previous_ref, dictionary);
         dictionary.release();
     }
 
-    const previous = try self.dictionary_values.fetchPut(dictionary_batch_t.id, incoming);
+    const previous = try dictionary_values.fetchPut(dictionary_batch_t.id, incoming);
     if (previous) |entry| {
         var old = entry.value;
         old.release();
