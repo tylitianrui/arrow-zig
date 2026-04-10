@@ -1,3 +1,4 @@
+const std = @import("std");
 const datatype = @import("../datatype.zig");
 const buffer = @import("../buffer.zig");
 
@@ -15,6 +16,8 @@ pub const Int8Array = PrimitiveArray(i8);
 pub const Int16Array = PrimitiveArray(i16);
 pub const Int32Array = PrimitiveArray(i32);
 pub const Int64Array = PrimitiveArray(i64);
+pub const Date32Array = PrimitiveArray(i32);
+pub const Date64Array = PrimitiveArray(i64);
 pub const UInt8Array = PrimitiveArray(u8);
 pub const UInt16Array = PrimitiveArray(u16);
 pub const UInt32Array = PrimitiveArray(u32);
@@ -25,6 +28,8 @@ pub const Int8Builder = PrimitiveBuilder(i8, DataType{ .int8 = {} });
 pub const Int16Builder = PrimitiveBuilder(i16, DataType{ .int16 = {} });
 pub const Int32Builder = PrimitiveBuilder(i32, DataType{ .int32 = {} });
 pub const Int64Builder = PrimitiveBuilder(i64, DataType{ .int64 = {} });
+pub const Date32Builder = PrimitiveBuilder(i32, DataType{ .date32 = {} });
+pub const Date64Builder = PrimitiveBuilder(i64, DataType{ .date64 = {} });
 pub const UInt8Builder = PrimitiveBuilder(u8, DataType{ .uint8 = {} });
 pub const UInt16Builder = PrimitiveBuilder(u16, DataType{ .uint16 = {} });
 pub const UInt32Builder = PrimitiveBuilder(u32, DataType{ .uint32 = {} });
@@ -61,3 +66,39 @@ pub const MapBuilder = @import("advanced_array.zig").MapBuilder;
 pub const SparseUnionBuilder = @import("advanced_array.zig").SparseUnionBuilder;
 pub const DenseUnionBuilder = @import("advanced_array.zig").DenseUnionBuilder;
 pub const RunEndEncodedBuilder = @import("advanced_array.zig").RunEndEncodedBuilder;
+
+test "date32 aliases build primitive i32 with date32 logical type" {
+    var builder = try Date32Builder.init(std.testing.allocator, 2);
+    defer builder.deinit();
+
+    try builder.append(18_628);
+    try builder.appendNull();
+    try builder.append(18_630);
+
+    var array_handle = try builder.finish();
+    defer array_handle.release();
+
+    const built = Date32Array{ .data = array_handle.data() };
+    try std.testing.expectEqual(@as(usize, 3), built.len());
+    try std.testing.expect(built.isNull(1));
+    try std.testing.expectEqual(@as(i32, 18_630), built.value(2));
+    try std.testing.expect(array_handle.data().data_type == .date32);
+}
+
+test "date64 aliases build primitive i64 with date64 logical type" {
+    var builder = try Date64Builder.init(std.testing.allocator, 2);
+    defer builder.deinit();
+
+    try builder.append(1_609_459_200_000);
+    try builder.appendNull();
+    try builder.append(1_609_545_600_000);
+
+    var array_handle = try builder.finish();
+    defer array_handle.release();
+
+    const built = Date64Array{ .data = array_handle.data() };
+    try std.testing.expectEqual(@as(usize, 3), built.len());
+    try std.testing.expect(built.isNull(1));
+    try std.testing.expectEqual(@as(i64, 1_609_545_600_000), built.value(2));
+    try std.testing.expect(array_handle.data().data_type == .date64);
+}
