@@ -30,8 +30,12 @@ const BufferStorage = struct {
 
 // SharedBuffer is a read-only view with shared ownership of its storage.
 pub const SharedBuffer = struct {
+    // Shared owner/control block. When null, this is a borrowed non-owning view.
     storage: ?*BufferStorage,
+    // Logical byte view for this handle. May be a sub-slice of storage.data.
     data: []const u8,
+
+    const Self = @This();
 
     pub const empty: SharedBuffer = .{ .storage = null, .data = &.{} };
 
@@ -46,7 +50,7 @@ pub const SharedBuffer = struct {
     }
 
     /// Increment shared ownership and return another handle.
-    pub fn retain(self: SharedBuffer) SharedBuffer {
+    pub fn retain(self: Self) Self {
         if (self.storage) |storage| {
             _ = storage.ref_count.fetchAdd(1, .monotonic);
         }
@@ -54,7 +58,7 @@ pub const SharedBuffer = struct {
     }
 
     /// Release one ownership reference and cleanup if this is the last handle.
-    pub fn release(self: *SharedBuffer) void {
+    pub fn release(self: *Self) void {
         if (self.storage) |storage| {
             if (storage.ref_count.fetchSub(1, .acq_rel) == 1) {
                 storage.release_fn(storage);
@@ -65,20 +69,20 @@ pub const SharedBuffer = struct {
     }
 
     /// Return the logical length.
-    pub fn len(self: SharedBuffer) usize {
+    pub fn len(self: Self) usize {
         return self.data.len;
     }
 
     /// Execute isEmpty logic for this type.
-    pub fn isEmpty(self: SharedBuffer) bool {
+    pub fn isEmpty(self: Self) bool {
         return self.data.len == 0;
     }
 
     /// Create a logical slice view over the current value.
-    pub fn slice(self: SharedBuffer, start: usize, end: usize) SharedBuffer {
+    pub fn slice(self: Self, start: usize, end: usize) Self {
         std.debug.assert(start <= end);
         std.debug.assert(end <= self.data.len);
-        const out = SharedBuffer{ .storage = self.storage, .data = self.data[start..end] };
+        const out = Self{ .storage = self.storage, .data = self.data[start..end] };
         if (out.storage) |storage| {
             _ = storage.ref_count.fetchAdd(1, .monotonic);
         }
@@ -86,7 +90,7 @@ pub const SharedBuffer = struct {
     }
 
     /// Execute typedSlice logic for this type.
-    pub fn typedSlice(self: SharedBuffer, comptime T: type) []const T {
+    pub fn typedSlice(self: Self, comptime T: type) []const T {
         const aligned: []align(@alignOf(T)) const u8 = @alignCast(self.data);
         return std.mem.bytesAsSlice(T, aligned);
     }
@@ -97,8 +101,10 @@ pub const OwnedBuffer = struct {
     data: []align(ALIGNMENT) u8,
     allocator: std.mem.Allocator,
 
+    const Self = @This();
+
     /// Initialize and return a new instance.
-    pub fn init(allocator: std.mem.Allocator, capacity: usize) !OwnedBuffer {
+    pub fn init(allocator: std.mem.Allocator, capacity: usize) !Self {
         const actualCapacity = alignedSize(if (capacity == 0) ALIGNMENT else capacity);
         const data = try allocator.alignedAlloc(u8, std.mem.Alignment.fromByteUnits(ALIGNMENT), actualCapacity);
         @memset(data, 0);
@@ -106,24 +112,24 @@ pub const OwnedBuffer = struct {
     }
 
     /// Release resources owned by this instance.
-    pub fn deinit(self: *OwnedBuffer) void {
+    pub fn deinit(self: *Self) void {
         if (self.data.len == 0) return;
         self.allocator.free(self.data);
         self.data = empty_storage[0..];
     }
 
     /// Return the logical length.
-    pub fn len(self: OwnedBuffer) usize {
+    pub fn len(self: Self) usize {
         return self.data.len;
     }
 
     /// Execute isEmpty logic for this type.
-    pub fn isEmpty(self: OwnedBuffer) bool {
+    pub fn isEmpty(self: Self) bool {
         return self.data.len == 0;
     }
 
     /// Execute toShared logic for this type.
-    pub fn toShared(self: *OwnedBuffer, used: usize) !SharedBuffer {
+    pub fn toShared(self: *Self, used: usize) !SharedBuffer {
         const storage = try self.allocator.create(BufferStorage);
         storage.* = .{
             .allocator = self.allocator,
@@ -137,12 +143,12 @@ pub const OwnedBuffer = struct {
     }
 
     /// Execute typedSlice logic for this type.
-    pub fn typedSlice(self: OwnedBuffer, comptime T: type) []T {
+    pub fn typedSlice(self: Self, comptime T: type) []T {
         return std.mem.bytesAsSlice(T, self.data);
     }
 
     /// Execute resize logic for this type.
-    pub fn resize(self: *OwnedBuffer, newSize: usize) !void {
+    pub fn resize(self: *Self, newSize: usize) !void {
         const actualSize = alignedSize(newSize);
         const newData = try self.allocator.alignedAlloc(u8, std.mem.Alignment.fromByteUnits(ALIGNMENT), actualSize);
         const copySize = @min(self.data.len, actualSize);
@@ -184,4 +190,47 @@ test "mutable buffer exposes initialized data" {
     var shared = try buffer.toShared(5);
     defer shared.release();
     try std.testing.expectEqualStrings("arrow", shared.data[0..5]);
+}
+
+test "shared buffer view can be smaller than owned storage" {
+    var owned = try OwnedBuffer.init(std.testing.allocator, 32);
+    defer owned.deinit();
+
+    @memset(owned.data, 0xAB);
+    var shared = try owned.toShared(8);
+    defer shared.release();
+
+    try std.testing.expect(shared.storage != null);
+    try std.testing.expectEqual(@as(usize, 8), shared.data.len);
+    try std.testing.expect(shared.storage.?.data.len > shared.data.len);
+}
+
+test "shared buffer slice keeps owner but narrows logical data window" {
+    var owned = try OwnedBuffer.init(std.testing.allocator, 8);
+    defer owned.deinit();
+    @memcpy(owned.data[0..8], "abcdefgh");
+
+    var whole = try owned.toShared(8);
+    defer whole.release();
+
+    var mid = whole.slice(2, 6);
+    defer mid.release();
+
+    try std.testing.expect(whole.storage == mid.storage);
+    try std.testing.expectEqualStrings("cdef", mid.data);
+
+    whole.release();
+    try std.testing.expectEqualStrings("cdef", mid.data);
+}
+
+test "borrowed shared buffer slice stays non-owning" {
+    const raw = "abcdef";
+    var borrowed = SharedBuffer.fromSlice(raw);
+    defer borrowed.release();
+
+    var part = borrowed.slice(1, 4);
+    defer part.release();
+
+    try std.testing.expect(part.storage == null);
+    try std.testing.expectEqualStrings("bcd", part.data);
 }
