@@ -59,6 +59,8 @@ pub const exportArrayToC = ffi.exportArray;
 pub const importArrayFromC = ffi.importArray;
 pub const ArrayData = array.ArrayData;
 pub const ArrayRef = array.ArrayRef;
+pub const NullArray = array.NullArray;
+pub const NullBuilder = array.NullBuilder;
 pub const PrimitiveArray = array.PrimitiveArray;
 pub const PrimitiveBuilder = array.PrimitiveBuilder;
 pub const Int8Array = array.Int8Array;
@@ -155,6 +157,7 @@ test {
     _ = @import("array/array.zig");
     _ = @import("array/array_data.zig");
     _ = @import("array/primitive_array.zig");
+    _ = @import("array/null_array.zig");
     _ = @import("array/boolean_array.zig");
     _ = @import("array/string_array.zig");
     _ = @import("array/binary_array.zig");
