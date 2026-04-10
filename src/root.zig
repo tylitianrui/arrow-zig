@@ -45,6 +45,8 @@ pub const RecordBatchBuilderError = record_batch.RecordBatchBuilderError;
 pub const IpcFormat = ipc.format;
 pub const IpcStreamWriter = ipc.StreamWriter;
 pub const IpcStreamReader = ipc.StreamReader;
+pub const IpcFileWriter = ipc.FileWriter;
+pub const IpcFileReader = ipc.FileReader;
 pub const IpcOwnedSchema = ipc.OwnedSchema;
 pub const ArrowSchema = ffi.ArrowSchema;
 pub const ArrowArray = ffi.ArrowArray;
@@ -118,6 +120,8 @@ test {
     _ = @import("record_batch.zig");
     _ = @import("ipc/stream_writer.zig");
     _ = @import("ipc/stream_reader.zig");
+    _ = @import("ipc/file_writer.zig");
+    _ = @import("ipc/file_reader.zig");
     _ = @import("ffi/c_data.zig");
     _ = @import("array/array.zig");
     _ = @import("array/array_data.zig");

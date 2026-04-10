@@ -21,6 +21,7 @@ pub fn build(b: *std.Build) !void {
     const is_windows = b.graph.host.result.os.tag == .windows;
     const format_dir = if (is_windows) "src/format" else b.path("src/format").getPath(b);
     const message_fbs = if (is_windows) "src/format/Message.fbs" else b.path("src/format/Message.fbs").getPath(b);
+    const file_fbs = if (is_windows) "src/format/File.fbs" else b.path("src/format/File.fbs").getPath(b);
     const schema_fbs = if (is_windows) "src/format/Schema.fbs" else b.path("src/format/Schema.fbs").getPath(b);
     const tensor_fbs = if (is_windows) "src/format/Tensor.fbs" else b.path("src/format/Tensor.fbs").getPath(b);
     const sparse_tensor_fbs = if (is_windows) "src/format/SparseTensor.fbs" else b.path("src/format/SparseTensor.fbs").getPath(b);
@@ -29,6 +30,7 @@ pub fn build(b: *std.Build) !void {
         fbz_dep.artifact("flatc-zig"),
         &.{
             message_fbs,
+            file_fbs,
             schema_fbs,
             tensor_fbs,
             sparse_tensor_fbs,
