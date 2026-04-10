@@ -22,6 +22,8 @@ pub const Time32Array = PrimitiveArray(i32);
 pub const Time64Array = PrimitiveArray(i64);
 pub const TimestampArray = PrimitiveArray(i64);
 pub const DurationArray = PrimitiveArray(i64);
+pub const IntervalMonthsArray = PrimitiveArray(i32);
+pub const IntervalDayTimeArray = PrimitiveArray(i64);
 pub const Decimal32Array = PrimitiveArray(i32);
 pub const Decimal64Array = PrimitiveArray(i64);
 pub const Decimal128Array = PrimitiveArray(i128);
@@ -49,6 +51,14 @@ pub fn TimestampBuilder(comptime unit: datatype.TimeUnit, comptime timezone: ?[]
 }
 pub fn DurationBuilder(comptime unit: datatype.TimeUnit) type {
     return PrimitiveBuilder(i64, DataType{ .duration = .{ .unit = unit } });
+}
+pub fn IntervalMonthsBuilder(comptime interval: datatype.IntervalType) type {
+    comptime std.debug.assert(interval.unit == .months);
+    return PrimitiveBuilder(i32, DataType{ .interval_months = interval });
+}
+pub fn IntervalDayTimeBuilder(comptime interval: datatype.IntervalType) type {
+    comptime std.debug.assert(interval.unit == .day_time);
+    return PrimitiveBuilder(i64, DataType{ .interval_day_time = interval });
 }
 pub fn Decimal32Builder(comptime params: datatype.DecimalParams) type {
     return PrimitiveBuilder(i32, DataType{ .decimal32 = params });
@@ -248,6 +258,46 @@ test "duration builder alias keeps unit across finishReset reuse" {
     try std.testing.expectEqual(@as(i64, 11), built.value(0));
     try std.testing.expect(second.data().data_type == .duration);
     try std.testing.expectEqual(datatype.TimeUnit.millisecond, second.data().data_type.duration.unit);
+}
+
+test "interval months builder alias builds primitive i32 with interval_months type" {
+    const interval = datatype.IntervalType{ .unit = .months };
+    var builder = try IntervalMonthsBuilder(interval).init(std.testing.allocator, 2);
+    defer builder.deinit();
+
+    try builder.append(24);
+    try builder.appendNull();
+    try builder.append(-6);
+
+    var array_handle = try builder.finish();
+    defer array_handle.release();
+
+    const built = IntervalMonthsArray{ .data = array_handle.data() };
+    try std.testing.expectEqual(@as(usize, 3), built.len());
+    try std.testing.expect(built.isNull(1));
+    try std.testing.expectEqual(@as(i32, -6), built.value(2));
+    try std.testing.expect(array_handle.data().data_type == .interval_months);
+    try std.testing.expectEqual(datatype.IntervalUnit.months, array_handle.data().data_type.interval_months.unit);
+}
+
+test "interval day time builder alias builds primitive i64 with interval_day_time type" {
+    const interval = datatype.IntervalType{ .unit = .day_time };
+    var builder = try IntervalDayTimeBuilder(interval).init(std.testing.allocator, 2);
+    defer builder.deinit();
+
+    try builder.append(86_400_000);
+    try builder.appendNull();
+    try builder.append(-43_200_000);
+
+    var array_handle = try builder.finish();
+    defer array_handle.release();
+
+    const built = IntervalDayTimeArray{ .data = array_handle.data() };
+    try std.testing.expectEqual(@as(usize, 3), built.len());
+    try std.testing.expect(built.isNull(1));
+    try std.testing.expectEqual(@as(i64, -43_200_000), built.value(2));
+    try std.testing.expect(array_handle.data().data_type == .interval_day_time);
+    try std.testing.expectEqual(datatype.IntervalUnit.day_time, array_handle.data().data_type.interval_day_time.unit);
 }
 
 test "decimal32 builder alias builds primitive i32 with decimal32 params" {
