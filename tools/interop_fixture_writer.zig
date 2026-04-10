@@ -19,6 +19,7 @@ const FixtureCase = enum {
     dict_delta,
     ree,
     complex,
+    extension,
 };
 
 const ContainerMode = enum {
@@ -35,7 +36,7 @@ pub fn main() !void {
     defer args.deinit();
     _ = args.next(); // exe
     const out_path = args.next() orelse {
-        std.log.err("usage: interop-fixture-writer <out.arrow> [canonical|dict-delta|ree|complex] [stream|file]", .{});
+        std.log.err("usage: interop-fixture-writer <out.arrow> [canonical|dict-delta|ree|complex|extension] [stream|file]", .{});
         return error.InvalidArgs;
     };
     const fixture_case: FixtureCase = blk: {
@@ -44,6 +45,7 @@ pub fn main() !void {
         if (std.mem.eql(u8, mode, "dict-delta")) break :blk .dict_delta;
         if (std.mem.eql(u8, mode, "ree")) break :blk .ree;
         if (std.mem.eql(u8, mode, "complex")) break :blk .complex;
+        if (std.mem.eql(u8, mode, "extension")) break :blk .extension;
         std.log.err("unknown fixture mode: {s}", .{mode});
         return error.InvalidArgs;
     };
@@ -55,7 +57,7 @@ pub fn main() !void {
         return error.InvalidArgs;
     };
     if (args.next() != null) {
-        std.log.err("usage: interop-fixture-writer <out.arrow> [canonical|dict-delta|ree|complex] [stream|file]", .{});
+        std.log.err("usage: interop-fixture-writer <out.arrow> [canonical|dict-delta|ree|complex|extension] [stream|file]", .{});
         return error.InvalidArgs;
     }
     if (container_mode == .file and fixture_case == .dict_delta) {
@@ -89,7 +91,46 @@ fn writeFixture(allocator: std.mem.Allocator, writer: anytype, fixture_case: Fix
         .dict_delta => try writeDictionaryDeltaFixture(allocator, writer),
         .ree => try writeReeFixture(allocator, writer),
         .complex => try writeComplexFixture(allocator, writer),
+        .extension => try writeExtensionFixture(allocator, writer),
     }
+}
+
+fn writeExtensionFixture(allocator: std.mem.Allocator, writer: anytype) !void {
+    const storage_type = zarrow.DataType{ .int32 = {} };
+    const ext_type = zarrow.DataType{
+        .extension = .{
+            .name = "com.example.int32_ext",
+            .storage_type = &storage_type,
+            .metadata = "v1",
+        },
+    };
+    const field_metadata = [_]zarrow.KeyValue{
+        .{ .key = "owner", .value = "interop" },
+    };
+    const fields = [_]zarrow.Field{
+        .{ .name = "ext_i32", .data_type = &ext_type, .nullable = true, .metadata = field_metadata[0..] },
+    };
+    const schema = zarrow.Schema{ .fields = fields[0..] };
+
+    var values_builder = try zarrow.Int32Builder.init(allocator, 3);
+    defer values_builder.deinit();
+    try values_builder.append(7);
+    try values_builder.appendNull();
+    try values_builder.append(11);
+    var values = try values_builder.finish();
+    defer values.release();
+
+    var ext_builder = try zarrow.ExtensionBuilder.init(allocator, ext_type.extension);
+    defer ext_builder.deinit();
+    var ext_values = try ext_builder.finish(values);
+    defer ext_values.release();
+
+    var batch = try zarrow.RecordBatch.initBorrowed(allocator, schema, &[_]zarrow.ArrayRef{ext_values});
+    defer batch.deinit();
+
+    try writer.writeSchema(schema);
+    try writer.writeRecordBatch(batch);
+    try writer.writeEnd();
 }
 
 fn writeReeFixture(allocator: std.mem.Allocator, writer: anytype) !void {

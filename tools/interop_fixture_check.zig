@@ -6,6 +6,7 @@ const FixtureCase = enum {
     dict_delta,
     ree,
     complex,
+    extension,
 };
 
 const ContainerMode = enum {
@@ -22,7 +23,7 @@ pub fn main() !void {
     defer args.deinit();
     _ = args.next(); // exe
     const in_path = args.next() orelse {
-        std.log.err("usage: interop-fixture-check <in.arrow> [canonical|dict-delta|ree|complex] [stream|file]", .{});
+        std.log.err("usage: interop-fixture-check <in.arrow> [canonical|dict-delta|ree|complex|extension] [stream|file]", .{});
         return error.InvalidArgs;
     };
     const fixture_case: FixtureCase = blk: {
@@ -31,6 +32,7 @@ pub fn main() !void {
         if (std.mem.eql(u8, mode, "dict-delta")) break :blk .dict_delta;
         if (std.mem.eql(u8, mode, "ree")) break :blk .ree;
         if (std.mem.eql(u8, mode, "complex")) break :blk .complex;
+        if (std.mem.eql(u8, mode, "extension")) break :blk .extension;
         std.log.err("unknown fixture mode: {s}", .{mode});
         return error.InvalidArgs;
     };
@@ -42,7 +44,7 @@ pub fn main() !void {
         return error.InvalidArgs;
     };
     if (args.next() != null) {
-        std.log.err("usage: interop-fixture-check <in.arrow> [canonical|dict-delta|ree|complex] [stream|file]", .{});
+        std.log.err("usage: interop-fixture-check <in.arrow> [canonical|dict-delta|ree|complex|extension] [stream|file]", .{});
         return error.InvalidArgs;
     }
     if (container_mode == .file and fixture_case == .dict_delta) {
@@ -74,7 +76,38 @@ fn checkFixture(reader: anytype, fixture_case: FixtureCase) !void {
         .dict_delta => try checkDictionaryDelta(reader),
         .ree => try checkRee(reader),
         .complex => try checkComplex(reader),
+        .extension => try checkExtension(reader),
     }
+}
+
+fn checkExtension(reader: anytype) !void {
+    const schema = try reader.readSchema();
+    if (schema.fields.len != 1) return error.InvalidSchema;
+    if (!std.mem.eql(u8, schema.fields[0].name, "ext_i32")) return error.InvalidSchema;
+    if (schema.fields[0].data_type.* != .extension) return error.InvalidSchema;
+    const ext = schema.fields[0].data_type.extension;
+    if (!std.mem.eql(u8, ext.name, "com.example.int32_ext")) return error.InvalidSchema;
+    if (ext.metadata == null or !std.mem.eql(u8, ext.metadata.?, "v1")) return error.InvalidSchema;
+    if (ext.storage_type.* != .int32) return error.InvalidSchema;
+    if (schema.fields[0].metadata == null) return error.InvalidSchema;
+    if (schema.fields[0].metadata.?.len != 1) return error.InvalidSchema;
+    if (!std.mem.eql(u8, schema.fields[0].metadata.?[0].key, "owner")) return error.InvalidSchema;
+    if (!std.mem.eql(u8, schema.fields[0].metadata.?[0].value, "interop")) return error.InvalidSchema;
+
+    const batch_opt = try reader.nextRecordBatch();
+    if (batch_opt == null) return error.MissingBatch;
+    var batch = batch_opt.?;
+    defer batch.deinit();
+    if (batch.numRows() != 3) return error.InvalidBatch;
+
+    if (batch.columns[0].data().data_type != .extension) return error.InvalidBatch;
+    const values = zarrow.PrimitiveArray(i32){ .data = batch.columns[0].data() };
+    if (values.value(0) != 7) return error.InvalidBatch;
+    if (!values.isNull(1)) return error.InvalidBatch;
+    if (values.value(2) != 11) return error.InvalidBatch;
+
+    const done = try reader.nextRecordBatch();
+    if (done != null) return error.UnexpectedExtraBatch;
 }
 
 fn checkRee(reader: anytype) !void {

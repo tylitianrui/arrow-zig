@@ -66,14 +66,23 @@ pub const Error = error{
 const ARROW_FLAG_DICTIONARY_ORDERED: i64 = 1;
 const ARROW_FLAG_NULLABLE: i64 = 2;
 const ARROW_FLAG_MAP_KEYS_SORTED: i64 = 4;
+const extension_name_key = "ARROW:extension:name";
+const extension_metadata_key = "ARROW:extension:metadata";
 
 const ExportedSchemaPrivate = struct {
     allocator: std.mem.Allocator,
     format_z: [:0]u8,
     name_z: ?[:0]u8,
+    metadata_storage: ?[]u8,
     children_storage: []ArrowSchema,
     children_ptrs: []?*ArrowSchema,
     dict_storage: ?*ArrowSchema,
+};
+
+const ParsedFieldMetadata = struct {
+    user_metadata: ?[]const datatype.KeyValue,
+    extension_name: ?[]const u8,
+    extension_metadata: ?[]const u8,
 };
 
 const ExportedArrayPrivate = struct {
@@ -134,7 +143,7 @@ pub fn importSchemaOwned(allocator: std.mem.Allocator, c_schema: *ArrowSchema) E
     const schema = Schema{
         .fields = fields,
         .endianness = .little,
-        .metadata = null,
+        .metadata = try decodeMetadataBlob(a, c_schema.metadata),
     };
 
     if (c_schema.release) |release_fn| release_fn(c_schema);
@@ -179,10 +188,12 @@ fn exportRootSchema(allocator: std.mem.Allocator, schema: Schema) Error!ArrowSch
         .allocator = allocator,
         .format_z = format_z,
         .name_z = null,
+        .metadata_storage = try encodeMetadataBlob(allocator, schema.metadata),
         .children_storage = &.{},
         .children_ptrs = &.{},
         .dict_storage = null,
     };
+    errdefer if (priv.metadata_storage) |m| allocator.free(m);
 
     if (schema.fields.len > 0) {
         priv.children_storage = try allocator.alloc(ArrowSchema, schema.fields.len);
@@ -200,7 +211,7 @@ fn exportRootSchema(allocator: std.mem.Allocator, schema: Schema) Error!ArrowSch
     return ArrowSchema{
         .format = priv.format_z.ptr,
         .name = null,
-        .metadata = null,
+        .metadata = if (priv.metadata_storage) |m| @ptrCast(m.ptr) else null,
         .flags = 0,
         .n_children = @intCast(schema.fields.len),
         .children = if (priv.children_ptrs.len == 0) null else priv.children_ptrs.ptr,
@@ -214,7 +225,16 @@ fn exportFieldSchema(allocator: std.mem.Allocator, field: Field) Error!ArrowSche
     const priv = try allocator.create(ExportedSchemaPrivate);
     errdefer allocator.destroy(priv);
 
-    const fmt = try formatFromDataType(allocator, field.data_type.*);
+    const dt = field.data_type.*;
+    const ext_meta = switch (dt) {
+        .extension => |ext| ext,
+        else => null,
+    };
+    const layout_dt = switch (dt) {
+        .extension => |ext| ext.storage_type.*,
+        else => dt,
+    };
+    const fmt = try formatFromDataType(allocator, layout_dt);
     errdefer allocator.free(fmt);
 
     const name_z = try allocator.dupeZ(u8, field.name);
@@ -224,13 +244,15 @@ fn exportFieldSchema(allocator: std.mem.Allocator, field: Field) Error!ArrowSche
         .allocator = allocator,
         .format_z = fmt,
         .name_z = name_z,
+        .metadata_storage = try encodeFieldMetadataBlob(allocator, field.metadata, ext_meta),
         .children_storage = &.{},
         .children_ptrs = &.{},
         .dict_storage = null,
     };
+    errdefer if (priv.metadata_storage) |m| allocator.free(m);
 
-    if (field.data_type.* == .map) {
-        const map_t = field.data_type.map;
+    if (layout_dt == .map) {
+        const map_t = layout_dt.map;
         priv.children_storage = try allocator.alloc(ArrowSchema, 1);
         errdefer allocator.free(priv.children_storage);
         priv.children_ptrs = try allocator.alloc(?*ArrowSchema, 1);
@@ -249,8 +271,8 @@ fn exportFieldSchema(allocator: std.mem.Allocator, field: Field) Error!ArrowSche
             priv.children_storage[0] = try exportFieldSchema(allocator, entries_field);
         }
         priv.children_ptrs[0] = &priv.children_storage[0];
-    } else if (field.data_type.* == .run_end_encoded) {
-        const ree = field.data_type.run_end_encoded;
+    } else if (layout_dt == .run_end_encoded) {
+        const ree = layout_dt.run_end_encoded;
         const run_end_dt = dataTypeFromIntType(ree.run_end_type) orelse return error.UnsupportedType;
         const run_end_field = Field{ .name = "run_ends", .data_type = &run_end_dt, .nullable = false };
         const values_field = Field{ .name = "values", .data_type = ree.value_type, .nullable = true };
@@ -265,7 +287,7 @@ fn exportFieldSchema(allocator: std.mem.Allocator, field: Field) Error!ArrowSche
         priv.children_ptrs[0] = &priv.children_storage[0];
         priv.children_ptrs[1] = &priv.children_storage[1];
     } else {
-        const children = try childFieldsForDataType(allocator, field.data_type.*);
+        const children = try childFieldsForDataType(allocator, layout_dt);
         defer allocator.free(children);
 
         if (children.len > 0) {
@@ -283,8 +305,8 @@ fn exportFieldSchema(allocator: std.mem.Allocator, field: Field) Error!ArrowSche
     }
 
     var dict_ptr: ?*ArrowSchema = null;
-    if (field.data_type.* == .dictionary) {
-        const dict_dt = field.data_type.dictionary.value_type;
+    if (layout_dt == .dictionary) {
+        const dict_dt = layout_dt.dictionary.value_type;
         const dict_field = Field{ .name = "dictionary", .data_type = dict_dt, .nullable = true };
         priv.dict_storage = try allocator.create(ArrowSchema);
         errdefer allocator.destroy(priv.dict_storage.?);
@@ -293,17 +315,17 @@ fn exportFieldSchema(allocator: std.mem.Allocator, field: Field) Error!ArrowSche
     }
 
     var flags: i64 = if (field.nullable) ARROW_FLAG_NULLABLE else 0;
-    if (field.data_type.* == .dictionary and field.data_type.dictionary.ordered) {
+    if (layout_dt == .dictionary and layout_dt.dictionary.ordered) {
         flags |= ARROW_FLAG_DICTIONARY_ORDERED;
     }
-    if (field.data_type.* == .map and field.data_type.map.keys_sorted) {
+    if (layout_dt == .map and layout_dt.map.keys_sorted) {
         flags |= ARROW_FLAG_MAP_KEYS_SORTED;
     }
 
     return ArrowSchema{
         .format = priv.format_z.ptr,
         .name = if (priv.name_z) |n| n.ptr else null,
-        .metadata = null,
+        .metadata = if (priv.metadata_storage) |m| @ptrCast(m.ptr) else null,
         .flags = flags,
         .n_children = @intCast(priv.children_ptrs.len),
         .children = if (priv.children_ptrs.len == 0) null else priv.children_ptrs.ptr,
@@ -334,6 +356,7 @@ fn releaseExportedSchema(raw: ?*ArrowSchema) callconv(.c) void {
 
     if (priv.children_ptrs.len > 0) priv.allocator.free(priv.children_ptrs);
     if (priv.children_storage.len > 0) priv.allocator.free(priv.children_storage);
+    if (priv.metadata_storage) |m| priv.allocator.free(m);
     if (priv.name_z) |name_z| priv.allocator.free(name_z);
     priv.allocator.free(priv.format_z);
     priv.allocator.destroy(priv);
@@ -434,14 +457,50 @@ fn releaseExportedArray(raw: ?*ArrowArray) callconv(.c) void {
 
 fn importField(allocator: std.mem.Allocator, c_schema: *ArrowSchema) Error!Field {
     const name = if (c_schema.name == null) "" else try allocator.dupe(u8, cString(c_schema.name).?);
+    const parsed_md = try parseFieldMetadata(allocator, c_schema);
+    var dt_value = try importDataType(allocator, c_schema);
+    if (parsed_md.extension_name) |ext_name| {
+        if (dt_value == .dictionary) {
+            const dict = dt_value.dictionary;
+            const storage_ptr = try allocator.create(DataType);
+            storage_ptr.* = dict.value_type.*;
+            const ext_ptr = try allocator.create(DataType);
+            ext_ptr.* = .{
+                .extension = .{
+                    .name = ext_name,
+                    .storage_type = storage_ptr,
+                    .metadata = parsed_md.extension_metadata,
+                },
+            };
+            dt_value = .{
+                .dictionary = .{
+                    .id = dict.id,
+                    .index_type = dict.index_type,
+                    .value_type = ext_ptr,
+                    .ordered = dict.ordered,
+                },
+            };
+        } else {
+            const storage_ptr = try allocator.create(DataType);
+            storage_ptr.* = dt_value;
+            dt_value = .{
+                .extension = .{
+                    .name = ext_name,
+                    .storage_type = storage_ptr,
+                    .metadata = parsed_md.extension_metadata,
+                },
+            };
+        }
+    }
+
     const dt = try allocator.create(DataType);
-    dt.* = try importDataType(allocator, c_schema);
+    dt.* = dt_value;
 
     return Field{
         .name = name,
         .data_type = dt,
         .nullable = (c_schema.flags & ARROW_FLAG_NULLABLE) != 0,
-        .metadata = null,
+        .metadata = parsed_md.user_metadata,
     };
 }
 
@@ -613,6 +672,7 @@ fn importArrayRecursive(
     c_array: *ArrowArray,
     owner: *ImportedArrayOwner,
 ) Error!ArrayRef {
+    const layout_dt = storageDataType(data_type.*);
     const len = toUsize(c_array.length) orelse return error.InvalidLength;
     const off = toUsize(c_array.offset) orelse return error.InvalidOffset;
     const null_count: ?usize = if (c_array.null_count < 0)
@@ -620,8 +680,8 @@ fn importArrayRecursive(
     else
         toUsize(c_array.null_count) orelse return error.InvalidNullCount;
 
-    const expected_buffers = expectedBufferCount(data_type.*) orelse return error.UnsupportedType;
-    const expected_children = expectedChildrenCount(data_type.*);
+    const expected_buffers = expectedBufferCount(layout_dt) orelse return error.UnsupportedType;
+    const expected_children = expectedChildrenCount(layout_dt);
 
     if (c_array.n_buffers != expected_buffers) return error.InvalidBufferCount;
     if (c_array.n_children != expected_children) return error.InvalidChildren;
@@ -650,16 +710,16 @@ fn importArrayRecursive(
 
     var i: usize = 0;
     while (i < n_buffers) : (i += 1) {
-        const needed = neededBufferLen(data_type.*, i, total_len, offsets_i32, offsets_i64, data_buffer_len) orelse return error.UnsupportedType;
+        const needed = neededBufferLen(layout_dt, i, total_len, offsets_i32, offsets_i64, data_buffer_len) orelse return error.UnsupportedType;
         const ptr_any = c_array.buffers[i];
         buffers[i] = try importBuffer(ptr_any, needed);
         filled_buffers += 1;
 
-        if ((data_type.* == .string or data_type.* == .binary or data_type.* == .list) and i == 1) {
+        if ((layout_dt == .string or layout_dt == .binary or layout_dt == .list) and i == 1) {
             offsets_i32 = buffers[i].typedSlice(i32);
             data_buffer_len = @intCast(offsets_i32.?[total_len]);
         }
-        if ((data_type.* == .large_string or data_type.* == .large_binary or data_type.* == .large_list) and i == 1) {
+        if ((layout_dt == .large_string or layout_dt == .large_binary or layout_dt == .large_list) and i == 1) {
             offsets_i64 = buffers[i].typedSlice(i64);
             data_buffer_len = @intCast(offsets_i64.?[total_len]);
         }
@@ -676,15 +736,15 @@ fn importArrayRecursive(
     }
 
     const child_ptrs = if (n_children == 0) &[_]?*ArrowArray{} else childPtrsArray(c_array) orelse return error.InvalidChildren;
-    if (data_type.* == .run_end_encoded) {
-        const ree = data_type.run_end_encoded;
+    if (layout_dt == .run_end_encoded) {
+        const ree = layout_dt.run_end_encoded;
         const run_end_dt = dataTypeFromIntType(ree.run_end_type) orelse return error.UnsupportedType;
         children[0] = try importArrayRecursive(allocator, &run_end_dt, child_ptrs[0] orelse return error.InvalidChildren, owner);
         filled_children += 1;
         children[1] = try importArrayRecursive(allocator, ree.value_type, child_ptrs[1] orelse return error.InvalidChildren, owner);
         filled_children += 1;
     } else {
-        const child_types = try childTypesForDataType(allocator, data_type.*);
+        const child_types = try childTypesForDataType(allocator, layout_dt);
         defer allocator.free(child_types);
 
         for (child_types, 0..) |child_ty, idx| {
@@ -696,9 +756,9 @@ fn importArrayRecursive(
 
     var dict: ?ArrayRef = null;
     errdefer if (dict) |*d| d.release();
-    if (data_type.* == .dictionary) {
+    if (layout_dt == .dictionary) {
         if (c_array.dictionary == null) return error.MissingDictionary;
-        dict = try importArrayRecursive(allocator, data_type.dictionary.value_type, c_array.dictionary.?, owner);
+        dict = try importArrayRecursive(allocator, layout_dt.dictionary.value_type, c_array.dictionary.?, owner);
     }
 
     const layout = ArrayData{
@@ -737,14 +797,15 @@ fn neededBufferLen(
     data_buffer_len: usize,
 ) ?usize {
     _ = data_buffer_len;
+    const layout_dt = storageDataType(dt);
 
-    if (dt == .null) return if (idx == 0) 0 else null;
+    if (layout_dt == .null) return if (idx == 0) 0 else null;
 
-    if (idx == 0 and hasValidity(dt)) {
+    if (idx == 0 and hasValidity(layout_dt)) {
         return bitmap.byteLength(total_len);
     }
 
-    return switch (dt) {
+    return switch (layout_dt) {
         .bool => if (idx == 1) bitmap.byteLength(total_len) else null,
         .int8, .uint8 => if (idx == 1) total_len else null,
         .int16, .uint16, .half_float => if (idx == 1) total_len * 2 else null,
@@ -799,14 +860,14 @@ fn neededBufferLen(
 }
 
 fn hasValidity(dt: DataType) bool {
-    return switch (dt) {
+    return switch (storageDataType(dt)) {
         .null, .sparse_union, .dense_union => false,
         else => true,
     };
 }
 
 fn expectedBufferCount(dt: DataType) ?i64 {
-    return switch (dt) {
+    return switch (storageDataType(dt)) {
         .null => 0,
         .run_end_encoded => 0,
         .struct_, .fixed_size_list => 1,
@@ -847,7 +908,7 @@ fn expectedBufferCount(dt: DataType) ?i64 {
 }
 
 fn expectedChildrenCount(dt: DataType) i64 {
-    return switch (dt) {
+    return switch (storageDataType(dt)) {
         .list, .large_list, .fixed_size_list, .map, .list_view, .large_list_view => 1,
         .run_end_encoded => 2,
         .struct_ => |s| @intCast(s.fields.len),
@@ -858,7 +919,7 @@ fn expectedChildrenCount(dt: DataType) i64 {
 }
 
 fn childTypesForDataType(allocator: std.mem.Allocator, dt: DataType) Error![]const *const DataType {
-    return switch (dt) {
+    return switch (storageDataType(dt)) {
         .list => |l| blk: {
             const out = try allocator.alloc(*const DataType, 1);
             out[0] = l.value_field.data_type;
@@ -910,7 +971,7 @@ fn childTypesForDataType(allocator: std.mem.Allocator, dt: DataType) Error![]con
 }
 
 fn childFieldsForDataType(allocator: std.mem.Allocator, dt: DataType) Error![]const Field {
-    return switch (dt) {
+    return switch (storageDataType(dt)) {
         .list => |l| blk: {
             const out = try allocator.alloc(Field, 1);
             out[0] = l.value_field;
@@ -965,7 +1026,8 @@ fn childFieldsForDataType(allocator: std.mem.Allocator, dt: DataType) Error![]co
 }
 
 fn formatFromDataType(allocator: std.mem.Allocator, dt: DataType) Error![:0]u8 {
-    return switch (dt) {
+    const layout_dt = storageDataType(dt);
+    return switch (layout_dt) {
         .null => try allocator.dupeZ(u8, "n"),
         .bool => try allocator.dupeZ(u8, "b"),
         .int8 => try allocator.dupeZ(u8, "c"),
@@ -1063,8 +1125,181 @@ fn dataTypeFromIntType(int_type: IntType) ?DataType {
     };
 }
 
+fn storageDataType(dt: DataType) DataType {
+    return switch (dt) {
+        .extension => |ext| storageDataType(ext.storage_type.*),
+        else => dt,
+    };
+}
+
 fn intTypeFromDataType(dt: DataType) ?IntType {
     return IntType.fromTypeId(dt.id());
+}
+
+fn appendI32Le(list: *std.array_list.Managed(u8), value: i32) Error!void {
+    var bytes: [4]u8 = undefined;
+    std.mem.writeInt(i32, bytes[0..4], value, .little);
+    try list.appendSlice(bytes[0..4]);
+}
+
+fn appendMetadataEntry(list: *std.array_list.Managed(u8), key: []const u8, value: []const u8) Error!void {
+    const key_len = std.math.cast(i32, key.len) orelse return error.InvalidFormat;
+    const value_len = std.math.cast(i32, value.len) orelse return error.InvalidFormat;
+    try appendI32Le(list, key_len);
+    try list.appendSlice(key);
+    try appendI32Le(list, value_len);
+    try list.appendSlice(value);
+}
+
+fn encodeMetadataBlob(allocator: std.mem.Allocator, metadata: ?[]const datatype.KeyValue) Error!?[]u8 {
+    const md = metadata orelse return null;
+    if (md.len == 0) return null;
+
+    var out = std.array_list.Managed(u8).init(allocator);
+    defer out.deinit();
+
+    const count = std.math.cast(i32, md.len) orelse return error.InvalidFormat;
+    try appendI32Le(&out, count);
+    for (md) |entry| {
+        try appendMetadataEntry(&out, entry.key, entry.value);
+    }
+    return @as(?[]u8, try out.toOwnedSlice());
+}
+
+fn encodeFieldMetadataBlob(
+    allocator: std.mem.Allocator,
+    metadata: ?[]const datatype.KeyValue,
+    extension_meta: ?datatype.ExtensionType,
+) Error!?[]u8 {
+    const base_len: usize = if (metadata) |m| m.len else 0;
+    const ext_len: usize = if (extension_meta) |ext| if (ext.metadata != null) 2 else 1 else 0;
+    const total = base_len + ext_len;
+    if (total == 0) return null;
+
+    var out = std.array_list.Managed(u8).init(allocator);
+    defer out.deinit();
+
+    const count = std.math.cast(i32, total) orelse return error.InvalidFormat;
+    try appendI32Le(&out, count);
+    if (metadata) |md| {
+        for (md) |entry| {
+            try appendMetadataEntry(&out, entry.key, entry.value);
+        }
+    }
+    if (extension_meta) |ext| {
+        try appendMetadataEntry(&out, extension_name_key, ext.name);
+        if (ext.metadata) |ext_md| {
+            try appendMetadataEntry(&out, extension_metadata_key, ext_md);
+        }
+    }
+    return @as(?[]u8, try out.toOwnedSlice());
+}
+
+fn readI32LeFromMetadata(ptr: [*]const u8, cursor: *usize) i32 {
+    var bytes: [4]u8 = undefined;
+    bytes[0] = ptr[cursor.* + 0];
+    bytes[1] = ptr[cursor.* + 1];
+    bytes[2] = ptr[cursor.* + 2];
+    bytes[3] = ptr[cursor.* + 3];
+    cursor.* += 4;
+    return std.mem.readInt(i32, bytes[0..4], .little);
+}
+
+fn decodeMetadataBlob(allocator: std.mem.Allocator, ptr: [*c]const u8) Error!?[]const datatype.KeyValue {
+    if (ptr == null) return null;
+
+    const bytes: [*]const u8 = @ptrCast(ptr);
+    var cursor: usize = 0;
+    const count_i32 = readI32LeFromMetadata(bytes, &cursor);
+    if (count_i32 < 0) return error.InvalidFormat;
+    const count = std.math.cast(usize, count_i32) orelse return error.InvalidFormat;
+    if (count == 0) return null;
+
+    const out = try allocator.alloc(datatype.KeyValue, count);
+    var filled: usize = 0;
+    errdefer {
+        for (out[0..filled]) |kv| {
+            allocator.free(kv.key);
+            allocator.free(kv.value);
+        }
+        allocator.free(out);
+    }
+
+    while (filled < count) : (filled += 1) {
+        const key_len_i32 = readI32LeFromMetadata(bytes, &cursor);
+        if (key_len_i32 < 0) return error.InvalidFormat;
+        const key_len = std.math.cast(usize, key_len_i32) orelse return error.InvalidFormat;
+        const key = try allocator.dupe(u8, bytes[cursor .. cursor + key_len]);
+        cursor += key_len;
+
+        const value_len_i32 = readI32LeFromMetadata(bytes, &cursor);
+        if (value_len_i32 < 0) return error.InvalidFormat;
+        const value_len = std.math.cast(usize, value_len_i32) orelse return error.InvalidFormat;
+        const value = try allocator.dupe(u8, bytes[cursor .. cursor + value_len]);
+        cursor += value_len;
+
+        out[filled] = .{ .key = key, .value = value };
+    }
+
+    return out;
+}
+
+fn parseFieldMetadata(allocator: std.mem.Allocator, c_schema: *ArrowSchema) Error!ParsedFieldMetadata {
+    const all_md = try decodeMetadataBlob(allocator, c_schema.metadata);
+    const metadata = all_md orelse return .{
+        .user_metadata = null,
+        .extension_name = null,
+        .extension_metadata = null,
+    };
+
+    var extension_name: ?[]const u8 = null;
+    var extension_metadata: ?[]const u8 = null;
+    var user_count: usize = 0;
+    for (metadata) |entry| {
+        if (std.mem.eql(u8, entry.key, extension_name_key)) {
+            if (extension_name != null) return error.InvalidFormat;
+            extension_name = entry.value;
+            continue;
+        }
+        if (std.mem.eql(u8, entry.key, extension_metadata_key)) {
+            if (extension_metadata != null) return error.InvalidFormat;
+            extension_metadata = entry.value;
+            continue;
+        }
+        user_count += 1;
+    }
+    if (extension_metadata != null and extension_name == null) return error.InvalidFormat;
+
+    if (user_count == metadata.len) {
+        return .{
+            .user_metadata = metadata,
+            .extension_name = extension_name,
+            .extension_metadata = extension_metadata,
+        };
+    }
+    if (user_count == 0) {
+        return .{
+            .user_metadata = null,
+            .extension_name = extension_name,
+            .extension_metadata = extension_metadata,
+        };
+    }
+
+    const user_md = try allocator.alloc(datatype.KeyValue, user_count);
+    var idx: usize = 0;
+    for (metadata) |entry| {
+        if (std.mem.eql(u8, entry.key, extension_name_key) or std.mem.eql(u8, entry.key, extension_metadata_key)) {
+            continue;
+        }
+        user_md[idx] = entry;
+        idx += 1;
+    }
+
+    return .{
+        .user_metadata = user_md,
+        .extension_name = extension_name,
+        .extension_metadata = extension_metadata,
+    };
 }
 
 fn childPtrsSchema(c_schema: *ArrowSchema) ?[]?*ArrowSchema {
@@ -1226,6 +1461,44 @@ test "c data schema export/import roundtrip" {
     try std.testing.expect(c_schema.release == null);
 }
 
+test "c data schema export/import roundtrip preserves extension metadata" {
+    const allocator = std.testing.allocator;
+
+    const storage_ty = DataType{ .int32 = {} };
+    const ext_ty = DataType{
+        .extension = .{
+            .name = "com.example.int32_ext",
+            .storage_type = &storage_ty,
+            .metadata = "v1",
+        },
+    };
+    const field_md = [_]datatype.KeyValue{
+        .{ .key = "owner", .value = "ffi" },
+    };
+    const fields = [_]Field{
+        .{ .name = "ext_i32", .data_type = &ext_ty, .nullable = true, .metadata = field_md[0..] },
+    };
+    const schema = Schema{ .fields = fields[0..] };
+
+    var c_schema = try exportSchema(allocator, schema);
+    defer if (c_schema.release) |release_fn| release_fn(&c_schema);
+
+    var imported = try importSchemaOwned(allocator, &c_schema);
+    defer imported.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), imported.schema.fields.len);
+    try std.testing.expect(imported.schema.fields[0].data_type.* == .extension);
+    const ext = imported.schema.fields[0].data_type.extension;
+    try std.testing.expectEqualStrings("com.example.int32_ext", ext.name);
+    try std.testing.expectEqualStrings("v1", ext.metadata.?);
+    try std.testing.expect(ext.storage_type.* == .int32);
+    try std.testing.expect(imported.schema.fields[0].metadata != null);
+    try std.testing.expectEqual(@as(usize, 1), imported.schema.fields[0].metadata.?.len);
+    try std.testing.expectEqualStrings("owner", imported.schema.fields[0].metadata.?[0].key);
+    try std.testing.expectEqualStrings("ffi", imported.schema.fields[0].metadata.?[0].value);
+    try std.testing.expect(c_schema.release == null);
+}
+
 test "c data array export/import zero-copy smoke" {
     const allocator = std.testing.allocator;
 
@@ -1257,6 +1530,49 @@ test "c data array export/import zero-copy smoke" {
     }
 
     // importArray should transfer ownership and clear producer release hook.
+    try std.testing.expect(c_array.release == null);
+}
+
+test "c data array export/import handles extension layout via storage type" {
+    const allocator = std.testing.allocator;
+
+    const storage_ty = DataType{ .int32 = {} };
+    const ext_ty = DataType{
+        .extension = .{
+            .name = "com.example.int32_ext",
+            .storage_type = &storage_ty,
+            .metadata = "v1",
+        },
+    };
+
+    var values_builder = try @import("../array/primitive_array.zig").PrimitiveBuilder(i32, DataType{ .int32 = {} }).init(allocator, 3);
+    defer values_builder.deinit();
+    try values_builder.append(7);
+    try values_builder.appendNull();
+    try values_builder.append(11);
+    var values = try values_builder.finish();
+    defer values.release();
+
+    var ext_builder = try @import("../array/extension_array.zig").ExtensionBuilder.init(allocator, ext_ty.extension);
+    defer ext_builder.deinit();
+    var ext_arr = try ext_builder.finish(values);
+    defer ext_arr.release();
+
+    var c_array = try exportArray(allocator, ext_arr);
+    var imported = try importArray(allocator, &ext_ty, &c_array);
+    defer imported.release();
+
+    try std.testing.expect(imported.data().data_type == .extension);
+    const ext = imported.data().data_type.extension;
+    try std.testing.expectEqualStrings("com.example.int32_ext", ext.name);
+    try std.testing.expectEqualStrings("v1", ext.metadata.?);
+    try std.testing.expect(ext.storage_type.* == .int32);
+
+    const ints = @import("../array/primitive_array.zig").PrimitiveArray(i32){ .data = imported.data() };
+    try std.testing.expectEqual(@as(i32, 7), ints.value(0));
+    try std.testing.expect(ints.isNull(1));
+    try std.testing.expectEqual(@as(i32, 11), ints.value(2));
+
     try std.testing.expect(c_array.release == null);
 }
 
