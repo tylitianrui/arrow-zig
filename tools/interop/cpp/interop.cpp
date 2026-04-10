@@ -134,6 +134,37 @@ arrow::Status GenerateRee(const std::string& path, ContainerMode container) {
   return out->Close();
 }
 
+std::shared_ptr<arrow::Schema> ExtensionSchema() {
+  auto md = arrow::key_value_metadata(
+      {"ARROW:extension:name", "ARROW:extension:metadata", "owner"},
+      {"com.example.int32_ext", "v1", "interop"});
+  return arrow::schema({arrow::field("ext_i32", arrow::int32(), true, md)});
+}
+
+arrow::Status GenerateExtension(const std::string& path, ContainerMode container) {
+  auto schema = ExtensionSchema();
+
+  arrow::Int32Builder values_builder;
+  ARROW_RETURN_NOT_OK(values_builder.Append(7));
+  ARROW_RETURN_NOT_OK(values_builder.AppendNull());
+  ARROW_RETURN_NOT_OK(values_builder.Append(11));
+  std::shared_ptr<arrow::Array> values;
+  ARROW_RETURN_NOT_OK(values_builder.Finish(&values));
+
+  auto batch = arrow::RecordBatch::Make(schema, 3, {values});
+  ARROW_ASSIGN_OR_RAISE(auto out, arrow::io::FileOutputStream::Open(path));
+  if (container == ContainerMode::kStream) {
+    ARROW_ASSIGN_OR_RAISE(auto writer, arrow::ipc::MakeStreamWriter(out.get(), schema));
+    ARROW_RETURN_NOT_OK(writer->WriteRecordBatch(*batch));
+    ARROW_RETURN_NOT_OK(writer->Close());
+  } else {
+    ARROW_ASSIGN_OR_RAISE(auto writer, arrow::ipc::MakeFileWriter(out.get(), schema));
+    ARROW_RETURN_NOT_OK(writer->WriteRecordBatch(*batch));
+    ARROW_RETURN_NOT_OK(writer->Close());
+  }
+  return out->Close();
+}
+
 arrow::Status Validate(const std::string& path, ContainerMode container) {
   // Expected decoded content:
   // - one batch with 3 rows
@@ -306,11 +337,63 @@ arrow::Status ValidateRee(const std::string& path, ContainerMode container) {
   return arrow::Status::OK();
 }
 
+arrow::Status ValidateExtension(const std::string& path, ContainerMode container) {
+  ARROW_ASSIGN_OR_RAISE(auto in, arrow::io::ReadableFile::Open(path));
+  std::shared_ptr<arrow::Schema> schema;
+  std::shared_ptr<arrow::RecordBatch> batch;
+  std::shared_ptr<arrow::RecordBatch> extra;
+  if (container == ContainerMode::kStream) {
+    ARROW_ASSIGN_OR_RAISE(auto reader, arrow::ipc::RecordBatchStreamReader::Open(in));
+    schema = reader->schema();
+    ARROW_RETURN_NOT_OK(reader->ReadNext(&batch));
+    ARROW_RETURN_NOT_OK(reader->ReadNext(&extra));
+  } else {
+    ARROW_ASSIGN_OR_RAISE(auto reader, arrow::ipc::RecordBatchFileReader::Open(in));
+    schema = reader->schema();
+    if (reader->num_record_batches() > 0) {
+      ARROW_ASSIGN_OR_RAISE(batch, reader->ReadRecordBatch(0));
+    }
+    if (reader->num_record_batches() > 1) {
+      ARROW_ASSIGN_OR_RAISE(extra, reader->ReadRecordBatch(1));
+    }
+  }
+  if (schema->num_fields() != 1) return arrow::Status::Invalid("invalid field count");
+  auto field = schema->field(0);
+  if (field->name() != "ext_i32" || field->type()->id() != arrow::Type::INT32) {
+    return arrow::Status::Invalid("invalid extension field");
+  }
+  auto md = field->metadata();
+  if (!md) return arrow::Status::Invalid("missing extension metadata");
+  const int name_idx = md->FindKey("ARROW:extension:name");
+  const int meta_idx = md->FindKey("ARROW:extension:metadata");
+  const int owner_idx = md->FindKey("owner");
+  if (name_idx < 0 || md->value(name_idx) != "com.example.int32_ext") {
+    return arrow::Status::Invalid("invalid extension name");
+  }
+  if (meta_idx < 0 || md->value(meta_idx) != "v1") {
+    return arrow::Status::Invalid("invalid extension metadata");
+  }
+  if (owner_idx < 0 || md->value(owner_idx) != "interop") {
+    return arrow::Status::Invalid("invalid owner metadata");
+  }
+
+  if (!batch) return arrow::Status::Invalid("missing batch");
+  if (batch->num_rows() != 3) return arrow::Status::Invalid("invalid row count");
+  if (extra) return arrow::Status::Invalid("unexpected extra batch");
+
+  auto values = std::static_pointer_cast<arrow::Int32Array>(batch->column(0));
+  if (values->Value(0) != 7 || !values->IsNull(1) || values->Value(2) != 11) {
+    return arrow::Status::Invalid("invalid extension values");
+  }
+  return arrow::Status::OK();
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
   if (argc < 3 || argc > 5) {
-    std::cerr << "usage: interop_cpp <generate|validate> <path.arrow> [canonical|dict-delta|ree] [stream|file]\n";
+    std::cerr
+        << "usage: interop_cpp <generate|validate> <path.arrow> [canonical|dict-delta|ree|extension] [stream|file]\n";
     return 2;
   }
   const std::string mode = argv[1];
@@ -330,7 +413,8 @@ int main(int argc, char** argv) {
         else if (arg4 == "file")
           container = ContainerMode::kFile;
         else {
-          std::cerr << "usage: interop_cpp <generate|validate> <path.arrow> [canonical|dict-delta|ree] [stream|file]\n";
+          std::cerr
+              << "usage: interop_cpp <generate|validate> <path.arrow> [canonical|dict-delta|ree|extension] [stream|file]\n";
           return 2;
         }
       }
@@ -349,6 +433,8 @@ int main(int argc, char** argv) {
   if (mode == "validate" && case_name == "dict-delta") st = ValidateDictDelta(path, container);
   if (mode == "generate" && case_name == "ree") st = GenerateRee(path, container);
   if (mode == "validate" && case_name == "ree") st = ValidateRee(path, container);
+  if (mode == "generate" && case_name == "extension") st = GenerateExtension(path, container);
+  if (mode == "validate" && case_name == "extension") st = ValidateExtension(path, container);
   if (!st.ok()) {
     std::cerr << st.ToString() << "\n";
     return 1;

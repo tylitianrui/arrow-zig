@@ -172,9 +172,42 @@ def validate_complex(in_path: pathlib.Path, container: str) -> None:
         raise RuntimeError("invalid timestamp values")
 
 
+def validate_extension(in_path: pathlib.Path, container: str) -> None:
+    with _open_reader(in_path, container) as reader:
+        schema = reader.schema
+        if len(schema) != 1:
+            raise RuntimeError("invalid schema field count")
+        field = schema[0]
+        if field.name != "ext_i32":
+            raise RuntimeError("invalid extension field name")
+        if field.type != pa.int32():
+            raise RuntimeError("invalid extension storage type")
+        md = field.metadata
+        if md is None:
+            raise RuntimeError("missing extension metadata")
+        if md.get(b"ARROW:extension:name") != b"com.example.int32_ext":
+            raise RuntimeError("invalid extension name")
+        if md.get(b"ARROW:extension:metadata") != b"v1":
+            raise RuntimeError("invalid extension metadata")
+        if md.get(b"owner") != b"interop":
+            raise RuntimeError("invalid owner metadata")
+        batches = _read_all_batches(reader)
+
+    if len(batches) != 1:
+        raise RuntimeError("expected exactly one batch")
+    batch = batches[0]
+    if batch.num_rows != 3:
+        raise RuntimeError("invalid row count")
+    if batch.column(0).to_pylist() != [7, None, 11]:
+        raise RuntimeError("invalid extension values")
+
+
 def main() -> int:
     if len(sys.argv) not in (2, 3, 4):
-        print("usage: pyarrow_validate.py <in.arrow> [canonical|dict-delta|ree|complex] [stream|file]", file=sys.stderr)
+        print(
+            "usage: pyarrow_validate.py <in.arrow> [canonical|dict-delta|ree|complex|extension] [stream|file]",
+            file=sys.stderr,
+        )
         return 2
 
     in_path = pathlib.Path(sys.argv[1])
@@ -200,6 +233,9 @@ def main() -> int:
         return 0
     if mode == "complex":
         validate_complex(in_path, container)
+        return 0
+    if mode == "extension":
+        validate_extension(in_path, container)
         return 0
     print(f"unknown mode: {mode}", file=sys.stderr)
     return 2

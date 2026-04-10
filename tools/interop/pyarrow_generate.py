@@ -143,9 +143,32 @@ def generate_complex(out_path: pathlib.Path, container: str) -> None:
         writer.write_batch(batch)
 
 
+def generate_extension(out_path: pathlib.Path, container: str) -> None:
+    schema = pa.schema(
+        [
+            pa.field(
+                "ext_i32",
+                pa.int32(),
+                nullable=True,
+                metadata={
+                    b"ARROW:extension:name": b"com.example.int32_ext",
+                    b"ARROW:extension:metadata": b"v1",
+                    b"owner": b"interop",
+                },
+            )
+        ]
+    )
+    batch = pa.record_batch([pa.array([7, None, 11], type=pa.int32())], schema=schema)
+    with _new_writer(out_path, schema, container) as writer:
+        writer.write_batch(batch)
+
+
 def main() -> int:
     if len(sys.argv) not in (2, 3, 4):
-        print("usage: pyarrow_generate.py <out.arrow> [canonical|dict-delta|ree|complex] [stream|file]", file=sys.stderr)
+        print(
+            "usage: pyarrow_generate.py <out.arrow> [canonical|dict-delta|ree|complex|extension] [stream|file]",
+            file=sys.stderr,
+        )
         return 2
 
     out_path = pathlib.Path(sys.argv[1])
@@ -173,6 +196,9 @@ def main() -> int:
         return 0
     if mode == "complex":
         generate_complex(out_path, container)
+        return 0
+    if mode == "extension":
+        generate_extension(out_path, container)
         return 0
     print(f"unknown mode: {mode}", file=sys.stderr)
     return 2

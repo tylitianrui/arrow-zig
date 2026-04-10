@@ -1,6 +1,7 @@
 use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
+use std::collections::HashMap;
 
 use arrow_array::builder::StringDictionaryBuilder;
 use arrow_array::types::Int32Type;
@@ -104,6 +105,35 @@ fn ree_schema() -> Arc<Schema> {
         ),
         true,
     )]))
+}
+
+fn extension_schema() -> Arc<Schema> {
+    let mut md = HashMap::new();
+    md.insert("ARROW:extension:name".to_string(), "com.example.int32_ext".to_string());
+    md.insert("ARROW:extension:metadata".to_string(), "v1".to_string());
+    md.insert("owner".to_string(), "interop".to_string());
+    Arc::new(Schema::new(vec![Field::new("ext_i32", DataType::Int32, true).with_metadata(md)]))
+}
+
+fn generate_extension(path: &Path, container: ContainerMode) -> Result<(), Box<dyn std::error::Error>> {
+    let schema = extension_schema();
+    let values: ArrayRef = Arc::new(Int32Array::from(vec![Some(7), None, Some(11)]));
+    let batch = RecordBatch::try_new(schema.clone(), vec![values])?;
+
+    let file = File::create(path)?;
+    match container {
+        ContainerMode::Stream => {
+            let mut writer = StreamWriter::try_new(file, &schema)?;
+            writer.write(&batch)?;
+            writer.finish()?;
+        }
+        ContainerMode::File => {
+            let mut writer = FileWriter::try_new(file, &schema)?;
+            writer.write(&batch)?;
+            writer.finish()?;
+        }
+    }
+    Ok(())
 }
 
 fn generate_ree(path: &Path, container: ContainerMode) -> Result<(), Box<dyn std::error::Error>> {
@@ -296,6 +326,49 @@ fn validate_ree(path: &Path, container: ContainerMode) -> Result<(), Box<dyn std
     Ok(())
 }
 
+fn validate_extension(path: &Path, container: ContainerMode) -> Result<(), Box<dyn std::error::Error>> {
+    let file = File::open(path)?;
+    let mut reader = match container {
+        ContainerMode::Stream => EitherReader::Stream(StreamReader::try_new(file, None)?),
+        ContainerMode::File => EitherReader::File(FileReader::try_new(file, None)?),
+    };
+    let schema = reader.schema();
+    if schema.fields().len() != 1 {
+        return Err("invalid schema field count".into());
+    }
+    let field = schema.field(0);
+    if field.name() != "ext_i32" || field.data_type() != &DataType::Int32 {
+        return Err("invalid extension field".into());
+    }
+    let md = field.metadata();
+    if md.get("ARROW:extension:name").map(|v| v.as_str()) != Some("com.example.int32_ext") {
+        return Err("invalid extension name".into());
+    }
+    if md.get("ARROW:extension:metadata").map(|v| v.as_str()) != Some("v1") {
+        return Err("invalid extension metadata".into());
+    }
+    if md.get("owner").map(|v| v.as_str()) != Some("interop") {
+        return Err("invalid owner metadata".into());
+    }
+
+    let batch = reader.next_batch()?.ok_or("missing batch")?;
+    if reader.next_batch()?.is_some() {
+        return Err("unexpected extra batch".into());
+    }
+    if batch.num_rows() != 3 {
+        return Err("invalid row count".into());
+    }
+    let values = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .ok_or("extension values downcast failed")?;
+    if values.value(0) != 7 || !values.is_null(1) || values.value(2) != 11 {
+        return Err("invalid extension values".into());
+    }
+    Ok(())
+}
+
 enum EitherReader {
     Stream(StreamReader<File>),
     File(FileReader<File>),
@@ -334,7 +407,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if arg4 == "stream" || arg4 == "file" {
                     container = if arg4 == "file" { ContainerMode::File } else { ContainerMode::Stream };
                 } else {
-                    return Err("usage: <generate|validate> <path.arrow> [canonical|dict-delta|ree] [stream|file]".into());
+                    return Err(
+                        "usage: <generate|validate> <path.arrow> [canonical|dict-delta|ree|extension] [stream|file]"
+                            .into(),
+                    );
                 }
             }
         }
@@ -353,6 +429,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ("validate", "dict-delta") => validate_dict_delta(path, container),
         ("generate", "ree") => generate_ree(path, container),
         ("validate", "ree") => validate_ree(path, container),
-        _ => Err("usage: <generate|validate> <path.arrow> [canonical|dict-delta|ree] [stream|file]".into()),
+        ("generate", "extension") => generate_extension(path, container),
+        ("validate", "extension") => validate_extension(path, container),
+        _ => Err("usage: <generate|validate> <path.arrow> [canonical|dict-delta|ree|extension] [stream|file]".into()),
     }
 }
