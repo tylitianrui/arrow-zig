@@ -450,7 +450,6 @@ fn buildTypeT(allocator: std.mem.Allocator, dt: DataType) WriterError!fbs.TypeT 
         .run_end_encoded => .{ .RunEndEncoded = try allocT(allocator, fbs.RunEndEncodedT, .{}) },
         .extension => |ext| try buildTypeT(allocator, ext.storage_type.*),
         .dictionary => StreamError.UnsupportedType,
-        else => StreamError.UnsupportedType,
     };
 }
 

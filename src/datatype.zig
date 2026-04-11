@@ -48,11 +48,11 @@ pub const TypeId = enum(u8) {
     large_list_view = 42,
     decimal32 = 43,
     decimal64 = 44,
-
-    // Sentinel used for range checks and iteration bounds.
-    // Mirrors the C++ Arrow MAX_ID/Type::MAX and similar Rust enum bounds.
-    max_id = 45,
 };
+
+// Sentinel used for range checks and iteration bounds.
+// This is intentionally not a real DataType variant.
+pub const max_type_id: u8 = 45;
 
 pub const TimeUnit = enum(u8) {
     second = 0,

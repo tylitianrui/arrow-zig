@@ -943,7 +943,7 @@ auto values_child   = arrow::MakeArray(ree_data->child_data[1]);
 └─────────────────────────────────────┘
 ```
 
-注：本节共覆盖 45 种真实数据类型；TypeId 中的 max_id 是范围哨兵，不是可实例化类型。
+注：本节共覆盖 45 种真实数据类型；上界哨兵已改为独立常量 `max_type_id`，不是可实例化类型。
 
 ### 4.8 单页速查表（打印版）
 
@@ -1031,7 +1031,7 @@ Quick Rules:
   2) 嵌套 = parent 描述切片范围，真实值在 children
   3) 编码 = Dictionary/REE 通过“索引或游程”间接取值
   4) Union 无 validity，null 语义由类型系统/约定表达
-  5) TypeId.max_id 是哨兵，不是可实例化类型
+  5) `max_type_id` 是内部上界哨兵，不是可实例化类型
 ```
 
 ---
