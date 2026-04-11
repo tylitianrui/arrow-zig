@@ -141,6 +141,46 @@ std::shared_ptr<arrow::Schema> ExtensionSchema() {
   return arrow::schema({arrow::field("ext_i32", arrow::int32(), true, md)});
 }
 
+std::shared_ptr<arrow::Schema> ViewSchema() {
+  return arrow::schema({
+      arrow::field("sv", arrow::utf8_view(), true),
+      arrow::field("bv", arrow::binary_view(), true),
+  });
+}
+
+arrow::Status GenerateView(const std::string& path, ContainerMode container) {
+  auto schema = ViewSchema();
+
+  arrow::StringViewBuilder sv_builder;
+  ARROW_RETURN_NOT_OK(sv_builder.Append("short"));
+  ARROW_RETURN_NOT_OK(sv_builder.AppendNull());
+  ARROW_RETURN_NOT_OK(sv_builder.Append("tiny"));
+  ARROW_RETURN_NOT_OK(sv_builder.Append("this string is longer than twelve"));
+  std::shared_ptr<arrow::Array> sv;
+  ARROW_RETURN_NOT_OK(sv_builder.Finish(&sv));
+
+  arrow::BinaryViewBuilder bv_builder;
+  ARROW_RETURN_NOT_OK(bv_builder.Append("ab", 2));
+  ARROW_RETURN_NOT_OK(bv_builder.Append("this-binary-view-is-long", 24));
+  ARROW_RETURN_NOT_OK(bv_builder.AppendNull());
+  ARROW_RETURN_NOT_OK(bv_builder.Append("xy", 2));
+  std::shared_ptr<arrow::Array> bv;
+  ARROW_RETURN_NOT_OK(bv_builder.Finish(&bv));
+
+  auto batch = arrow::RecordBatch::Make(schema, 4, {sv, bv});
+  ARROW_ASSIGN_OR_RAISE(auto out, arrow::io::FileOutputStream::Open(path));
+  if (container == ContainerMode::kStream) {
+    ARROW_ASSIGN_OR_RAISE(auto writer, arrow::ipc::MakeStreamWriter(out.get(), schema));
+    ARROW_RETURN_NOT_OK(writer->WriteRecordBatch(*batch));
+    ARROW_RETURN_NOT_OK(writer->Close());
+  } else {
+    ARROW_ASSIGN_OR_RAISE(auto writer, arrow::ipc::MakeFileWriter(out.get(), schema));
+    ARROW_RETURN_NOT_OK(writer->WriteRecordBatch(*batch));
+    ARROW_RETURN_NOT_OK(writer->Close());
+  }
+  return out->Close();
+}
+
 arrow::Status GenerateExtension(const std::string& path, ContainerMode container) {
   auto schema = ExtensionSchema();
 
@@ -388,12 +428,60 @@ arrow::Status ValidateExtension(const std::string& path, ContainerMode container
   return arrow::Status::OK();
 }
 
+arrow::Status ValidateView(const std::string& path, ContainerMode container) {
+  ARROW_ASSIGN_OR_RAISE(auto in, arrow::io::ReadableFile::Open(path));
+  std::shared_ptr<arrow::Schema> schema;
+  std::shared_ptr<arrow::RecordBatch> batch;
+  std::shared_ptr<arrow::RecordBatch> extra;
+  if (container == ContainerMode::kStream) {
+    ARROW_ASSIGN_OR_RAISE(auto reader, arrow::ipc::RecordBatchStreamReader::Open(in));
+    schema = reader->schema();
+    ARROW_RETURN_NOT_OK(reader->ReadNext(&batch));
+    ARROW_RETURN_NOT_OK(reader->ReadNext(&extra));
+  } else {
+    ARROW_ASSIGN_OR_RAISE(auto reader, arrow::ipc::RecordBatchFileReader::Open(in));
+    schema = reader->schema();
+    if (reader->num_record_batches() > 0) {
+      ARROW_ASSIGN_OR_RAISE(batch, reader->ReadRecordBatch(0));
+    }
+    if (reader->num_record_batches() > 1) {
+      ARROW_ASSIGN_OR_RAISE(extra, reader->ReadRecordBatch(1));
+    }
+  }
+
+  if (schema->num_fields() != 2) return arrow::Status::Invalid("invalid field count");
+  if (schema->field(0)->name() != "sv" || schema->field(0)->type()->id() != arrow::Type::STRING_VIEW) {
+    return arrow::Status::Invalid("invalid sv field");
+  }
+  if (schema->field(1)->name() != "bv" || schema->field(1)->type()->id() != arrow::Type::BINARY_VIEW) {
+    return arrow::Status::Invalid("invalid bv field");
+  }
+  if (!batch) return arrow::Status::Invalid("missing batch");
+  if (batch->num_rows() != 4) return arrow::Status::Invalid("invalid row count");
+  if (extra) return arrow::Status::Invalid("unexpected extra batch");
+
+  auto sv = std::static_pointer_cast<arrow::StringViewArray>(batch->column(0));
+  auto bv = std::static_pointer_cast<arrow::BinaryViewArray>(batch->column(1));
+  if (sv->GetString(0) != "short" || !sv->IsNull(1) || sv->GetString(2) != "tiny" ||
+      sv->GetString(3) != "this string is longer than twelve") {
+    return arrow::Status::Invalid("invalid sv values");
+  }
+
+  const auto b0 = bv->GetView(0);
+  const auto b1 = bv->GetView(1);
+  const auto b3 = bv->GetView(3);
+  if (b0 != "ab" || b1 != "this-binary-view-is-long" || !bv->IsNull(2) || b3 != "xy") {
+    return arrow::Status::Invalid("invalid bv values");
+  }
+  return arrow::Status::OK();
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
   if (argc < 3 || argc > 5) {
     std::cerr
-        << "usage: interop_cpp <generate|validate> <path.arrow> [canonical|dict-delta|ree|extension] [stream|file]\n";
+        << "usage: interop_cpp <generate|validate> <path.arrow> [canonical|dict-delta|ree|extension|view] [stream|file]\n";
     return 2;
   }
   const std::string mode = argv[1];
@@ -414,7 +502,7 @@ int main(int argc, char** argv) {
           container = ContainerMode::kFile;
         else {
           std::cerr
-              << "usage: interop_cpp <generate|validate> <path.arrow> [canonical|dict-delta|ree|extension] [stream|file]\n";
+              << "usage: interop_cpp <generate|validate> <path.arrow> [canonical|dict-delta|ree|extension|view] [stream|file]\n";
           return 2;
         }
       }
@@ -435,6 +523,8 @@ int main(int argc, char** argv) {
   if (mode == "validate" && case_name == "ree") st = ValidateRee(path, container);
   if (mode == "generate" && case_name == "extension") st = GenerateExtension(path, container);
   if (mode == "validate" && case_name == "extension") st = ValidateExtension(path, container);
+  if (mode == "generate" && case_name == "view") st = GenerateView(path, container);
+  if (mode == "validate" && case_name == "view") st = ValidateView(path, container);
   if (!st.ok()) {
     std::cerr << st.ToString() << "\n";
     return 1;

@@ -3,9 +3,12 @@ use std::path::Path;
 use std::sync::Arc;
 use std::collections::HashMap;
 
-use arrow_array::builder::StringDictionaryBuilder;
+use arrow_array::builder::{BinaryViewBuilder, StringDictionaryBuilder, StringViewBuilder};
 use arrow_array::types::Int32Type;
-use arrow_array::{Array, ArrayRef, DictionaryArray, Int32Array, RecordBatch, RunArray, StringArray};
+use arrow_array::{
+    Array, ArrayRef, BinaryViewArray, DictionaryArray, Int32Array, RecordBatch, RunArray, StringArray,
+    StringViewArray,
+};
 use arrow_ipc::reader::{FileReader, StreamReader};
 use arrow_ipc::writer::{FileWriter, StreamWriter};
 use arrow_schema::{DataType, Field, Schema};
@@ -113,6 +116,47 @@ fn extension_schema() -> Arc<Schema> {
     md.insert("ARROW:extension:metadata".to_string(), "v1".to_string());
     md.insert("owner".to_string(), "interop".to_string());
     Arc::new(Schema::new(vec![Field::new("ext_i32", DataType::Int32, true).with_metadata(md)]))
+}
+
+fn view_schema() -> Arc<Schema> {
+    Arc::new(Schema::new(vec![
+        Field::new("sv", DataType::Utf8View, true),
+        Field::new("bv", DataType::BinaryView, true),
+    ]))
+}
+
+fn generate_view(path: &Path, container: ContainerMode) -> Result<(), Box<dyn std::error::Error>> {
+    let schema = view_schema();
+
+    let mut sv_builder = StringViewBuilder::new();
+    sv_builder.append_value("short");
+    sv_builder.append_null();
+    sv_builder.append_value("tiny");
+    sv_builder.append_value("this string is longer than twelve");
+    let sv: ArrayRef = Arc::new(sv_builder.finish());
+
+    let mut bv_builder = BinaryViewBuilder::new();
+    bv_builder.append_value(b"ab");
+    bv_builder.append_value(b"this-binary-view-is-long");
+    bv_builder.append_null();
+    bv_builder.append_value(b"xy");
+    let bv: ArrayRef = Arc::new(bv_builder.finish());
+
+    let batch = RecordBatch::try_new(schema.clone(), vec![sv, bv])?;
+    let file = File::create(path)?;
+    match container {
+        ContainerMode::Stream => {
+            let mut writer = StreamWriter::try_new(file, &schema)?;
+            writer.write(&batch)?;
+            writer.finish()?;
+        }
+        ContainerMode::File => {
+            let mut writer = FileWriter::try_new(file, &schema)?;
+            writer.write(&batch)?;
+            writer.finish()?;
+        }
+    }
+    Ok(())
 }
 
 fn generate_extension(path: &Path, container: ContainerMode) -> Result<(), Box<dyn std::error::Error>> {
@@ -369,6 +413,53 @@ fn validate_extension(path: &Path, container: ContainerMode) -> Result<(), Box<d
     Ok(())
 }
 
+fn validate_view(path: &Path, container: ContainerMode) -> Result<(), Box<dyn std::error::Error>> {
+    let file = File::open(path)?;
+    let mut reader = match container {
+        ContainerMode::Stream => EitherReader::Stream(StreamReader::try_new(file, None)?),
+        ContainerMode::File => EitherReader::File(FileReader::try_new(file, None)?),
+    };
+
+    let schema = reader.schema();
+    if schema.fields().len() != 2 {
+        return Err("invalid schema field count".into());
+    }
+    if schema.field(0).name() != "sv" || schema.field(0).data_type() != &DataType::Utf8View {
+        return Err("invalid sv field".into());
+    }
+    if schema.field(1).name() != "bv" || schema.field(1).data_type() != &DataType::BinaryView {
+        return Err("invalid bv field".into());
+    }
+
+    let batch = reader.next_batch()?.ok_or("missing batch")?;
+    if reader.next_batch()?.is_some() {
+        return Err("unexpected extra batch".into());
+    }
+    if batch.num_rows() != 4 {
+        return Err("invalid row count".into());
+    }
+
+    let sv = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<StringViewArray>()
+        .ok_or("sv downcast failed")?;
+    let bv = batch
+        .column(1)
+        .as_any()
+        .downcast_ref::<BinaryViewArray>()
+        .ok_or("bv downcast failed")?;
+
+    if sv.value(0) != "short" || !sv.is_null(1) || sv.value(2) != "tiny" || sv.value(3) != "this string is longer than twelve" {
+        return Err("invalid sv values".into());
+    }
+    if bv.value(0) != b"ab" || bv.value(1) != b"this-binary-view-is-long" || !bv.is_null(2) || bv.value(3) != b"xy" {
+        return Err("invalid bv values".into());
+    }
+
+    Ok(())
+}
+
 enum EitherReader {
     Stream(StreamReader<File>),
     File(FileReader<File>),
@@ -408,7 +499,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     container = if arg4 == "file" { ContainerMode::File } else { ContainerMode::Stream };
                 } else {
                     return Err(
-                        "usage: <generate|validate> <path.arrow> [canonical|dict-delta|ree|extension] [stream|file]"
+                        "usage: <generate|validate> <path.arrow> [canonical|dict-delta|ree|extension|view] [stream|file]"
                             .into(),
                     );
                 }
@@ -431,6 +522,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ("validate", "ree") => validate_ree(path, container),
         ("generate", "extension") => generate_extension(path, container),
         ("validate", "extension") => validate_extension(path, container),
-        _ => Err("usage: <generate|validate> <path.arrow> [canonical|dict-delta|ree|extension] [stream|file]".into()),
+        ("generate", "view") => generate_view(path, container),
+        ("validate", "view") => validate_view(path, container),
+        _ => Err("usage: <generate|validate> <path.arrow> [canonical|dict-delta|ree|extension|view] [stream|file]".into()),
     }
 }

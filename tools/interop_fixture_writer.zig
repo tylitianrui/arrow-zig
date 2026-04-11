@@ -20,6 +20,7 @@ const FixtureCase = enum {
     ree,
     complex,
     extension,
+    view,
 };
 
 const ContainerMode = enum {
@@ -36,7 +37,7 @@ pub fn main() !void {
     defer args.deinit();
     _ = args.next(); // exe
     const out_path = args.next() orelse {
-        std.log.err("usage: interop-fixture-writer <out.arrow> [canonical|dict-delta|ree|complex|extension] [stream|file]", .{});
+        std.log.err("usage: interop-fixture-writer <out.arrow> [canonical|dict-delta|ree|complex|extension|view] [stream|file]", .{});
         return error.InvalidArgs;
     };
     const fixture_case: FixtureCase = blk: {
@@ -46,6 +47,7 @@ pub fn main() !void {
         if (std.mem.eql(u8, mode, "ree")) break :blk .ree;
         if (std.mem.eql(u8, mode, "complex")) break :blk .complex;
         if (std.mem.eql(u8, mode, "extension")) break :blk .extension;
+        if (std.mem.eql(u8, mode, "view")) break :blk .view;
         std.log.err("unknown fixture mode: {s}", .{mode});
         return error.InvalidArgs;
     };
@@ -57,7 +59,7 @@ pub fn main() !void {
         return error.InvalidArgs;
     };
     if (args.next() != null) {
-        std.log.err("usage: interop-fixture-writer <out.arrow> [canonical|dict-delta|ree|complex|extension] [stream|file]", .{});
+        std.log.err("usage: interop-fixture-writer <out.arrow> [canonical|dict-delta|ree|complex|extension|view] [stream|file]", .{});
         return error.InvalidArgs;
     }
     if (container_mode == .file and fixture_case == .dict_delta) {
@@ -92,7 +94,43 @@ fn writeFixture(allocator: std.mem.Allocator, writer: anytype, fixture_case: Fix
         .ree => try writeReeFixture(allocator, writer),
         .complex => try writeComplexFixture(allocator, writer),
         .extension => try writeExtensionFixture(allocator, writer),
+        .view => try writeViewFixture(allocator, writer),
     }
+}
+
+fn writeViewFixture(allocator: std.mem.Allocator, writer: anytype) !void {
+    const sv_type = zarrow.DataType{ .string_view = {} };
+    const bv_type = zarrow.DataType{ .binary_view = {} };
+    const fields = [_]zarrow.Field{
+        .{ .name = "sv", .data_type = &sv_type, .nullable = true },
+        .{ .name = "bv", .data_type = &bv_type, .nullable = true },
+    };
+    const schema = zarrow.Schema{ .fields = fields[0..] };
+
+    var sv_builder = try zarrow.StringViewBuilder.init(allocator, 4, 32);
+    defer sv_builder.deinit();
+    try sv_builder.append("short");
+    try sv_builder.appendNull();
+    try sv_builder.append("tiny");
+    try sv_builder.append("this string is longer than twelve");
+    var sv = try sv_builder.finish();
+    defer sv.release();
+
+    var bv_builder = try zarrow.BinaryViewBuilder.init(allocator, 4, 32);
+    defer bv_builder.deinit();
+    try bv_builder.append("ab");
+    try bv_builder.append("this-binary-view-is-long");
+    try bv_builder.appendNull();
+    try bv_builder.append("xy");
+    var bv = try bv_builder.finish();
+    defer bv.release();
+
+    var batch = try zarrow.RecordBatch.initBorrowed(allocator, schema, &[_]zarrow.ArrayRef{ sv, bv });
+    defer batch.deinit();
+
+    try writer.writeSchema(schema);
+    try writer.writeRecordBatch(batch);
+    try writer.writeEnd();
 }
 
 fn writeExtensionFixture(allocator: std.mem.Allocator, writer: anytype) !void {

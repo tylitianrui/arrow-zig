@@ -234,6 +234,46 @@ pub const ArrayData = struct {
         if (prev_usize > data_len) return error.InvalidOffsets;
     }
 
+    fn readU32Le(bytes: []const u8) u32 {
+        std.debug.assert(bytes.len >= 4);
+        return @as(u32, bytes[0]) |
+            (@as(u32, bytes[1]) << 8) |
+            (@as(u32, bytes[2]) << 16) |
+            (@as(u32, bytes[3]) << 24);
+    }
+
+    fn validateByteViews(view_bytes: []const u8, total_len: usize, variadic: []const SharedBuffer) ValidationError!void {
+        if (view_bytes.len % 16 != 0) return error.InvalidOffsetBuffer;
+        const view_count = view_bytes.len / 16;
+        if (view_count < total_len) return error.BufferTooSmall;
+
+        var i: usize = 0;
+        while (i < total_len) : (i += 1) {
+            const start = i * 16;
+            const view = view_bytes[start .. start + 16];
+            const len_u32 = readU32Le(view[0..4]);
+            const len = std.math.cast(usize, len_u32) orelse return error.InvalidOffsets;
+
+            if (len <= 12) {
+                const pad_start = 4 + len;
+                for (view[pad_start..16]) |b| {
+                    if (b != 0) return error.InvalidOffsets;
+                }
+                continue;
+            }
+
+            const buffer_index = std.math.cast(usize, readU32Le(view[8..12])) orelse return error.InvalidOffsets;
+            if (buffer_index >= variadic.len) return error.InvalidOffsets;
+
+            const byte_offset = std.math.cast(usize, readU32Le(view[12..16])) orelse return error.InvalidOffsets;
+            const end = std.math.add(usize, byte_offset, len) catch return error.InvalidOffsets;
+            if (end > variadic[buffer_index].len()) return error.InvalidOffsets;
+            if (!std.mem.eql(u8, view[4..8], variadic[buffer_index].data[byte_offset .. byte_offset + 4])) {
+                return error.InvalidOffsets;
+            }
+        }
+    }
+
     // Run ends must be strictly increasing and cover the logical length.
     fn validateRunEndsSigned(comptime T: type, run_ends: []const T, total_len: usize) ValidationError!void {
         if (total_len == 0) {
@@ -309,6 +349,11 @@ pub const ArrayData = struct {
 
         switch (dt) {
             .null => {},
+            .string_view, .binary_view => {
+                if (self.buffers.len < 2) return error.InvalidBufferCount;
+                const variadic = if (self.buffers.len > 2) self.buffers[2..] else &[_]SharedBuffer{};
+                try validateByteViews(self.buffers[1].data, total_len, variadic);
+            },
             .bool => {
                 if (self.buffers.len < 2) return error.InvalidBufferCount;
                 const needed = bitmap.byteLength(total_len);
@@ -1006,4 +1051,47 @@ test "array data slice preserves offset length and recomputes null_count when ne
     try std.testing.expect(!sliced.isNull(2));
     try std.testing.expectEqual(@as(usize, 1), sliced.nullCount());
     try std.testing.expectEqual(@as(?usize, 1), sliced.null_count);
+}
+
+test "array data validateLayout accepts string_view with inline and variadic data" {
+    var views: [2 * 16]u8 align(buffer.ALIGNMENT) = [_]u8{0} ** (2 * 16);
+    const short = "hello";
+    views[0] = @intCast(short.len);
+    @memcpy(views[4 .. 4 + short.len], short);
+
+    const long = "abcdefghijklmnop"; // 16 bytes
+    views[16] = @intCast(long.len);
+    @memcpy(views[20..24], long[0..4]); // prefix
+    // buffer_index=0 and offset=0 are already zeroed.
+
+    const data = ArrayData{
+        .data_type = DataType{ .string_view = {} },
+        .length = 2,
+        .null_count = 0,
+        .buffers = &[_]SharedBuffer{
+            SharedBuffer.empty,
+            SharedBuffer.fromSlice(views[0..]),
+            SharedBuffer.fromSlice(long),
+        },
+    };
+    try data.validateLayout();
+}
+
+test "array data validateLayout rejects string_view with mismatched prefix" {
+    var views: [16]u8 align(buffer.ALIGNMENT) = [_]u8{0} ** 16;
+    const long = "abcdefghijklmnop"; // 16 bytes
+    views[0] = @intCast(long.len);
+    @memcpy(views[4..8], "wxyz"); // wrong prefix
+
+    const data = ArrayData{
+        .data_type = DataType{ .string_view = {} },
+        .length = 1,
+        .null_count = 0,
+        .buffers = &[_]SharedBuffer{
+            SharedBuffer.empty,
+            SharedBuffer.fromSlice(views[0..]),
+            SharedBuffer.fromSlice(long),
+        },
+    };
+    try std.testing.expectError(error.InvalidOffsets, data.validateLayout());
 }

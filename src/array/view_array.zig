@@ -1,11 +1,12 @@
 const std = @import("std");
+const bitmap = @import("../bitmap.zig");
 const buffer = @import("../buffer.zig");
 const datatype = @import("../datatype.zig");
+const array_utils = @import("array_utils.zig");
+const builder_state = @import("builder_state.zig");
 const array_data = @import("array_data.zig");
 const array_ref = @import("array_ref.zig");
 const primitive_array = @import("primitive_array.zig");
-const string_array = @import("string_array.zig");
-const binary_array = @import("binary_array.zig");
 const list_array = @import("list_array.zig");
 
 // View-type arrays/builders (string_view/binary_view/list_view/large_list_view).
@@ -17,12 +18,92 @@ pub const Field = datatype.Field;
 pub const ArrayData = array_data.ArrayData;
 pub const ArrayRef = array_ref.ArrayRef;
 pub const PrimitiveArray = primitive_array.PrimitiveArray;
+pub const BuilderState = builder_state.BuilderState;
 
 const STRING_VIEW_TYPE = DataType{ .string_view = {} };
 const BINARY_VIEW_TYPE = DataType{ .binary_view = {} };
+const MAX_INLINE_VIEW_LEN: usize = 12;
+const VIEW_RECORD_SIZE: usize = 16;
+const initValidityAllValid = array_utils.initValidityAllValid;
+const ensureBitmapCapacity = array_utils.ensureBitmapCapacity;
 
-pub const StringViewArray = string_array.StringArray;
-pub const BinaryViewArray = binary_array.BinaryArray;
+fn readU32Le(bytes: []const u8) u32 {
+    std.debug.assert(bytes.len >= 4);
+    return @as(u32, bytes[0]) |
+        (@as(u32, bytes[1]) << 8) |
+        (@as(u32, bytes[2]) << 16) |
+        (@as(u32, bytes[3]) << 24);
+}
+
+fn writeU32Le(dst: []u8, value: u32) void {
+    std.debug.assert(dst.len >= 4);
+    dst[0] = @truncate(value);
+    dst[1] = @truncate(value >> 8);
+    dst[2] = @truncate(value >> 16);
+    dst[3] = @truncate(value >> 24);
+}
+
+fn viewRecordAt(data: *const ArrayData, i: usize) []const u8 {
+    std.debug.assert(data.buffers.len >= 2);
+    const base = data.offset + i;
+    const start = base * VIEW_RECORD_SIZE;
+    const end = start + VIEW_RECORD_SIZE;
+    std.debug.assert(end <= data.buffers[1].len());
+    return data.buffers[1].data[start..end];
+}
+
+fn viewValueAt(data: *const ArrayData, i: usize) []const u8 {
+    std.debug.assert(i < data.length);
+    const record = viewRecordAt(data, i);
+    const len_u32 = readU32Le(record[0..4]);
+    const len = @as(usize, @intCast(len_u32));
+    if (len <= MAX_INLINE_VIEW_LEN) {
+        return record[4 .. 4 + len];
+    }
+
+    const buffer_index: usize = @intCast(readU32Le(record[8..12]));
+    const byte_offset: usize = @intCast(readU32Le(record[12..16]));
+    const variadic_idx = 2 + buffer_index;
+    std.debug.assert(variadic_idx < data.buffers.len);
+
+    const variadic = data.buffers[variadic_idx].data;
+    const end = byte_offset + len;
+    std.debug.assert(end <= variadic.len);
+    std.debug.assert(std.mem.eql(u8, record[4..8], variadic[byte_offset .. byte_offset + 4]));
+    return variadic[byte_offset..end];
+}
+
+pub const StringViewArray = struct {
+    data: *const ArrayData,
+
+    pub fn len(self: StringViewArray) usize {
+        return self.data.length;
+    }
+
+    pub fn isNull(self: StringViewArray, i: usize) bool {
+        return self.data.isNull(i);
+    }
+
+    pub fn value(self: StringViewArray, i: usize) []const u8 {
+        return viewValueAt(self.data, i);
+    }
+};
+
+pub const BinaryViewArray = struct {
+    data: *const ArrayData,
+
+    pub fn len(self: BinaryViewArray) usize {
+        return self.data.length;
+    }
+
+    pub fn isNull(self: BinaryViewArray, i: usize) bool {
+        return self.data.isNull(i);
+    }
+
+    pub fn value(self: BinaryViewArray, i: usize) []const u8 {
+        return viewValueAt(self.data, i);
+    }
+};
 
 pub const ListViewArray = struct {
     data: *const ArrayData,
@@ -91,12 +172,6 @@ pub const LargeListViewArray = struct {
         return self.data.children[0].slice(start, size);
     }
 };
-
-fn retagArrayRef(allocator: std.mem.Allocator, base_ref: ArrayRef, dtype: DataType) !ArrayRef {
-    var layout = base_ref.data().*;
-    layout.data_type = dtype;
-    return ArrayRef.fromBorrowed(allocator, layout);
-}
 
 fn convertListToView(
     comptime OffsetT: type,
@@ -173,123 +248,171 @@ fn convertListToView(
     return ArrayRef.fromOwnedUnsafe(allocator, out);
 }
 
-pub const StringViewBuilder = struct {
-    allocator: std.mem.Allocator,
-    inner: string_array.StringBuilder,
+fn ViewBuilder(comptime view_type: DataType) type {
+    return struct {
+        allocator: std.mem.Allocator,
+        views: OwnedBuffer,
+        data: OwnedBuffer,
+        validity: ?OwnedBuffer = null,
+        buffers: [3]SharedBuffer = undefined,
+        len: usize = 0,
+        null_count: usize = 0,
+        data_len: usize = 0,
+        state: BuilderState = .ready,
 
-    /// Initialize and return a new instance.
-    pub fn init(allocator: std.mem.Allocator, capacity: usize, data_capacity: usize) !StringViewBuilder {
-        return .{
-            .allocator = allocator,
-            .inner = try string_array.StringBuilder.init(allocator, capacity, data_capacity),
-        };
-    }
+        const Self = @This();
+        const BuilderError = error{ AlreadyFinished, NotFinished };
 
-    /// Release resources owned by this instance.
-    pub fn deinit(self: *StringViewBuilder) void {
-        self.inner.deinit();
-    }
+        pub fn init(allocator: std.mem.Allocator, capacity: usize, data_capacity: usize) !Self {
+            return .{
+                .allocator = allocator,
+                .views = try OwnedBuffer.init(allocator, capacity * VIEW_RECORD_SIZE),
+                .data = try OwnedBuffer.init(allocator, data_capacity),
+            };
+        }
 
-    /// Reset state while retaining reusable capacity when possible.
-    pub fn reset(self: *StringViewBuilder) !void {
-        try self.inner.reset();
-    }
+        pub fn deinit(self: *Self) void {
+            self.views.deinit();
+            self.data.deinit();
+            if (self.validity) |*valid| valid.deinit();
+        }
 
-    /// Clear state and release reusable buffers when required.
-    pub fn clear(self: *StringViewBuilder) !void {
-        try self.inner.clear();
-    }
+        pub fn reset(self: *Self) BuilderError!void {
+            if (self.state != .finished) return BuilderError.NotFinished;
+            self.len = 0;
+            self.null_count = 0;
+            self.data_len = 0;
+            self.state = .ready;
+        }
 
-    /// Append one logical value into the builder.
-    pub fn append(self: *StringViewBuilder, value: []const u8) !void {
-        try self.inner.append(value);
-    }
+        pub fn clear(self: *Self) BuilderError!void {
+            if (self.state != .finished) return BuilderError.NotFinished;
+            self.views.deinit();
+            self.data.deinit();
+            if (self.validity) |*valid| valid.deinit();
+            self.validity = null;
+            self.len = 0;
+            self.null_count = 0;
+            self.data_len = 0;
+            self.state = .ready;
+        }
 
-    /// Append a null entry into the builder.
-    pub fn appendNull(self: *StringViewBuilder) !void {
-        try self.inner.appendNull();
-    }
+        fn ensureViewsCapacity(self: *Self, needed_len: usize) !void {
+            const needed_bytes = needed_len * VIEW_RECORD_SIZE;
+            if (needed_bytes <= self.views.len()) return;
+            try self.views.resize(needed_bytes);
+        }
 
-    /// Finalize builder state and return an immutable array reference.
-    pub fn finish(self: *StringViewBuilder) !ArrayRef {
-        var base = try self.inner.finish();
-        defer base.release();
-        return retagArrayRef(self.allocator, base, STRING_VIEW_TYPE);
-    }
+        fn ensureDataCapacity(self: *Self, needed_len: usize) !void {
+            if (needed_len <= self.data.len()) return;
+            try self.data.resize(needed_len);
+        }
 
-    /// Finalize output and then reset builder state for reuse.
-    pub fn finishReset(self: *StringViewBuilder) !ArrayRef {
-        const ref = try self.finish();
-        try self.reset();
-        return ref;
-    }
+        fn ensureValidityForNull(self: *Self, new_len: usize) !void {
+            if (self.validity == null) {
+                var buf = try initValidityAllValid(self.allocator, new_len);
+                bitmap.clearBit(buf.data[0..bitmap.byteLength(new_len)], new_len - 1);
+                self.validity = buf;
+                self.null_count += 1;
+                return;
+            }
+            var buf = &self.validity.?;
+            try ensureBitmapCapacity(buf, new_len);
+            bitmap.clearBit(buf.data[0..bitmap.byteLength(new_len)], new_len - 1);
+            self.null_count += 1;
+        }
 
-    /// Finalize output and then clear builder state and buffers.
-    pub fn finishClear(self: *StringViewBuilder) !ArrayRef {
-        const ref = try self.finish();
-        try self.clear();
-        return ref;
-    }
-};
+        fn setValidBit(self: *Self, index: usize) !void {
+            if (self.validity == null) return;
+            var buf = &self.validity.?;
+            try ensureBitmapCapacity(buf, index + 1);
+            bitmap.setBit(buf.data[0..bitmap.byteLength(index + 1)], index);
+        }
 
-pub const BinaryViewBuilder = struct {
-    allocator: std.mem.Allocator,
-    inner: binary_array.BinaryBuilder,
+        fn writeInline(record: []u8, value: []const u8) void {
+            writeU32Le(record[0..4], @intCast(value.len));
+            @memset(record[4..VIEW_RECORD_SIZE], 0);
+            @memcpy(record[4 .. 4 + value.len], value);
+        }
 
-    /// Initialize and return a new instance.
-    pub fn init(allocator: std.mem.Allocator, capacity: usize, data_capacity: usize) !BinaryViewBuilder {
-        return .{
-            .allocator = allocator,
-            .inner = try binary_array.BinaryBuilder.init(allocator, capacity, data_capacity),
-        };
-    }
+        fn writeOutlined(record: []u8, value: []const u8, data_offset: usize) void {
+            std.debug.assert(value.len <= std.math.maxInt(u32));
+            std.debug.assert(data_offset <= std.math.maxInt(u32));
+            writeU32Le(record[0..4], @intCast(value.len));
+            @memcpy(record[4..8], value[0..4]);
+            writeU32Le(record[8..12], 0); // buffer_index in variadic section
+            writeU32Le(record[12..16], @intCast(data_offset));
+        }
 
-    /// Release resources owned by this instance.
-    pub fn deinit(self: *BinaryViewBuilder) void {
-        self.inner.deinit();
-    }
+        pub fn append(self: *Self, value: []const u8) !void {
+            if (self.state == .finished) return BuilderError.AlreadyFinished;
+            const next_len = self.len + 1;
+            try self.ensureViewsCapacity(next_len);
 
-    /// Reset state while retaining reusable capacity when possible.
-    pub fn reset(self: *BinaryViewBuilder) !void {
-        try self.inner.reset();
-    }
+            const record = self.views.data[self.len * VIEW_RECORD_SIZE .. next_len * VIEW_RECORD_SIZE];
+            if (value.len <= MAX_INLINE_VIEW_LEN) {
+                writeInline(record, value);
+            } else {
+                try self.ensureDataCapacity(self.data_len + value.len);
+                @memcpy(self.data.data[self.data_len .. self.data_len + value.len], value);
+                writeOutlined(record, value, self.data_len);
+                self.data_len += value.len;
+            }
 
-    /// Clear state and release reusable buffers when required.
-    pub fn clear(self: *BinaryViewBuilder) !void {
-        try self.inner.clear();
-    }
+            try self.setValidBit(self.len);
+            self.len = next_len;
+        }
 
-    /// Append one logical value into the builder.
-    pub fn append(self: *BinaryViewBuilder, value: []const u8) !void {
-        try self.inner.append(value);
-    }
+        pub fn appendNull(self: *Self) !void {
+            if (self.state == .finished) return BuilderError.AlreadyFinished;
+            const next_len = self.len + 1;
+            try self.ensureViewsCapacity(next_len);
+            @memset(self.views.data[self.len * VIEW_RECORD_SIZE .. next_len * VIEW_RECORD_SIZE], 0);
+            try self.ensureValidityForNull(next_len);
+            self.len = next_len;
+        }
 
-    /// Append a null entry into the builder.
-    pub fn appendNull(self: *BinaryViewBuilder) !void {
-        try self.inner.appendNull();
-    }
+        pub fn finish(self: *Self) !ArrayRef {
+            if (self.state == .finished) return BuilderError.AlreadyFinished;
 
-    /// Finalize builder state and return an immutable array reference.
-    pub fn finish(self: *BinaryViewBuilder) !ArrayRef {
-        var base = try self.inner.finish();
-        defer base.release();
-        return retagArrayRef(self.allocator, base, BINARY_VIEW_TYPE);
-    }
+            self.buffers[0] = if (self.validity) |*valid| try valid.toShared(bitmap.byteLength(self.len)) else SharedBuffer.empty;
+            self.buffers[1] = try self.views.toShared(self.len * VIEW_RECORD_SIZE);
+            const has_variadic = self.data_len > 0;
+            if (has_variadic) self.buffers[2] = try self.data.toShared(self.data_len);
 
-    /// Finalize output and then reset builder state for reuse.
-    pub fn finishReset(self: *BinaryViewBuilder) !ArrayRef {
-        const ref = try self.finish();
-        try self.reset();
-        return ref;
-    }
+            const out_len: usize = if (has_variadic) 3 else 2;
+            const buffers = try self.allocator.alloc(SharedBuffer, out_len);
+            buffers[0] = self.buffers[0];
+            buffers[1] = self.buffers[1];
+            if (has_variadic) buffers[2] = self.buffers[2];
 
-    /// Finalize output and then clear builder state and buffers.
-    pub fn finishClear(self: *BinaryViewBuilder) !ArrayRef {
-        const ref = try self.finish();
-        try self.clear();
-        return ref;
-    }
-};
+            const data = ArrayData{
+                .data_type = view_type,
+                .length = self.len,
+                .null_count = self.null_count,
+                .buffers = buffers,
+            };
+
+            self.state = .finished;
+            return ArrayRef.fromOwnedUnsafe(self.allocator, data);
+        }
+
+        pub fn finishReset(self: *Self) !ArrayRef {
+            const out = try self.finish();
+            try self.reset();
+            return out;
+        }
+
+        pub fn finishClear(self: *Self) !ArrayRef {
+            const out = try self.finish();
+            try self.clear();
+            return out;
+        }
+    };
+}
+
+pub const StringViewBuilder = ViewBuilder(STRING_VIEW_TYPE);
+pub const BinaryViewBuilder = ViewBuilder(BINARY_VIEW_TYPE);
 
 pub const ListViewBuilder = struct {
     allocator: std.mem.Allocator,
@@ -438,39 +561,45 @@ pub const LargeListViewBuilder = struct {
 test "string view builder builds string_view array" {
     const allocator = std.testing.allocator;
 
-    var builder = try StringViewBuilder.init(allocator, 3, 8);
+    var builder = try StringViewBuilder.init(allocator, 4, 32);
     defer builder.deinit();
     try builder.append("a");
     try builder.appendNull();
     try builder.append("bc");
+    try builder.append("this string is definitely longer than twelve");
 
     var arr_ref = try builder.finish();
     defer arr_ref.release();
     const arr = StringViewArray{ .data = arr_ref.data() };
-    try std.testing.expectEqual(@as(usize, 3), arr.len());
+    try std.testing.expectEqual(@as(usize, 4), arr.len());
     try std.testing.expect(arr.isNull(1));
     try std.testing.expectEqualStrings("a", arr.value(0));
     try std.testing.expectEqualStrings("bc", arr.value(2));
+    try std.testing.expectEqualStrings("this string is definitely longer than twelve", arr.value(3));
     try std.testing.expect(arr_ref.data().data_type == .string_view);
+    try std.testing.expectEqual(@as(usize, 3), arr_ref.data().buffers.len);
 }
 
 test "binary view builder builds binary_view array" {
     const allocator = std.testing.allocator;
 
-    var builder = try BinaryViewBuilder.init(allocator, 3, 8);
+    var builder = try BinaryViewBuilder.init(allocator, 4, 32);
     defer builder.deinit();
     try builder.append("ab");
     try builder.appendNull();
     try builder.append("c");
+    try builder.append("this-binary-view-is-long");
 
     var arr_ref = try builder.finish();
     defer arr_ref.release();
     const arr = BinaryViewArray{ .data = arr_ref.data() };
-    try std.testing.expectEqual(@as(usize, 3), arr.len());
+    try std.testing.expectEqual(@as(usize, 4), arr.len());
     try std.testing.expect(arr.isNull(1));
     try std.testing.expectEqualStrings("ab", arr.value(0));
     try std.testing.expectEqualStrings("c", arr.value(2));
+    try std.testing.expectEqualStrings("this-binary-view-is-long", arr.value(3));
     try std.testing.expect(arr_ref.data().data_type == .binary_view);
+    try std.testing.expectEqual(@as(usize, 3), arr_ref.data().buffers.len);
 }
 
 test "list view builder builds list_view array" {
