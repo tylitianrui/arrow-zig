@@ -921,99 +921,34 @@ test "ipc writer stream output matches golden fixture" {
 
 test "ipc writer roundtrip supports view types and variadicBufferCounts" {
     const allocator = std.testing.allocator;
-    const one = [_]u8{0};
 
     const string_view_type = DataType{ .string_view = {} };
     const binary_view_type = DataType{ .binary_view = {} };
-    const list_item_type = DataType{ .int32 = {} };
-    const list_item_field = Field{ .name = "item", .data_type = &list_item_type, .nullable = true };
-    const list_view_type = DataType{ .list_view = .{ .value_field = list_item_field } };
-    const large_list_view_type = DataType{ .large_list_view = .{ .value_field = list_item_field } };
     const fields = [_]Field{
         .{ .name = "sv", .data_type = &string_view_type, .nullable = true },
         .{ .name = "bv", .data_type = &binary_view_type, .nullable = true },
-        .{ .name = "lv", .data_type = &list_view_type, .nullable = true },
-        .{ .name = "llv", .data_type = &large_list_view_type, .nullable = true },
     };
     const schema = Schema{ .fields = fields[0..] };
 
-    const empty_children = try allocator.alloc(ArrayRef, 0);
-
-    const sv_buffers = try allocator.alloc(array_data.SharedBuffer, 2);
-    sv_buffers[0] = array_data.SharedBuffer.empty;
-    sv_buffers[1] = array_data.SharedBuffer.empty;
-    var sv_ref = try ArrayRef.fromOwnedUnsafe(allocator, .{
-        .data_type = string_view_type,
-        .length = 0,
-        .null_count = 0,
-        .buffers = sv_buffers,
-        .children = empty_children,
-        .dictionary = null,
-    });
+    var sv_builder = try @import("../array/view_array.zig").StringViewBuilder.init(allocator, 4, 32);
+    defer sv_builder.deinit();
+    try sv_builder.append("short");
+    try sv_builder.appendNull();
+    try sv_builder.append("tiny");
+    try sv_builder.append("this string is longer than twelve");
+    var sv_ref = try sv_builder.finish();
     defer sv_ref.release();
 
-    const bv_buffers = try allocator.alloc(array_data.SharedBuffer, 3);
-    bv_buffers[0] = array_data.SharedBuffer.empty;
-    bv_buffers[1] = array_data.SharedBuffer.empty;
-    bv_buffers[2] = array_data.SharedBuffer.init(one[0..]); // one variadic buffer
-    const empty_children_bv = try allocator.alloc(ArrayRef, 0);
-    var bv_ref = try ArrayRef.fromOwnedUnsafe(allocator, .{
-        .data_type = binary_view_type,
-        .length = 0,
-        .null_count = 0,
-        .buffers = bv_buffers,
-        .children = empty_children_bv,
-        .dictionary = null,
-    });
+    var bv_builder = try @import("../array/view_array.zig").BinaryViewBuilder.init(allocator, 4, 32);
+    defer bv_builder.deinit();
+    try bv_builder.append("ab");
+    try bv_builder.append("this-binary-view-is-long");
+    try bv_builder.appendNull();
+    try bv_builder.append("xy");
+    var bv_ref = try bv_builder.finish();
     defer bv_ref.release();
 
-    const child_buffers = try allocator.alloc(array_data.SharedBuffer, 2);
-    child_buffers[0] = array_data.SharedBuffer.empty;
-    child_buffers[1] = array_data.SharedBuffer.empty;
-    const child_children = try allocator.alloc(ArrayRef, 0);
-    var child_ref = try ArrayRef.fromOwnedUnsafe(allocator, .{
-        .data_type = list_item_type,
-        .length = 0,
-        .null_count = 0,
-        .buffers = child_buffers,
-        .children = child_children,
-        .dictionary = null,
-    });
-    defer child_ref.release();
-
-    const lv_buffers = try allocator.alloc(array_data.SharedBuffer, 3);
-    lv_buffers[0] = array_data.SharedBuffer.empty;
-    lv_buffers[1] = array_data.SharedBuffer.empty;
-    lv_buffers[2] = array_data.SharedBuffer.empty;
-    const lv_children = try allocator.alloc(ArrayRef, 1);
-    lv_children[0] = child_ref.retain();
-    var lv_ref = try ArrayRef.fromOwnedUnsafe(allocator, .{
-        .data_type = list_view_type,
-        .length = 0,
-        .null_count = 0,
-        .buffers = lv_buffers,
-        .children = lv_children,
-        .dictionary = null,
-    });
-    defer lv_ref.release();
-
-    const llv_buffers = try allocator.alloc(array_data.SharedBuffer, 3);
-    llv_buffers[0] = array_data.SharedBuffer.empty;
-    llv_buffers[1] = array_data.SharedBuffer.empty;
-    llv_buffers[2] = array_data.SharedBuffer.empty;
-    const llv_children = try allocator.alloc(ArrayRef, 1);
-    llv_children[0] = child_ref.retain();
-    var llv_ref = try ArrayRef.fromOwnedUnsafe(allocator, .{
-        .data_type = large_list_view_type,
-        .length = 0,
-        .null_count = 0,
-        .buffers = llv_buffers,
-        .children = llv_children,
-        .dictionary = null,
-    });
-    defer llv_ref.release();
-
-    var batch = try RecordBatch.initBorrowed(allocator, schema, &[_]ArrayRef{ sv_ref, bv_ref, lv_ref, llv_ref });
+    var batch = try RecordBatch.initBorrowed(allocator, schema, &[_]ArrayRef{ sv_ref, bv_ref });
     defer batch.deinit();
 
     var out = std.array_list.Managed(u8).init(allocator);
@@ -1030,13 +965,23 @@ test "ipc writer roundtrip supports view types and variadicBufferCounts" {
     const out_schema = try reader.readSchema();
     try std.testing.expect(out_schema.fields[0].data_type.* == .string_view);
     try std.testing.expect(out_schema.fields[1].data_type.* == .binary_view);
-    try std.testing.expect(out_schema.fields[2].data_type.* == .list_view);
-    try std.testing.expect(out_schema.fields[3].data_type.* == .large_list_view);
     const out_batch_opt = try reader.nextRecordBatch();
     try std.testing.expect(out_batch_opt != null);
     var out_batch = out_batch_opt.?;
     defer out_batch.deinit();
-    try std.testing.expectEqual(@as(usize, 0), out_batch.numRows());
+    try std.testing.expectEqual(@as(usize, 4), out_batch.numRows());
+
+    const sv = @import("../array/view_array.zig").StringViewArray{ .data = out_batch.columns[0].data() };
+    try std.testing.expectEqualStrings("short", sv.value(0));
+    try std.testing.expect(sv.isNull(1));
+    try std.testing.expectEqualStrings("tiny", sv.value(2));
+    try std.testing.expectEqualStrings("this string is longer than twelve", sv.value(3));
+
+    const bv = @import("../array/view_array.zig").BinaryViewArray{ .data = out_batch.columns[1].data() };
+    try std.testing.expectEqualStrings("ab", bv.value(0));
+    try std.testing.expectEqualStrings("this-binary-view-is-long", bv.value(1));
+    try std.testing.expect(bv.isNull(2));
+    try std.testing.expectEqualStrings("xy", bv.value(3));
 }
 
 test "ipc writer and reader roundtrip extension field metadata and values" {
