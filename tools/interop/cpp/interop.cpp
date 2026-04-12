@@ -2,6 +2,7 @@
 #include <arrow/compute/api.h>
 #include <arrow/io/api.h>
 #include <arrow/ipc/api.h>
+#include <arrow/util/config.h>
 
 #include <iostream>
 #include <memory>
@@ -9,6 +10,10 @@
 #include <vector>
 
 namespace {
+
+#if !defined(ARROW_VERSION_MAJOR) || (ARROW_VERSION_MAJOR < 18)
+#error "tools/interop/cpp/interop.cpp requires Arrow C++ with Utf8View/BinaryView support"
+#endif
 
 enum class ContainerMode {
   kStream,

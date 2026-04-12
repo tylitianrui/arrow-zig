@@ -243,7 +243,7 @@ jobs:
         shell: bash -l {0}
         run: |
           conda activate arrow-cpp-env
-          conda install -y arrow-cpp pkg-config cxx-compiler
+          conda install -y arrow-cpp=23.0.1 pkg-config cxx-compiler
 
       - name: Build C++ interop tool
         shell: bash -l {0}
