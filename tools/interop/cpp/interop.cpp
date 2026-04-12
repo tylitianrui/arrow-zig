@@ -725,8 +725,14 @@ arrow::Status ValidateComplex(const std::string& path, ContainerMode container) 
   }
 
   auto dec = std::static_pointer_cast<arrow::Decimal128Array>(batch->column(4));
-  if (dec->GetValue(0) != arrow::Decimal128(12345) || dec->GetValue(1) != arrow::Decimal128(-42) ||
-      dec->GetValue(2) != arrow::Decimal128(0)) {
+  ARROW_ASSIGN_OR_RAISE(auto dec0_scalar_any, dec->GetScalar(0));
+  ARROW_ASSIGN_OR_RAISE(auto dec1_scalar_any, dec->GetScalar(1));
+  ARROW_ASSIGN_OR_RAISE(auto dec2_scalar_any, dec->GetScalar(2));
+  auto dec0_scalar = std::static_pointer_cast<arrow::Decimal128Scalar>(dec0_scalar_any);
+  auto dec1_scalar = std::static_pointer_cast<arrow::Decimal128Scalar>(dec1_scalar_any);
+  auto dec2_scalar = std::static_pointer_cast<arrow::Decimal128Scalar>(dec2_scalar_any);
+  if (dec0_scalar->value != arrow::Decimal128(12345) || dec1_scalar->value != arrow::Decimal128(-42) ||
+      dec2_scalar->value != arrow::Decimal128(0)) {
     return arrow::Status::Invalid("invalid decimal values");
   }
 
