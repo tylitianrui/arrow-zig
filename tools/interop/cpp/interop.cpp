@@ -48,7 +48,8 @@ arrow::Status Generate(const std::string& path, ContainerMode container) {
   std::shared_ptr<arrow::Array> names;
   ARROW_RETURN_NOT_OK(name_builder.Finish(&names));
 
-  auto batch = arrow::RecordBatch::Make(schema, 3, {ids, names});
+  std::vector<std::shared_ptr<arrow::Array>> columns = {ids, names};
+  auto batch = arrow::RecordBatch::Make(schema, 3, std::move(columns));
   ARROW_ASSIGN_OR_RAISE(auto out, arrow::io::FileOutputStream::Open(path));
   if (container == ContainerMode::kStream) {
     ARROW_ASSIGN_OR_RAISE(auto writer, arrow::ipc::MakeStreamWriter(out.get(), schema));
@@ -78,7 +79,8 @@ arrow::Status GenerateDictDelta(const std::string& path, ContainerMode container
   ARROW_RETURN_NOT_OK(first_strings.Finish(&first_plain));
   ARROW_ASSIGN_OR_RAISE(auto first_encoded_datum, arrow::compute::CallFunction("dictionary_encode", {first_plain}));
   auto first_encoded = first_encoded_datum.make_array();
-  auto first_batch = arrow::RecordBatch::Make(schema, 2, {first_encoded});
+  std::vector<std::shared_ptr<arrow::Array>> first_columns = {first_encoded};
+  auto first_batch = arrow::RecordBatch::Make(schema, 2, std::move(first_columns));
 
   arrow::StringBuilder second_strings;
   ARROW_RETURN_NOT_OK(second_strings.Append("green"));
@@ -86,7 +88,8 @@ arrow::Status GenerateDictDelta(const std::string& path, ContainerMode container
   ARROW_RETURN_NOT_OK(second_strings.Finish(&second_plain));
   ARROW_ASSIGN_OR_RAISE(auto second_encoded_datum, arrow::compute::CallFunction("dictionary_encode", {second_plain}));
   auto second_encoded = second_encoded_datum.make_array();
-  auto second_batch = arrow::RecordBatch::Make(schema, 1, {second_encoded});
+  std::vector<std::shared_ptr<arrow::Array>> second_columns = {second_encoded};
+  auto second_batch = arrow::RecordBatch::Make(schema, 1, std::move(second_columns));
 
   ARROW_ASSIGN_OR_RAISE(auto out, arrow::io::FileOutputStream::Open(path));
   if (container == ContainerMode::kStream) {
@@ -254,20 +257,17 @@ arrow::Status GenerateComplex(const std::string& path, ContainerMode container) 
       arrow::field("i", arrow::int32(), true),
       arrow::field("b", arrow::boolean(), true),
   }, {5, 7});
-  auto union_data = arrow::ArrayData::Make(
-      union_type,
-      3,
-      {
-          nullptr,
-          union_type_ids->data()->buffers[1],
-          union_offsets->data()->buffers[1],
-      },
-      0,
-      0,
-      {
-          union_i_values->data(),
-          union_b_values->data(),
-      });
+  std::vector<std::shared_ptr<arrow::Buffer>> union_buffers = {
+      nullptr,
+      union_type_ids->data()->buffers[1],
+      union_offsets->data()->buffers[1],
+  };
+  std::vector<std::shared_ptr<arrow::ArrayData>> union_children = {
+      union_i_values->data(),
+      union_b_values->data(),
+  };
+  auto union_data = arrow::ArrayData::Make(union_type, 3, std::move(union_buffers),
+                                           std::move(union_children), 0, 0);
   auto union_col = arrow::MakeArray(union_data);
 
   arrow::Decimal128Builder dec_builder(arrow::decimal128(10, 2), pool);
@@ -284,7 +284,9 @@ arrow::Status GenerateComplex(const std::string& path, ContainerMode container) 
   std::shared_ptr<arrow::Array> ts_col;
   ARROW_RETURN_NOT_OK(ts_builder.Finish(&ts_col));
 
-  auto batch = arrow::RecordBatch::Make(schema, 3, {list_col, struct_col, map_col, union_col, dec_col, ts_col});
+  std::vector<std::shared_ptr<arrow::Array>> columns = {
+      list_col, struct_col, map_col, union_col, dec_col, ts_col};
+  auto batch = arrow::RecordBatch::Make(schema, 3, std::move(columns));
   ARROW_ASSIGN_OR_RAISE(auto out, arrow::io::FileOutputStream::Open(path));
   if (container == ContainerMode::kStream) {
     ARROW_ASSIGN_OR_RAISE(auto writer, arrow::ipc::MakeStreamWriter(out.get(), schema));
@@ -317,7 +319,8 @@ arrow::Status GenerateView(const std::string& path, ContainerMode container) {
   std::shared_ptr<arrow::Array> bv;
   ARROW_RETURN_NOT_OK(bv_builder.Finish(&bv));
 
-  auto batch = arrow::RecordBatch::Make(schema, 4, {sv, bv});
+  std::vector<std::shared_ptr<arrow::Array>> columns = {sv, bv};
+  auto batch = arrow::RecordBatch::Make(schema, 4, std::move(columns));
   ARROW_ASSIGN_OR_RAISE(auto out, arrow::io::FileOutputStream::Open(path));
   if (container == ContainerMode::kStream) {
     ARROW_ASSIGN_OR_RAISE(auto writer, arrow::ipc::MakeStreamWriter(out.get(), schema));
@@ -341,7 +344,8 @@ arrow::Status GenerateExtension(const std::string& path, ContainerMode container
   std::shared_ptr<arrow::Array> values;
   ARROW_RETURN_NOT_OK(values_builder.Finish(&values));
 
-  auto batch = arrow::RecordBatch::Make(schema, 3, {values});
+  std::vector<std::shared_ptr<arrow::Array>> columns = {values};
+  auto batch = arrow::RecordBatch::Make(schema, 3, std::move(columns));
   ARROW_ASSIGN_OR_RAISE(auto out, arrow::io::FileOutputStream::Open(path));
   if (container == ContainerMode::kStream) {
     ARROW_ASSIGN_OR_RAISE(auto writer, arrow::ipc::MakeStreamWriter(out.get(), schema));
@@ -697,8 +701,8 @@ arrow::Status ValidateComplex(const std::string& path, ContainerMode container) 
   int int_child = -1;
   int bool_child = -1;
   for (int i = 0; i < union_type->num_fields(); ++i) {
-    if (union_type->child(i)->type()->id() == arrow::Type::INT32) int_child = i;
-    if (union_type->child(i)->type()->id() == arrow::Type::BOOL) bool_child = i;
+    if (union_type->fields()[static_cast<size_t>(i)]->type()->id() == arrow::Type::INT32) int_child = i;
+    if (union_type->fields()[static_cast<size_t>(i)]->type()->id() == arrow::Type::BOOL) bool_child = i;
   }
   if (int_child < 0 || bool_child < 0) {
     return arrow::Status::Invalid("invalid union child types");
@@ -714,15 +718,15 @@ arrow::Status ValidateComplex(const std::string& path, ContainerMode container) 
       union_col->value_offset(2) != 1) {
     return arrow::Status::Invalid("invalid union value offsets");
   }
-  auto union_i = std::static_pointer_cast<arrow::Int32Array>(union_col->child(int_child));
-  auto union_b = std::static_pointer_cast<arrow::BooleanArray>(union_col->child(bool_child));
+  auto union_i = std::static_pointer_cast<arrow::Int32Array>(union_col->field(int_child));
+  auto union_b = std::static_pointer_cast<arrow::BooleanArray>(union_col->field(bool_child));
   if (union_i->Value(0) != 100 || !union_b->Value(0) || union_i->Value(1) != 200) {
     return arrow::Status::Invalid("invalid union values");
   }
 
   auto dec = std::static_pointer_cast<arrow::Decimal128Array>(batch->column(4));
-  if (dec->Value(0) != arrow::Decimal128(12345) || dec->Value(1) != arrow::Decimal128(-42) ||
-      dec->Value(2) != arrow::Decimal128(0)) {
+  if (dec->GetValue(0) != arrow::Decimal128(12345) || dec->GetValue(1) != arrow::Decimal128(-42) ||
+      dec->GetValue(2) != arrow::Decimal128(0)) {
     return arrow::Status::Invalid("invalid decimal values");
   }
 

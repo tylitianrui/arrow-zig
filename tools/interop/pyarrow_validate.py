@@ -202,10 +202,32 @@ def validate_extension(in_path: pathlib.Path, container: str) -> None:
         raise RuntimeError("invalid extension values")
 
 
+def validate_view(in_path: pathlib.Path, container: str) -> None:
+    with _open_reader(in_path, container) as reader:
+        schema = reader.schema
+        if len(schema) != 2:
+            raise RuntimeError("invalid schema field count")
+        if schema[0].name != "sv" or schema[0].type != pa.string_view():
+            raise RuntimeError("invalid sv field")
+        if schema[1].name != "bv" or schema[1].type != pa.binary_view():
+            raise RuntimeError("invalid bv field")
+        batches = _read_all_batches(reader)
+
+    if len(batches) != 1:
+        raise RuntimeError("expected exactly one batch")
+    batch = batches[0]
+    if batch.num_rows != 4:
+        raise RuntimeError("invalid row count")
+    if batch.column(0).to_pylist() != ["short", None, "tiny", "this string is longer than twelve"]:
+        raise RuntimeError("invalid sv values")
+    if batch.column(1).to_pylist() != [b"ab", b"this-binary-view-is-long", None, b"xy"]:
+        raise RuntimeError("invalid bv values")
+
+
 def main() -> int:
     if len(sys.argv) not in (2, 3, 4):
         print(
-            "usage: pyarrow_validate.py <in.arrow> [canonical|dict-delta|ree|complex|extension] [stream|file]",
+            "usage: pyarrow_validate.py <in.arrow> [canonical|dict-delta|ree|complex|extension|view] [stream|file]",
             file=sys.stderr,
         )
         return 2
@@ -236,6 +258,9 @@ def main() -> int:
         return 0
     if mode == "extension":
         validate_extension(in_path, container)
+        return 0
+    if mode == "view":
+        validate_view(in_path, container)
         return 0
     print(f"unknown mode: {mode}", file=sys.stderr)
     return 2

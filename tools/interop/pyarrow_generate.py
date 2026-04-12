@@ -163,10 +163,28 @@ def generate_extension(out_path: pathlib.Path, container: str) -> None:
         writer.write_batch(batch)
 
 
+def generate_view(out_path: pathlib.Path, container: str) -> None:
+    schema = pa.schema(
+        [
+            pa.field("sv", pa.string_view(), nullable=True),
+            pa.field("bv", pa.binary_view(), nullable=True),
+        ]
+    )
+    batch = pa.record_batch(
+        [
+            pa.array(["short", None, "tiny", "this string is longer than twelve"], type=pa.string_view()),
+            pa.array([b"ab", b"this-binary-view-is-long", None, b"xy"], type=pa.binary_view()),
+        ],
+        schema=schema,
+    )
+    with _new_writer(out_path, schema, container) as writer:
+        writer.write_batch(batch)
+
+
 def main() -> int:
     if len(sys.argv) not in (2, 3, 4):
         print(
-            "usage: pyarrow_generate.py <out.arrow> [canonical|dict-delta|ree|complex|extension] [stream|file]",
+            "usage: pyarrow_generate.py <out.arrow> [canonical|dict-delta|ree|complex|extension|view] [stream|file]",
             file=sys.stderr,
         )
         return 2
@@ -199,6 +217,9 @@ def main() -> int:
         return 0
     if mode == "extension":
         generate_extension(out_path, container)
+        return 0
+    if mode == "view":
+        generate_view(out_path, container)
         return 0
     print(f"unknown mode: {mode}", file=sys.stderr)
     return 2

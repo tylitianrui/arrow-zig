@@ -126,10 +126,12 @@ jobs:
           zig build interop-fixture-writer -- .interop-fixtures/zarrow_ree.arrow ree stream
           zig build interop-fixture-writer -- .interop-fixtures/zarrow_complex.arrow complex stream
           zig build interop-fixture-writer -- .interop-fixtures/zarrow_extension.arrow extension stream
+          zig build interop-fixture-writer -- .interop-fixtures/zarrow_view.arrow view stream
           zig build interop-fixture-writer -- .interop-fixtures/zarrow_file.arrow canonical file
           zig build interop-fixture-writer -- .interop-fixtures/zarrow_ree_file.arrow ree file
           zig build interop-fixture-writer -- .interop-fixtures/zarrow_complex_file.arrow complex file
           zig build interop-fixture-writer -- .interop-fixtures/zarrow_extension_file.arrow extension file
+          zig build interop-fixture-writer -- .interop-fixtures/zarrow_view_file.arrow view file
 
       - name: PyArrow roundtrip checks
         run: |
@@ -148,6 +150,9 @@ jobs:
           python tools/interop/pyarrow_generate.py .interop-fixtures/pyarrow_extension.arrow extension stream
           zig build interop-fixture-check -- .interop-fixtures/pyarrow_extension.arrow extension stream
           python tools/interop/pyarrow_validate.py .interop-fixtures/zarrow_extension.arrow extension stream
+          python tools/interop/pyarrow_generate.py .interop-fixtures/pyarrow_view.arrow view stream
+          zig build interop-fixture-check -- .interop-fixtures/pyarrow_view.arrow view stream
+          python tools/interop/pyarrow_validate.py .interop-fixtures/zarrow_view.arrow view stream
           python tools/interop/pyarrow_generate.py .interop-fixtures/pyarrow_file.arrow canonical file
           zig build interop-fixture-check -- .interop-fixtures/pyarrow_file.arrow canonical file
           python tools/interop/pyarrow_validate.py .interop-fixtures/zarrow_file.arrow canonical file
@@ -160,6 +165,9 @@ jobs:
           python tools/interop/pyarrow_generate.py .interop-fixtures/pyarrow_extension_file.arrow extension file
           zig build interop-fixture-check -- .interop-fixtures/pyarrow_extension_file.arrow extension file
           python tools/interop/pyarrow_validate.py .interop-fixtures/zarrow_extension_file.arrow extension file
+          python tools/interop/pyarrow_generate.py .interop-fixtures/pyarrow_view_file.arrow view file
+          zig build interop-fixture-check -- .interop-fixtures/pyarrow_view_file.arrow view file
+          python tools/interop/pyarrow_validate.py .interop-fixtures/zarrow_view_file.arrow view file
 
   interop-arrow-rs:
     name: IPC Interop (zarrow <-> arrow-rs)
