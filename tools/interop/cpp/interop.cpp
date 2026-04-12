@@ -5,6 +5,7 @@
 #include <arrow/util/config.h>
 
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
@@ -262,10 +263,45 @@ arrow::Status Validate(const std::string& path, ContainerMode container) {
 arrow::Result<std::string> DecodeDictionaryString(const std::shared_ptr<arrow::Array>& column,
                                                   int64_t row) {
   auto dict_arr = std::static_pointer_cast<arrow::DictionaryArray>(column);
-  auto keys = std::static_pointer_cast<arrow::Int32Array>(dict_arr->indices());
   auto values = std::static_pointer_cast<arrow::StringArray>(dict_arr->dictionary());
+  const auto keys = dict_arr->indices();
   if (keys->IsNull(row)) return arrow::Status::Invalid("dictionary key is null");
-  const auto key = keys->Value(row);
+
+  int64_t key = -1;
+  switch (keys->type_id()) {
+    case arrow::Type::INT8:
+      key = std::static_pointer_cast<arrow::Int8Array>(keys)->Value(row);
+      break;
+    case arrow::Type::INT16:
+      key = std::static_pointer_cast<arrow::Int16Array>(keys)->Value(row);
+      break;
+    case arrow::Type::INT32:
+      key = std::static_pointer_cast<arrow::Int32Array>(keys)->Value(row);
+      break;
+    case arrow::Type::INT64:
+      key = std::static_pointer_cast<arrow::Int64Array>(keys)->Value(row);
+      break;
+    case arrow::Type::UINT8:
+      key = std::static_pointer_cast<arrow::UInt8Array>(keys)->Value(row);
+      break;
+    case arrow::Type::UINT16:
+      key = std::static_pointer_cast<arrow::UInt16Array>(keys)->Value(row);
+      break;
+    case arrow::Type::UINT32:
+      key = std::static_pointer_cast<arrow::UInt32Array>(keys)->Value(row);
+      break;
+    case arrow::Type::UINT64: {
+      const auto key_u64 = std::static_pointer_cast<arrow::UInt64Array>(keys)->Value(row);
+      if (key_u64 > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+        return arrow::Status::Invalid("dictionary key out of int64 range");
+      }
+      key = static_cast<int64_t>(key_u64);
+      break;
+    }
+    default:
+      return arrow::Status::Invalid("unsupported dictionary index type");
+  }
+
   if (key < 0 || key >= values->length()) return arrow::Status::Invalid("dictionary key out of range");
   return values->GetString(key);
 }
@@ -348,8 +384,10 @@ arrow::Status ValidateRee(const std::string& path, ContainerMode container) {
   }
 
   auto ree_type = std::static_pointer_cast<arrow::RunEndEncodedType>(schema->field(0)->type());
-  if (ree_type->run_end_type()->id() != arrow::Type::INT32) {
-    return arrow::Status::Invalid("ree run_end_type must be int32");
+  const auto run_end_id = ree_type->run_end_type()->id();
+  if (run_end_id != arrow::Type::INT16 && run_end_id != arrow::Type::INT32 &&
+      run_end_id != arrow::Type::INT64) {
+    return arrow::Status::Invalid("ree run_end_type must be int16/int32/int64");
   }
   if (ree_type->value_type()->id() != arrow::Type::INT32) {
     return arrow::Status::Invalid("ree value_type must be int32");
@@ -357,24 +395,12 @@ arrow::Status ValidateRee(const std::string& path, ContainerMode container) {
 
   if (!batch) return arrow::Status::Invalid("missing batch");
   if (batch->num_rows() != 5) return arrow::Status::Invalid("invalid row count");
-
-  auto ree_data = batch->column(0)->data();
-  if (ree_data->child_data.size() != 2) {
-    return arrow::Status::Invalid("invalid ree child count");
-  }
-
-  auto run_ends_any = arrow::MakeArray(ree_data->child_data[0]);
-  auto values_any = arrow::MakeArray(ree_data->child_data[1]);
-  auto run_ends = std::dynamic_pointer_cast<arrow::Int32Array>(run_ends_any);
-  auto values = std::dynamic_pointer_cast<arrow::Int32Array>(values_any);
-  if (!run_ends || !values) {
-    return arrow::Status::Invalid("invalid ree child types");
-  }
-  if (run_ends->length() != 2 || values->length() != 2) {
-    return arrow::Status::Invalid("invalid ree child lengths");
-  }
-  if (run_ends->Value(0) != 2 || run_ends->Value(1) != 5 || values->Value(0) != 100 ||
-      values->Value(1) != 200) {
+  ARROW_ASSIGN_OR_RAISE(auto decoded_any, arrow::compute::CallFunction("run_end_decode", {batch->column(0)}));
+  auto decoded = std::dynamic_pointer_cast<arrow::Int32Array>(decoded_any.make_array());
+  if (!decoded) return arrow::Status::Invalid("decoded ree values type must be int32");
+  if (decoded->length() != 5) return arrow::Status::Invalid("decoded ree values length must be 5");
+  if (decoded->Value(0) != 100 || decoded->Value(1) != 100 || decoded->Value(2) != 200 ||
+      decoded->Value(3) != 200 || decoded->Value(4) != 200) {
     return arrow::Status::Invalid("invalid ree values");
   }
 
