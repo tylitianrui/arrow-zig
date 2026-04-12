@@ -541,13 +541,46 @@ arrow::Status ValidateRee(const std::string& path, ContainerMode container) {
 
   if (!batch) return arrow::Status::Invalid("missing batch");
   if (batch->num_rows() != 5) return arrow::Status::Invalid("invalid row count");
-  ARROW_ASSIGN_OR_RAISE(auto decoded_any, arrow::compute::CallFunction("run_end_decode", {batch->column(0)}));
-  auto decoded = std::dynamic_pointer_cast<arrow::Int32Array>(decoded_any.make_array());
-  if (!decoded) return arrow::Status::Invalid("decoded ree values type must be int32");
-  if (decoded->length() != 5) return arrow::Status::Invalid("decoded ree values length must be 5");
-  if (decoded->Value(0) != 100 || decoded->Value(1) != 100 || decoded->Value(2) != 200 ||
-      decoded->Value(3) != 200 || decoded->Value(4) != 200) {
-    return arrow::Status::Invalid("invalid ree values");
+  auto ree_arr = std::static_pointer_cast<arrow::RunEndEncodedArray>(batch->column(0));
+  auto run_ends = ree_arr->run_ends();
+  auto values = std::dynamic_pointer_cast<arrow::Int32Array>(ree_arr->values());
+  if (!values) return arrow::Status::Invalid("ree values array must be int32");
+  if (run_ends->length() != values->length()) {
+    return arrow::Status::Invalid("ree run_ends/values length mismatch");
+  }
+  if (run_ends->length() == 0) return arrow::Status::Invalid("ree must contain at least one run");
+
+  auto read_run_end = [&](int64_t i) -> int64_t {
+    switch (run_ends->type_id()) {
+      case arrow::Type::INT16:
+        return std::static_pointer_cast<arrow::Int16Array>(run_ends)->Value(i);
+      case arrow::Type::INT32:
+        return std::static_pointer_cast<arrow::Int32Array>(run_ends)->Value(i);
+      case arrow::Type::INT64:
+        return std::static_pointer_cast<arrow::Int64Array>(run_ends)->Value(i);
+      default:
+        return -1;
+    }
+  };
+
+  int64_t run_index = 0;
+  const int expected[5] = {100, 100, 200, 200, 200};
+  for (int64_t logical_index = 0; logical_index < 5; ++logical_index) {
+    while (run_index < run_ends->length() && read_run_end(run_index) <= logical_index) {
+      ++run_index;
+    }
+    if (run_index >= run_ends->length()) {
+      return arrow::Status::Invalid("ree run_ends do not cover logical length");
+    }
+    if (values->IsNull(run_index)) {
+      return arrow::Status::Invalid("ree values must be non-null for this fixture");
+    }
+    if (values->Value(run_index) != expected[logical_index]) {
+      return arrow::Status::Invalid("invalid ree values");
+    }
+  }
+  if (read_run_end(run_ends->length() - 1) != 5) {
+    return arrow::Status::Invalid("ree final run_end must match logical length");
   }
 
   if (extra) return arrow::Status::Invalid("unexpected extra batch");
