@@ -286,9 +286,13 @@ fn checkComplex(reader: anytype) !void {
     if (m2_keys.value(0) != 3 or m2_vals.value(0) != 30) return error.InvalidBatch;
 
     const union_col = zarrow.DenseUnionArray{ .data = batch.columns[3].data() };
-    if (union_col.typeId(0) != 5 or union_col.childOffset(0) != 0) return error.InvalidBatch;
-    if (union_col.typeId(1) != 7 or union_col.childOffset(1) != 0) return error.InvalidBatch;
-    if (union_col.typeId(2) != 5 or union_col.childOffset(2) != 1) return error.InvalidBatch;
+    const t0 = union_col.typeId(0);
+    const t1 = union_col.typeId(1);
+    const t2 = union_col.typeId(2);
+    if (t0 != t2 or t0 == t1) return error.InvalidBatch;
+    if (union_col.childOffset(0) != 0) return error.InvalidBatch;
+    if (union_col.childOffset(1) != 0) return error.InvalidBatch;
+    if (union_col.childOffset(2) != 1) return error.InvalidBatch;
     var uv0 = try union_col.value(0);
     defer uv0.release();
     var uv1 = try union_col.value(1);

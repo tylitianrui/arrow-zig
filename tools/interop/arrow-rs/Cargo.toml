@@ -5,6 +5,6 @@ edition = "2021"
 
 [dependencies]
 arrow-array = "56"
+arrow-buffer = "56"
 arrow-ipc = "56"
 arrow-schema = "56"
-

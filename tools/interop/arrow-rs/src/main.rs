@@ -6,12 +6,14 @@ use std::collections::HashMap;
 use arrow_array::builder::{BinaryViewBuilder, StringDictionaryBuilder, StringViewBuilder};
 use arrow_array::types::Int32Type;
 use arrow_array::{
-    Array, ArrayRef, BinaryViewArray, DictionaryArray, Int32Array, RecordBatch, RunArray, StringArray,
-    StringViewArray,
+    Array, ArrayRef, BinaryViewArray, BooleanArray, Decimal128Array, DictionaryArray, Int32Array, ListArray,
+    MapArray, RecordBatch, RunArray, StringArray, StringViewArray, StructArray, TimestampMillisecondArray,
+    UnionArray,
 };
+use arrow_buffer::{BooleanBuffer, NullBuffer, OffsetBuffer, ScalarBuffer};
 use arrow_ipc::reader::{FileReader, StreamReader};
 use arrow_ipc::writer::{FileWriter, StreamWriter};
-use arrow_schema::{DataType, Field, Schema};
+use arrow_schema::{DataType, Field, Schema, TimeUnit, UnionFields, UnionMode};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ContainerMode {
@@ -125,6 +127,46 @@ fn view_schema() -> Arc<Schema> {
     ]))
 }
 
+fn complex_schema() -> Arc<Schema> {
+    let list_type = DataType::List(Arc::new(Field::new("item", DataType::Int32, true)));
+    let struct_type = DataType::Struct(
+        vec![
+            Arc::new(Field::new("id", DataType::Int32, false)),
+            Arc::new(Field::new("name", DataType::Utf8, true)),
+        ]
+        .into(),
+    );
+    let map_entry_type = DataType::Struct(
+        vec![
+            Arc::new(Field::new("key", DataType::Int32, false)),
+            Arc::new(Field::new("value", DataType::Int32, true)),
+        ]
+        .into(),
+    );
+    let map_type = DataType::Map(Arc::new(Field::new("entries", map_entry_type, false)), false);
+    let union_type = DataType::Union(
+        UnionFields::new(
+            vec![0_i8, 1_i8],
+            vec![
+                Field::new("i", DataType::Int32, true),
+                Field::new("b", DataType::Boolean, true),
+            ],
+        ),
+        UnionMode::Dense,
+    );
+    let dec_type = DataType::Decimal128(10, 2);
+    let ts_type = DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into()));
+
+    Arc::new(Schema::new(vec![
+        Field::new("list_i32", list_type, true),
+        Field::new("struct_pair", struct_type, true),
+        Field::new("map_i32_i32", map_type, true),
+        Field::new("u_dense", union_type, true),
+        Field::new("dec", dec_type, false),
+        Field::new("ts", ts_type, false),
+    ]))
+}
+
 fn generate_view(path: &Path, container: ContainerMode) -> Result<(), Box<dyn std::error::Error>> {
     let schema = view_schema();
 
@@ -143,6 +185,92 @@ fn generate_view(path: &Path, container: ContainerMode) -> Result<(), Box<dyn st
     let bv: ArrayRef = Arc::new(bv_builder.finish());
 
     let batch = RecordBatch::try_new(schema.clone(), vec![sv, bv])?;
+    let file = File::create(path)?;
+    match container {
+        ContainerMode::Stream => {
+            let mut writer = StreamWriter::try_new(file, &schema)?;
+            writer.write(&batch)?;
+            writer.finish()?;
+        }
+        ContainerMode::File => {
+            let mut writer = FileWriter::try_new(file, &schema)?;
+            writer.write(&batch)?;
+            writer.finish()?;
+        }
+    }
+    Ok(())
+}
+
+fn generate_complex(path: &Path, container: ContainerMode) -> Result<(), Box<dyn std::error::Error>> {
+    let schema = complex_schema();
+
+    let list_col: ArrayRef = Arc::new(ListArray::from_iter_primitive::<Int32Type, _, _>(vec![
+        Some(vec![Some(1), Some(2)]),
+        None,
+        Some(vec![Some(3)]),
+    ]));
+
+    let struct_ids: ArrayRef = Arc::new(Int32Array::from(vec![10, 0, 30]));
+    let struct_names: ArrayRef = Arc::new(StringArray::from(vec![Some("aa"), None, Some("cc")]));
+    let struct_nulls = NullBuffer::new(BooleanBuffer::from(vec![true, false, true]));
+    let struct_col: ArrayRef = Arc::new(StructArray::new(
+        vec![
+            Arc::new(Field::new("id", DataType::Int32, false)),
+            Arc::new(Field::new("name", DataType::Utf8, true)),
+        ]
+        .into(),
+        vec![struct_ids, struct_names],
+        Some(struct_nulls),
+    ));
+
+    let map_keys: ArrayRef = Arc::new(Int32Array::from(vec![1, 2, 3]));
+    let map_values: ArrayRef = Arc::new(Int32Array::from(vec![10, 20, 30]));
+    let map_entries = StructArray::from(vec![
+        (Arc::new(Field::new("key", DataType::Int32, false)), map_keys),
+        (Arc::new(Field::new("value", DataType::Int32, true)), map_values),
+    ]);
+    let map_offsets = OffsetBuffer::from_lengths([2_usize, 0, 1]);
+    let map_nulls = NullBuffer::new(BooleanBuffer::from(vec![true, false, true]));
+    let map_col: ArrayRef = Arc::new(MapArray::try_new(
+        Arc::new(Field::new("entries", map_entries.data_type().clone(), false)),
+        map_offsets,
+        map_entries,
+        Some(map_nulls),
+        false,
+    )?);
+
+    let union_fields = UnionFields::new(
+        vec![0_i8, 1_i8],
+        vec![
+            Field::new("i", DataType::Int32, true),
+            Field::new("b", DataType::Boolean, true),
+        ],
+    );
+    let union_type_ids = ScalarBuffer::from(vec![0_i8, 1_i8, 0_i8]);
+    let union_offsets = ScalarBuffer::from(vec![0_i32, 0_i32, 1_i32]);
+    let union_children = vec![
+        Arc::new(Int32Array::from(vec![100, 200])) as ArrayRef,
+        Arc::new(BooleanArray::from(vec![true])) as ArrayRef,
+    ];
+    let union_col: ArrayRef = Arc::new(UnionArray::try_new(
+        union_fields,
+        union_type_ids,
+        Some(union_offsets),
+        union_children,
+    )?);
+
+    let dec_col: ArrayRef =
+        Arc::new(Decimal128Array::from(vec![12345_i128, -42_i128, 0_i128]).with_precision_and_scale(10, 2)?);
+    let ts_col: ArrayRef = Arc::new(
+        TimestampMillisecondArray::from(vec![1700000000000_i64, 1700000001000_i64, 1700000002000_i64])
+            .with_timezone("UTC"),
+    );
+
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![list_col, struct_col, map_col, union_col, dec_col, ts_col],
+    )?;
+
     let file = File::create(path)?;
     match container {
         ContainerMode::Stream => {
@@ -460,6 +588,160 @@ fn validate_view(path: &Path, container: ContainerMode) -> Result<(), Box<dyn st
     Ok(())
 }
 
+fn validate_complex(path: &Path, container: ContainerMode) -> Result<(), Box<dyn std::error::Error>> {
+    let file = File::open(path)?;
+    let mut reader = match container {
+        ContainerMode::Stream => EitherReader::Stream(StreamReader::try_new(file, None)?),
+        ContainerMode::File => EitherReader::File(FileReader::try_new(file, None)?),
+    };
+    let schema = reader.schema();
+    if schema.fields().len() != 6 {
+        return Err("invalid schema field count".into());
+    }
+    let expected_names = ["list_i32", "struct_pair", "map_i32_i32", "u_dense", "dec", "ts"];
+    for (idx, name) in expected_names.iter().enumerate() {
+        if schema.field(idx).name() != *name {
+            return Err("invalid field names".into());
+        }
+    }
+    if !matches!(schema.field(0).data_type(), DataType::List(_)) {
+        return Err("list_i32 must be list type".into());
+    }
+    if !matches!(schema.field(1).data_type(), DataType::Struct(_)) {
+        return Err("struct_pair must be struct type".into());
+    }
+    if !matches!(schema.field(2).data_type(), DataType::Map(_, _)) {
+        return Err("map_i32_i32 must be map type".into());
+    }
+    if !matches!(schema.field(3).data_type(), DataType::Union(_, UnionMode::Dense)) {
+        return Err("u_dense must be dense union type".into());
+    }
+    if schema.field(4).data_type() != &DataType::Decimal128(10, 2) {
+        return Err("dec must be decimal128(10,2)".into());
+    }
+    if schema.field(5).data_type() != &DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into())) {
+        return Err("ts must be timestamp(ms, UTC)".into());
+    }
+
+    let batch = reader.next_batch()?.ok_or("missing batch")?;
+    if reader.next_batch()?.is_some() {
+        return Err("unexpected extra batch".into());
+    }
+    if batch.num_rows() != 3 {
+        return Err("invalid row count".into());
+    }
+
+    let list_col = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .ok_or("list downcast failed")?;
+    if list_col.is_null(0) || !list_col.is_null(1) || list_col.is_null(2) {
+        return Err("invalid list nulls".into());
+    }
+    let l0 = list_col.value(0);
+    let l2 = list_col.value(2);
+    let l0v = l0.as_any().downcast_ref::<Int32Array>().ok_or("list[0] values downcast failed")?;
+    let l2v = l2.as_any().downcast_ref::<Int32Array>().ok_or("list[2] values downcast failed")?;
+    if l0v.len() != 2 || l0v.value(0) != 1 || l0v.value(1) != 2 || l2v.len() != 1 || l2v.value(0) != 3 {
+        return Err("invalid list values".into());
+    }
+
+    let struct_col = batch
+        .column(1)
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .ok_or("struct downcast failed")?;
+    if struct_col.is_null(0) || !struct_col.is_null(1) || struct_col.is_null(2) {
+        return Err("invalid struct nulls".into());
+    }
+    let sid = struct_col
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .ok_or("struct id downcast failed")?;
+    let sname = struct_col
+        .column(1)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .ok_or("struct name downcast failed")?;
+    if sid.value(0) != 10 || sid.value(2) != 30 || sname.value(0) != "aa" || sname.value(2) != "cc" {
+        return Err("invalid struct values".into());
+    }
+
+    let map_col = batch
+        .column(2)
+        .as_any()
+        .downcast_ref::<MapArray>()
+        .ok_or("map downcast failed")?;
+    if map_col.is_null(0) || !map_col.is_null(1) || map_col.is_null(2) {
+        return Err("invalid map nulls".into());
+    }
+    let m0 = map_col.value(0);
+    let m2 = map_col.value(2);
+    let m0s = m0.as_any().downcast_ref::<StructArray>().ok_or("map[0] struct downcast failed")?;
+    let m2s = m2.as_any().downcast_ref::<StructArray>().ok_or("map[2] struct downcast failed")?;
+    let m0k = m0s.column(0).as_any().downcast_ref::<Int32Array>().ok_or("map[0] key downcast failed")?;
+    let m0v = m0s.column(1).as_any().downcast_ref::<Int32Array>().ok_or("map[0] value downcast failed")?;
+    let m2k = m2s.column(0).as_any().downcast_ref::<Int32Array>().ok_or("map[2] key downcast failed")?;
+    let m2v = m2s.column(1).as_any().downcast_ref::<Int32Array>().ok_or("map[2] value downcast failed")?;
+    if m0k.len() != 2
+        || m0k.value(0) != 1
+        || m0k.value(1) != 2
+        || m0v.value(0) != 10
+        || m0v.value(1) != 20
+        || m2k.len() != 1
+        || m2k.value(0) != 3
+        || m2v.value(0) != 30
+    {
+        return Err("invalid map values".into());
+    }
+
+    let union_col = batch
+        .column(3)
+        .as_any()
+        .downcast_ref::<UnionArray>()
+        .ok_or("union downcast failed")?;
+    let t0 = union_col.type_id(0);
+    let t1 = union_col.type_id(1);
+    let t2 = union_col.type_id(2);
+    if t0 != t2 || t0 == t1 {
+        return Err("invalid union type ids".into());
+    }
+    if union_col.value_offset(0) != 0 || union_col.value_offset(1) != 0 || union_col.value_offset(2) != 1 {
+        return Err("invalid union value offsets".into());
+    }
+    let u0 = union_col.value(0);
+    let u1 = union_col.value(1);
+    let u2 = union_col.value(2);
+    let u0i = u0.as_any().downcast_ref::<Int32Array>().ok_or("union[0] downcast failed")?;
+    let u1b = u1.as_any().downcast_ref::<BooleanArray>().ok_or("union[1] downcast failed")?;
+    let u2i = u2.as_any().downcast_ref::<Int32Array>().ok_or("union[2] downcast failed")?;
+    if u0i.value(0) != 100 || !u1b.value(0) || u2i.value(0) != 200 {
+        return Err("invalid union values".into());
+    }
+
+    let dec = batch
+        .column(4)
+        .as_any()
+        .downcast_ref::<Decimal128Array>()
+        .ok_or("decimal downcast failed")?;
+    if dec.value(0) != 12345 || dec.value(1) != -42 || dec.value(2) != 0 {
+        return Err("invalid decimal values".into());
+    }
+
+    let ts = batch
+        .column(5)
+        .as_any()
+        .downcast_ref::<TimestampMillisecondArray>()
+        .ok_or("timestamp downcast failed")?;
+    if ts.value(0) != 1700000000000 || ts.value(1) != 1700000001000 || ts.value(2) != 1700000002000 {
+        return Err("invalid timestamp values".into());
+    }
+
+    Ok(())
+}
+
 enum EitherReader {
     Stream(StreamReader<File>),
     File(FileReader<File>),
@@ -499,7 +781,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     container = if arg4 == "file" { ContainerMode::File } else { ContainerMode::Stream };
                 } else {
                     return Err(
-                        "usage: <generate|validate> <path.arrow> [canonical|dict-delta|ree|extension|view] [stream|file]"
+                        "usage: <generate|validate> <path.arrow> [canonical|dict-delta|ree|complex|extension|view] [stream|file]"
                             .into(),
                     );
                 }
@@ -520,10 +802,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ("validate", "dict-delta") => validate_dict_delta(path, container),
         ("generate", "ree") => generate_ree(path, container),
         ("validate", "ree") => validate_ree(path, container),
+        ("generate", "complex") => generate_complex(path, container),
+        ("validate", "complex") => validate_complex(path, container),
         ("generate", "extension") => generate_extension(path, container),
         ("validate", "extension") => validate_extension(path, container),
         ("generate", "view") => generate_view(path, container),
         ("validate", "view") => validate_view(path, container),
-        _ => Err("usage: <generate|validate> <path.arrow> [canonical|dict-delta|ree|extension|view] [stream|file]".into()),
+        _ => Err("usage: <generate|validate> <path.arrow> [canonical|dict-delta|ree|complex|extension|view] [stream|file]".into()),
     }
 }
