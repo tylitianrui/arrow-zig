@@ -66,6 +66,14 @@ const fbs = struct {
     const ListViewT = arrow_fbs.org_apache_arrow_flatbuf_ListView.ListViewT;
     const Struct_T = arrow_fbs.org_apache_arrow_flatbuf_Struct_.Struct_T;
     const NullT = arrow_fbs.org_apache_arrow_flatbuf_Null.NullT;
+    const TensorT = arrow_fbs.org_apache_arrow_flatbuf_Tensor.TensorT;
+    const TensorDimT = arrow_fbs.org_apache_arrow_flatbuf_TensorDim.TensorDimT;
+    const SparseTensorT = arrow_fbs.org_apache_arrow_flatbuf_SparseTensor.SparseTensorT;
+    const SparseTensorIndexT = arrow_fbs.org_apache_arrow_flatbuf_SparseTensorIndex.SparseTensorIndexT;
+    const SparseMatrixCompressedAxis = arrow_fbs.org_apache_arrow_flatbuf_SparseMatrixCompressedAxis.SparseMatrixCompressedAxis;
+    const SparseTensorIndexCOOT = arrow_fbs.org_apache_arrow_flatbuf_SparseTensorIndexCOO.SparseTensorIndexCOOT;
+    const SparseMatrixIndexCSXT = arrow_fbs.org_apache_arrow_flatbuf_SparseMatrixIndexCSX.SparseMatrixIndexCSXT;
+    const SparseTensorIndexCSFT = arrow_fbs.org_apache_arrow_flatbuf_SparseTensorIndexCSF.SparseTensorIndexCSFT;
 };
 
 pub const SchemaRef = schema_mod.SchemaRef;
@@ -81,6 +89,79 @@ pub const OwnedSchema = struct {
 
     pub fn allocator(self: *OwnedSchema) std.mem.Allocator {
         return self.arena.allocator();
+    }
+};
+
+pub const BufferRegion = struct {
+    offset: usize,
+    length: usize,
+
+    pub fn bytes(self: BufferRegion, body: []const u8) []const u8 {
+        return body[self.offset .. self.offset + self.length];
+    }
+};
+
+pub const TensorDim = struct {
+    size: i64,
+    name: ?[]const u8,
+};
+
+pub const TensorMetadata = struct {
+    value_type: DataType,
+    shape: []const TensorDim,
+    strides: ?[]const i64,
+    data: BufferRegion,
+};
+
+pub const SparseMatrixAxis = enum {
+    row,
+    column,
+};
+
+pub const SparseTensorIndexMetadata = union(enum) {
+    coo: struct {
+        indices_type: datatype.IntType,
+        indices_strides: ?[]const i64,
+        indices: BufferRegion,
+        is_canonical: bool,
+    },
+    csx: struct {
+        compressed_axis: SparseMatrixAxis,
+        indptr_type: datatype.IntType,
+        indptr: BufferRegion,
+        indices_type: datatype.IntType,
+        indices: BufferRegion,
+    },
+    csf: struct {
+        indptr_type: datatype.IntType,
+        indptr_buffers: []const BufferRegion,
+        indices_type: datatype.IntType,
+        indices_buffers: []const BufferRegion,
+        axis_order: []const i32,
+    },
+};
+
+pub const SparseTensorMetadata = struct {
+    value_type: DataType,
+    shape: []const TensorDim,
+    non_zero_length: usize,
+    sparse_index: SparseTensorIndexMetadata,
+    data: BufferRegion,
+};
+
+pub const TensorLikeMetadata = union(enum) {
+    tensor: TensorMetadata,
+    sparse_tensor: SparseTensorMetadata,
+};
+
+pub const OwnedTensorLikeMessage = struct {
+    arena: std.heap.ArenaAllocator,
+    metadata: TensorLikeMetadata,
+    body: array_data.SharedBuffer,
+
+    pub fn deinit(self: *OwnedTensorLikeMessage) void {
+        self.body.release();
+        self.arena.deinit();
     }
 };
 
@@ -165,6 +246,38 @@ pub fn StreamReader(comptime ReaderType: type) type {
                     // outside this row-batch reader surface. Skip and continue.
                     .Tensor, .SparseTensor => continue,
                     else => return StreamError.InvalidMessage,
+                }
+            }
+        }
+
+        pub fn nextTensorLikeMessage(self: *Self) (StreamError || fb.common.PackError || @TypeOf(self.reader).Error || error{ EndOfStream, OutOfMemory })!?OwnedTensorLikeMessage {
+            while (true) {
+                const maybe_msg = try readMessageOptional(self.*);
+                if (maybe_msg == null) return null;
+                var msg = maybe_msg.?;
+                defer msg.deinit(self.allocator);
+
+                if (msg.body == null) {
+                    if (msg.msg.header == .Tensor or msg.msg.header == .SparseTensor) return StreamError.InvalidBody;
+                    continue;
+                }
+
+                switch (msg.msg.header) {
+                    .Tensor, .SparseTensor => {
+                        var arena = std.heap.ArenaAllocator.init(self.allocator);
+                        errdefer arena.deinit();
+                        const meta = try decodeTensorLikeFromUnpackedMessage(
+                            arena.allocator(),
+                            msg.msg,
+                            msg.body.?,
+                        );
+                        return .{
+                            .arena = arena,
+                            .metadata = meta,
+                            .body = msg.body.?.retain(),
+                        };
+                    },
+                    else => continue,
                 }
             }
         }
@@ -282,6 +395,254 @@ pub fn decodeSchemaFromMessageMetadata(
     defer msg_t.deinit(allocator);
     if (msg_t.header != .Schema) return StreamError.InvalidMessage;
     return try buildSchemaFromFlatbuf(allocator, msg_t.header.Schema.?);
+}
+
+pub fn decodeTensorFromMessageMetadata(
+    allocator: std.mem.Allocator,
+    metadata: []const u8,
+    body: array_data.SharedBuffer,
+) (StreamError || fb.common.PackError || error{OutOfMemory})!TensorMetadata {
+    var msg_t = try unpackMessageFromMetadata(allocator, metadata);
+    defer msg_t.deinit(allocator);
+    if (msg_t.header != .Tensor) return StreamError.InvalidMessage;
+    return try buildTensorFromFlatbuf(allocator, msg_t.header.Tensor orelse return StreamError.InvalidMetadata, body);
+}
+
+pub fn decodeSparseTensorFromMessageMetadata(
+    allocator: std.mem.Allocator,
+    metadata: []const u8,
+    body: array_data.SharedBuffer,
+) (StreamError || fb.common.PackError || error{OutOfMemory})!SparseTensorMetadata {
+    var msg_t = try unpackMessageFromMetadata(allocator, metadata);
+    defer msg_t.deinit(allocator);
+    if (msg_t.header != .SparseTensor) return StreamError.InvalidMessage;
+    return try buildSparseTensorFromFlatbuf(allocator, msg_t.header.SparseTensor orelse return StreamError.InvalidMetadata, body);
+}
+
+fn decodeTensorLikeFromUnpackedMessage(
+    allocator: std.mem.Allocator,
+    msg_t: fbs.MessageT,
+    body: array_data.SharedBuffer,
+) (StreamError || error{OutOfMemory})!TensorLikeMetadata {
+    return switch (msg_t.header) {
+        .Tensor => .{
+            .tensor = try buildTensorFromFlatbuf(allocator, msg_t.header.Tensor orelse return StreamError.InvalidMetadata, body),
+        },
+        .SparseTensor => .{
+            .sparse_tensor = try buildSparseTensorFromFlatbuf(allocator, msg_t.header.SparseTensor orelse return StreamError.InvalidMetadata, body),
+        },
+        else => StreamError.InvalidMessage,
+    };
+}
+
+fn buildTensorFromFlatbuf(
+    allocator: std.mem.Allocator,
+    tensor_t: *fbs.TensorT,
+    body: array_data.SharedBuffer,
+) (StreamError || error{OutOfMemory})!TensorMetadata {
+    const value_type = try dataTypeFromTensorType(allocator, tensor_t.type);
+    const shape = try copyTensorDims(allocator, tensor_t.shape.items);
+    const strides = if (tensor_t.strides.items.len == 0) null else blk: {
+        const out = try allocator.alloc(i64, tensor_t.strides.items.len);
+        @memcpy(out, tensor_t.strides.items);
+        break :blk @as(?[]const i64, out);
+    };
+    const data_buf = tensor_t.data orelse return StreamError.InvalidMetadata;
+    const data = try parseBufferRegion(data_buf, body.len());
+    return .{
+        .value_type = value_type,
+        .shape = shape,
+        .strides = strides,
+        .data = data,
+    };
+}
+
+fn buildSparseTensorFromFlatbuf(
+    allocator: std.mem.Allocator,
+    sparse_t: *fbs.SparseTensorT,
+    body: array_data.SharedBuffer,
+) (StreamError || error{OutOfMemory})!SparseTensorMetadata {
+    const value_type = try dataTypeFromTensorType(allocator, sparse_t.type);
+    const shape = try copyTensorDims(allocator, sparse_t.shape.items);
+    if (sparse_t.non_zero_length < 0) return StreamError.InvalidMetadata;
+    const non_zero_length = std.math.cast(usize, sparse_t.non_zero_length) orelse return StreamError.InvalidMetadata;
+
+    const sparse_index = switch (sparse_t.sparseIndex) {
+        .SparseTensorIndexCOO => |coo_ptr| blk: {
+            const coo = coo_ptr orelse return StreamError.InvalidMetadata;
+            const indices_type = try intTypeFromFbsInt(coo.indicesType orelse return StreamError.InvalidMetadata);
+            const indices_strides = if (coo.indicesStrides.items.len == 0) null else strides_blk: {
+                const out = try allocator.alloc(i64, coo.indicesStrides.items.len);
+                @memcpy(out, coo.indicesStrides.items);
+                break :strides_blk @as(?[]const i64, out);
+            };
+            break :blk SparseTensorIndexMetadata{
+                .coo = .{
+                    .indices_type = indices_type,
+                    .indices_strides = indices_strides,
+                    .indices = try parseBufferRegion(coo.indicesBuffer orelse return StreamError.InvalidMetadata, body.len()),
+                    .is_canonical = coo.isCanonical,
+                },
+            };
+        },
+        .SparseMatrixIndexCSX => |csx_ptr| blk: {
+            const csx = csx_ptr orelse return StreamError.InvalidMetadata;
+            const axis = switch (csx.compressedAxis) {
+                .Row => SparseMatrixAxis.row,
+                .Column => SparseMatrixAxis.column,
+            };
+            break :blk SparseTensorIndexMetadata{
+                .csx = .{
+                    .compressed_axis = axis,
+                    .indptr_type = try intTypeFromFbsInt(csx.indptrType orelse return StreamError.InvalidMetadata),
+                    .indptr = try parseBufferRegion(csx.indptrBuffer orelse return StreamError.InvalidMetadata, body.len()),
+                    .indices_type = try intTypeFromFbsInt(csx.indicesType orelse return StreamError.InvalidMetadata),
+                    .indices = try parseBufferRegion(csx.indicesBuffer orelse return StreamError.InvalidMetadata, body.len()),
+                },
+            };
+        },
+        .SparseTensorIndexCSF => |csf_ptr| blk: {
+            const csf = csf_ptr orelse return StreamError.InvalidMetadata;
+            const indptr_buffers = try allocator.alloc(BufferRegion, csf.indptrBuffers.items.len);
+            for (csf.indptrBuffers.items, 0..) |buf_t, i| {
+                indptr_buffers[i] = try parseBufferRegion(&buf_t, body.len());
+            }
+            const indices_buffers = try allocator.alloc(BufferRegion, csf.indicesBuffers.items.len);
+            for (csf.indicesBuffers.items, 0..) |buf_t, i| {
+                indices_buffers[i] = try parseBufferRegion(&buf_t, body.len());
+            }
+            const axis_order = try allocator.alloc(i32, csf.axisOrder.items.len);
+            @memcpy(axis_order, csf.axisOrder.items);
+            break :blk SparseTensorIndexMetadata{
+                .csf = .{
+                    .indptr_type = try intTypeFromFbsInt(csf.indptrType orelse return StreamError.InvalidMetadata),
+                    .indptr_buffers = indptr_buffers,
+                    .indices_type = try intTypeFromFbsInt(csf.indicesType orelse return StreamError.InvalidMetadata),
+                    .indices_buffers = indices_buffers,
+                    .axis_order = axis_order,
+                },
+            };
+        },
+        else => return StreamError.InvalidMetadata,
+    };
+
+    return .{
+        .value_type = value_type,
+        .shape = shape,
+        .non_zero_length = non_zero_length,
+        .sparse_index = sparse_index,
+        .data = try parseBufferRegion(sparse_t.data orelse return StreamError.InvalidMetadata, body.len()),
+    };
+}
+
+fn copyTensorDims(allocator: std.mem.Allocator, dims_t: []const fbs.TensorDimT) error{OutOfMemory}![]const TensorDim {
+    const out = try allocator.alloc(TensorDim, dims_t.len);
+    for (dims_t, 0..) |dim, i| {
+        out[i] = .{
+            .size = dim.size,
+            .name = if (dim.name.len == 0) null else try allocator.dupe(u8, dim.name),
+        };
+    }
+    return out;
+}
+
+fn parseBufferRegion(buffer_t: *const fbs.BufferT, body_len: usize) StreamError!BufferRegion {
+    if (buffer_t.offset < 0 or buffer_t.length < 0) return StreamError.InvalidBody;
+    const offset = std.math.cast(usize, buffer_t.offset) orelse return StreamError.InvalidBody;
+    const length = std.math.cast(usize, buffer_t.length) orelse return StreamError.InvalidBody;
+    const end = std.math.add(usize, offset, length) catch return StreamError.InvalidBody;
+    if (end > body_len) return StreamError.InvalidBody;
+    return .{ .offset = offset, .length = length };
+}
+
+fn intTypeFromFbsInt(int_t: *const fbs.IntT) StreamError!datatype.IntType {
+    const bit_width = std.math.cast(u8, int_t.bitWidth) orelse return StreamError.InvalidMetadata;
+    return switch (bit_width) {
+        8, 16, 32, 64 => .{ .bit_width = bit_width, .signed = int_t.is_signed },
+        else => StreamError.UnsupportedType,
+    };
+}
+
+fn dataTypeFromTensorType(allocator: std.mem.Allocator, type_t: fbs.TypeT) (StreamError || error{OutOfMemory})!DataType {
+    return switch (type_t) {
+        .Bool => DataType{ .bool = {} },
+        .Int => |int_t| blk: {
+            const int_info = try intTypeFromFbsInt(int_t orelse return StreamError.InvalidMetadata);
+            break :blk switch (int_info.bit_width) {
+                8 => if (int_info.signed) DataType{ .int8 = {} } else DataType{ .uint8 = {} },
+                16 => if (int_info.signed) DataType{ .int16 = {} } else DataType{ .uint16 = {} },
+                32 => if (int_info.signed) DataType{ .int32 = {} } else DataType{ .uint32 = {} },
+                64 => if (int_info.signed) DataType{ .int64 = {} } else DataType{ .uint64 = {} },
+                else => return StreamError.UnsupportedType,
+            };
+        },
+        .FloatingPoint => |fp_t| blk: {
+            const fp = fp_t orelse return StreamError.InvalidMetadata;
+            break :blk switch (fp.precision) {
+                .HALF => DataType{ .half_float = {} },
+                .SINGLE => DataType{ .float = {} },
+                .DOUBLE => DataType{ .double = {} },
+            };
+        },
+        .Date => |date_t| blk: {
+            const d = date_t orelse return StreamError.InvalidMetadata;
+            break :blk switch (d.unit) {
+                .DAY => DataType{ .date32 = {} },
+                .MILLISECOND => DataType{ .date64 = {} },
+            };
+        },
+        .Time => |time_t| blk: {
+            const t = time_t orelse return StreamError.InvalidMetadata;
+            const unit = fromFbsTimeUnit(t.unit);
+            break :blk switch (t.bitWidth) {
+                32 => switch (unit) {
+                    .second, .millisecond => DataType{ .time32 = .{ .unit = unit } },
+                    else => return StreamError.InvalidMetadata,
+                },
+                64 => switch (unit) {
+                    .microsecond, .nanosecond => DataType{ .time64 = .{ .unit = unit } },
+                    else => return StreamError.InvalidMetadata,
+                },
+                else => return StreamError.UnsupportedType,
+            };
+        },
+        .Timestamp => |ts_t| blk: {
+            const ts = ts_t orelse return StreamError.InvalidMetadata;
+            break :blk DataType{
+                .timestamp = .{
+                    .unit = fromFbsTimeUnit(ts.unit),
+                    .timezone = if (ts.timezone.len == 0) null else try allocator.dupe(u8, ts.timezone),
+                },
+            };
+        },
+        .Duration => |d_t| DataType{ .duration = .{ .unit = fromFbsTimeUnit((d_t orelse return StreamError.InvalidMetadata).unit) } },
+        .Interval => |int_t| blk: {
+            const it = int_t orelse return StreamError.InvalidMetadata;
+            break :blk switch (it.unit) {
+                .YEAR_MONTH => DataType{ .interval_months = .{ .unit = .months } },
+                .DAY_TIME => DataType{ .interval_day_time = .{ .unit = .day_time } },
+                .MONTH_DAY_NANO => DataType{ .interval_month_day_nano = .{ .unit = .month_day_nano } },
+            };
+        },
+        .FixedSizeBinary => |fsb_t| blk: {
+            const fsb = fsb_t orelse return StreamError.InvalidMetadata;
+            if (fsb.byteWidth <= 0) return StreamError.InvalidMetadata;
+            break :blk DataType{ .fixed_size_binary = .{ .byte_width = fsb.byteWidth } };
+        },
+        .Decimal => |dec_t| blk: {
+            const dec = dec_t orelse return StreamError.InvalidMetadata;
+            const precision = std.math.cast(u8, dec.precision) orelse return StreamError.InvalidMetadata;
+            const params = datatype.DecimalParams{ .precision = precision, .scale = dec.scale };
+            break :blk switch (dec.bitWidth) {
+                32 => DataType{ .decimal32 = params },
+                64 => DataType{ .decimal64 = params },
+                128 => DataType{ .decimal128 = params },
+                256 => DataType{ .decimal256 = params },
+                else => return StreamError.UnsupportedType,
+            };
+        },
+        else => StreamError.UnsupportedType,
+    };
 }
 
 pub fn ingestDictionaryBatchFromMessageMetadata(
@@ -3068,6 +3429,91 @@ test "ipc stream roundtrip run-end encoded int32 values" {
     try std.testing.expectEqual(@as(i32, 200), a4.value(0));
 }
 
+test "ipc reader decodes tensor message via tensor-like API" {
+    const allocator = std.testing.allocator;
+
+    var bytes = std.ArrayList(u8){};
+    defer bytes.deinit(allocator);
+
+    try appendTensorMessageForTest(allocator, bytes.writer(allocator));
+    try format.writeMessageLength(bytes.writer(allocator), 0);
+
+    var fbs_stream = std.io.fixedBufferStream(bytes.items);
+    var reader = StreamReader(@TypeOf(fbs_stream.reader())).init(allocator, fbs_stream.reader());
+    defer reader.deinit();
+
+    const msg_opt = try reader.nextTensorLikeMessage();
+    try std.testing.expect(msg_opt != null);
+    var msg = msg_opt.?;
+    defer msg.deinit();
+
+    switch (msg.metadata) {
+        .tensor => |tensor| {
+            try std.testing.expect(tensor.value_type == .int32);
+            try std.testing.expectEqual(@as(usize, 2), tensor.shape.len);
+            try std.testing.expectEqual(@as(i64, 2), tensor.shape[0].size);
+            try std.testing.expectEqual(@as(i64, 3), tensor.shape[1].size);
+            try std.testing.expect(tensor.strides != null);
+            try std.testing.expectEqual(@as(i64, 12), tensor.strides.?[0]);
+            try std.testing.expectEqual(@as(i64, 4), tensor.strides.?[1]);
+            const data_bytes = tensor.data.bytes(msg.body.data);
+            const ints = std.mem.bytesAsSlice(i32, data_bytes);
+            try std.testing.expectEqual(@as(usize, 6), ints.len);
+            try std.testing.expectEqual(@as(i32, 1), ints[0]);
+            try std.testing.expectEqual(@as(i32, 6), ints[5]);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "ipc reader decodes sparse tensor message via tensor-like API" {
+    const allocator = std.testing.allocator;
+
+    var bytes = std.ArrayList(u8){};
+    defer bytes.deinit(allocator);
+
+    try appendSparseTensorMessageForTest(allocator, bytes.writer(allocator));
+    try format.writeMessageLength(bytes.writer(allocator), 0);
+
+    var fbs_stream = std.io.fixedBufferStream(bytes.items);
+    var reader = StreamReader(@TypeOf(fbs_stream.reader())).init(allocator, fbs_stream.reader());
+    defer reader.deinit();
+
+    const msg_opt = try reader.nextTensorLikeMessage();
+    try std.testing.expect(msg_opt != null);
+    var msg = msg_opt.?;
+    defer msg.deinit();
+
+    switch (msg.metadata) {
+        .sparse_tensor => |sparse| {
+            try std.testing.expect(sparse.value_type == .int32);
+            try std.testing.expectEqual(@as(usize, 2), sparse.shape.len);
+            try std.testing.expectEqual(@as(usize, 2), sparse.non_zero_length);
+            try std.testing.expectEqual(@as(usize, 8), sparse.data.length);
+            switch (sparse.sparse_index) {
+                .coo => |coo| {
+                    try std.testing.expect(coo.indices_type.signed);
+                    try std.testing.expectEqual(@as(u8, 64), coo.indices_type.bit_width);
+                    try std.testing.expect(coo.is_canonical);
+                    try std.testing.expectEqual(@as(usize, 32), coo.indices.length);
+                    const idx_bytes = coo.indices.bytes(msg.body.data);
+                    const idx_vals = std.mem.bytesAsSlice(i64, idx_bytes);
+                    try std.testing.expectEqual(@as(usize, 4), idx_vals.len);
+                    try std.testing.expectEqual(@as(i64, 0), idx_vals[0]);
+                    try std.testing.expectEqual(@as(i64, 2), idx_vals[3]);
+                },
+                else => return error.TestUnexpectedResult,
+            }
+            const data_bytes = sparse.data.bytes(msg.body.data);
+            const vals = std.mem.bytesAsSlice(i32, data_bytes);
+            try std.testing.expectEqual(@as(usize, 2), vals.len);
+            try std.testing.expectEqual(@as(i32, 7), vals[0]);
+            try std.testing.expectEqual(@as(i32, 9), vals[1]);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
 test "ipc schema roundtrip preserves field and schema metadata" {
     const allocator = std.testing.allocator;
 
@@ -3800,6 +4246,110 @@ fn appendEncodedMessage(allocator: std.mem.Allocator, writer: anytype, msg: fbs.
 
     if (body.len > 0) try writer.writeAll(body);
     try format.writePadding(writer, format.padLen(body.len));
+}
+
+fn appendTensorMessageForTest(allocator: std.mem.Allocator, writer: anytype) !void {
+    const int_ptr = try allocator.create(fbs.IntT);
+    int_ptr.* = .{ .bitWidth = 32, .is_signed = true };
+
+    var shape = try std.ArrayList(fbs.TensorDimT).initCapacity(allocator, 2);
+    try shape.append(allocator, .{ .size = 2, .name = "rows" });
+    try shape.append(allocator, .{ .size = 3, .name = "cols" });
+
+    var strides = try std.ArrayList(i64).initCapacity(allocator, 2);
+    try strides.append(allocator, 12);
+    try strides.append(allocator, 4);
+
+    const data_ptr = try allocator.create(fbs.BufferT);
+    data_ptr.* = .{ .offset = 0, .length = 24 };
+
+    const tensor_ptr = try allocator.create(fbs.TensorT);
+    tensor_ptr.* = .{
+        .type = .{ .Int = int_ptr },
+        .shape = shape,
+        .strides = strides,
+        .data = data_ptr,
+    };
+
+    var msg = fbs.MessageT{
+        .version = .V5,
+        .header = .{ .Tensor = tensor_ptr },
+        .bodyLength = 24,
+        .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0),
+    };
+    defer msg.deinit(allocator);
+
+    var body: [24]u8 = undefined;
+    for (0..6) |i| {
+        const value: i32 = @intCast(i + 1);
+        var tmp: [4]u8 = undefined;
+        std.mem.writeInt(i32, &tmp, value, .little);
+        @memcpy(body[i * 4 .. i * 4 + 4], tmp[0..]);
+    }
+    try appendEncodedMessage(allocator, writer, msg, body[0..]);
+}
+
+fn appendSparseTensorMessageForTest(allocator: std.mem.Allocator, writer: anytype) !void {
+    const value_type_ptr = try allocator.create(fbs.IntT);
+    value_type_ptr.* = .{ .bitWidth = 32, .is_signed = true };
+
+    var shape = try std.ArrayList(fbs.TensorDimT).initCapacity(allocator, 2);
+    try shape.append(allocator, .{ .size = 2, .name = "rows" });
+    try shape.append(allocator, .{ .size = 3, .name = "cols" });
+
+    const indices_type_ptr = try allocator.create(fbs.IntT);
+    indices_type_ptr.* = .{ .bitWidth = 64, .is_signed = true };
+
+    var indices_strides = try std.ArrayList(i64).initCapacity(allocator, 2);
+    try indices_strides.append(allocator, 16);
+    try indices_strides.append(allocator, 8);
+
+    const indices_buf_ptr = try allocator.create(fbs.BufferT);
+    indices_buf_ptr.* = .{ .offset = 0, .length = 32 };
+
+    const coo_ptr = try allocator.create(fbs.SparseTensorIndexCOOT);
+    coo_ptr.* = .{
+        .indicesType = indices_type_ptr,
+        .indicesStrides = indices_strides,
+        .indicesBuffer = indices_buf_ptr,
+        .isCanonical = true,
+    };
+
+    const data_ptr = try allocator.create(fbs.BufferT);
+    data_ptr.* = .{ .offset = 32, .length = 8 };
+
+    const sparse_ptr = try allocator.create(fbs.SparseTensorT);
+    sparse_ptr.* = .{
+        .type = .{ .Int = value_type_ptr },
+        .shape = shape,
+        .non_zero_length = 2,
+        .sparseIndex = .{ .SparseTensorIndexCOO = coo_ptr },
+        .data = data_ptr,
+    };
+
+    var msg = fbs.MessageT{
+        .version = .V5,
+        .header = .{ .SparseTensor = sparse_ptr },
+        .bodyLength = 40,
+        .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0),
+    };
+    defer msg.deinit(allocator);
+
+    var body: [40]u8 = undefined;
+    @memset(body[0..], 0);
+    const indices = [_]i64{ 0, 1, 1, 2 };
+    for (indices, 0..) |v, i| {
+        var tmp: [8]u8 = undefined;
+        std.mem.writeInt(i64, &tmp, v, .little);
+        @memcpy(body[i * 8 .. i * 8 + 8], tmp[0..]);
+    }
+    var v0: [4]u8 = undefined;
+    std.mem.writeInt(i32, &v0, 7, .little);
+    @memcpy(body[32..36], v0[0..]);
+    var v1: [4]u8 = undefined;
+    std.mem.writeInt(i32, &v1, 9, .little);
+    @memcpy(body[36..40], v1[0..]);
+    try appendEncodedMessage(allocator, writer, msg, body[0..]);
 }
 
 fn appendValidTestMessageWithBody(allocator: std.mem.Allocator, writer: anytype, body_len: usize, fill: u8) !void {
