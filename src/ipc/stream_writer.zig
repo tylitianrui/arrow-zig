@@ -68,6 +68,14 @@ const fbs = struct {
     const LargeListViewT = arrow_fbs.org_apache_arrow_flatbuf_LargeListView.LargeListViewT;
     const Struct_T = arrow_fbs.org_apache_arrow_flatbuf_Struct_.Struct_T;
     const NullT = arrow_fbs.org_apache_arrow_flatbuf_Null.NullT;
+    const BodyCompressionT = arrow_fbs.org_apache_arrow_flatbuf_BodyCompression.BodyCompressionT;
+    const CompressionType = arrow_fbs.org_apache_arrow_flatbuf_CompressionType.CompressionType;
+    const BodyCompressionMethod = arrow_fbs.org_apache_arrow_flatbuf_BodyCompressionMethod.BodyCompressionMethod;
+};
+
+pub const BodyCompressionCodec = enum {
+    lz4_frame,
+    zstd,
 };
 
 pub fn StreamWriter(comptime WriterType: type) type {
@@ -75,6 +83,7 @@ pub fn StreamWriter(comptime WriterType: type) type {
         allocator: std.mem.Allocator,
         writer: WriterType,
         dictionary_values: std.AutoHashMap(i64, ArrayRef),
+        body_compression: ?BodyCompressionCodec = null,
 
         const Self = @This();
 
@@ -83,7 +92,21 @@ pub fn StreamWriter(comptime WriterType: type) type {
                 .allocator = allocator,
                 .writer = writer,
                 .dictionary_values = std.AutoHashMap(i64, ArrayRef).init(allocator),
+                .body_compression = null,
             };
+        }
+
+        pub fn initWithBodyCompression(allocator: std.mem.Allocator, writer: WriterType, codec: BodyCompressionCodec) Self {
+            return .{
+                .allocator = allocator,
+                .writer = writer,
+                .dictionary_values = std.AutoHashMap(i64, ArrayRef).init(allocator),
+                .body_compression = codec,
+            };
+        }
+
+        pub fn setBodyCompression(self: *Self, codec: ?BodyCompressionCodec) void {
+            self.body_compression = codec;
         }
 
         pub fn deinit(self: *Self) void {
@@ -160,11 +183,30 @@ pub fn StreamWriter(comptime WriterType: type) type {
             var buffers = try std.ArrayList(fbs.BufferT).initCapacity(self.allocator, 0);
             var variadic_buffer_counts = try std.ArrayList(i64).initCapacity(self.allocator, 0);
             var body_buffers = try std.ArrayList(array_data.SharedBuffer).initCapacity(self.allocator, 0);
+            var owns_body_buffers = false;
             defer body_buffers.deinit(self.allocator);
+            defer if (owns_body_buffers) {
+                for (body_buffers.items) |buf| {
+                    var owned = buf;
+                    owned.release();
+                }
+            };
 
             var body_offset: u64 = 0;
             for (batch.columns) |col| {
                 try appendArrayMeta(self.allocator, col.data(), &nodes, &buffers, &variadic_buffer_counts, &body_buffers, &body_offset);
+            }
+
+            var compression_ptr: ?*fbs.BodyCompressionT = null;
+            if (self.body_compression) |codec| {
+                compression_ptr = try applyBodyCompression(
+                    self.allocator,
+                    codec,
+                    &buffers,
+                    &body_buffers,
+                    &body_offset,
+                );
+                owns_body_buffers = true;
             }
 
             const record_batch_ptr = try self.allocator.create(fbs.RecordBatchT);
@@ -173,6 +215,7 @@ pub fn StreamWriter(comptime WriterType: type) type {
                 .length = @intCast(batch.numRows()),
                 .nodes = nodes,
                 .buffers = buffers,
+                .compression = compression_ptr,
                 .variadicBufferCounts = variadic_buffer_counts,
             };
 
@@ -839,6 +882,56 @@ fn appendArrayMeta(
     }
 }
 
+fn applyBodyCompression(
+    allocator: std.mem.Allocator,
+    codec: BodyCompressionCodec,
+    buffers: *std.ArrayList(fbs.BufferT),
+    body_buffers: *std.ArrayList(array_data.SharedBuffer),
+    body_offset: *u64,
+) WriterError!*fbs.BodyCompressionT {
+    if (buffers.items.len != body_buffers.items.len) return StreamError.InvalidMetadata;
+
+    const original = try allocator.dupe(array_data.SharedBuffer, body_buffers.items);
+    defer allocator.free(original);
+
+    body_buffers.clearRetainingCapacity();
+    var cursor: u64 = 0;
+
+    for (original, 0..) |src, i| {
+        if (src.len() == 0) {
+            buffers.items[i] = .{ .offset = @intCast(cursor), .length = 0 };
+            try body_buffers.append(allocator, array_data.SharedBuffer.empty);
+            continue;
+        }
+
+        const encoded_len = std.math.add(usize, 8, src.len()) catch return StreamError.InvalidMetadata;
+        var encoded = try buffer.OwnedBuffer.init(allocator, encoded_len);
+        errdefer encoded.deinit();
+
+        var header: [8]u8 = undefined;
+        std.mem.writeInt(i64, &header, -1, .little);
+        @memcpy(encoded.data[0..8], header[0..]);
+        @memcpy(encoded.data[8..encoded_len], src.data);
+
+        const shared = try encoded.toShared(encoded_len);
+        try body_buffers.append(allocator, shared);
+        buffers.items[i] = .{ .offset = @intCast(cursor), .length = @intCast(encoded_len) };
+        cursor += @intCast(format.paddedLen(encoded_len));
+    }
+
+    body_offset.* = cursor;
+
+    const compression_ptr = try allocator.create(fbs.BodyCompressionT);
+    compression_ptr.* = .{
+        .codec = switch (codec) {
+            .lz4_frame => .LZ4_FRAME,
+            .zstd => .ZSTD,
+        },
+        .method = .BUFFER,
+    };
+    return compression_ptr;
+}
+
 fn computeNullCount(data: *const ArrayData) usize {
     const validity = data.validity() orelse return 0;
     return validity.countNulls();
@@ -1141,6 +1234,58 @@ test "ipc writer emits dictionary delta on append-only dictionary growth" {
     try std.testing.expectEqual(@as(usize, 2), dict_flags.items.len);
     try std.testing.expectEqual(false, dict_flags.items[0]);
     try std.testing.expectEqual(true, dict_flags.items[1]);
+}
+
+test "ipc writer emits body compression metadata and framing" {
+    const allocator = std.testing.allocator;
+
+    const int_type = DataType{ .int32 = {} };
+    const fields = [_]Field{
+        .{ .name = "id", .data_type = &int_type, .nullable = false },
+    };
+    const schema = Schema{ .fields = fields[0..] };
+
+    var builder = try @import("../array/primitive_array.zig").PrimitiveBuilder(i32, DataType{ .int32 = {} }).init(allocator, 3);
+    defer builder.deinit();
+    try builder.append(1);
+    try builder.append(2);
+    try builder.append(3);
+    var col = try builder.finish();
+    defer col.release();
+
+    var batch = try RecordBatch.initBorrowed(allocator, schema, &[_]ArrayRef{col});
+    defer batch.deinit();
+
+    var out = std.array_list.Managed(u8).init(allocator);
+    defer out.deinit();
+
+    var writer = StreamWriter(@TypeOf(out.writer())).initWithBodyCompression(allocator, out.writer(), .zstd);
+    defer writer.deinit();
+    try writer.writeSchema(schema);
+    try writer.writeRecordBatch(batch);
+    try writer.writeEnd();
+
+    var stream = std.io.fixedBufferStream(out.items);
+    const schema_msg = (try readNextMessageForTest(allocator, stream.reader())).?;
+    defer {
+        var msg = schema_msg;
+        msg.deinit(allocator);
+    }
+    try std.testing.expect(schema_msg.header == .Schema);
+
+    const rb_msg_opt = try readNextMessageForTest(allocator, stream.reader());
+    try std.testing.expect(rb_msg_opt != null);
+    var rb_msg = rb_msg_opt.?;
+    defer rb_msg.deinit(allocator);
+    try std.testing.expect(rb_msg.header == .RecordBatch);
+    const rb = rb_msg.header.RecordBatch.?;
+    try std.testing.expect(rb.compression != null);
+    try std.testing.expectEqual(fbs.CompressionType.ZSTD, rb.compression.?.codec);
+    try std.testing.expectEqual(fbs.BodyCompressionMethod.BUFFER, rb.compression.?.method);
+
+    // Non-empty fixed-width values buffer (3 * int32) gets an extra 8-byte prefix.
+    try std.testing.expectEqual(@as(i64, 0), rb.buffers.items[0].length);
+    try std.testing.expectEqual(@as(i64, 20), rb.buffers.items[1].length);
 }
 
 test "ipc writer rejects dictionary with unsigned index type" {

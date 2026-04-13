@@ -66,6 +66,8 @@ const fbs = struct {
     const ListViewT = arrow_fbs.org_apache_arrow_flatbuf_ListView.ListViewT;
     const Struct_T = arrow_fbs.org_apache_arrow_flatbuf_Struct_.Struct_T;
     const NullT = arrow_fbs.org_apache_arrow_flatbuf_Null.NullT;
+    const CompressionType = arrow_fbs.org_apache_arrow_flatbuf_CompressionType.CompressionType;
+    const BodyCompressionMethod = arrow_fbs.org_apache_arrow_flatbuf_BodyCompressionMethod.BodyCompressionMethod;
     const TensorT = arrow_fbs.org_apache_arrow_flatbuf_Tensor.TensorT;
     const TensorDimT = arrow_fbs.org_apache_arrow_flatbuf_TensorDim.TensorDimT;
     const SparseTensorT = arrow_fbs.org_apache_arrow_flatbuf_SparseTensor.SparseTensorT;
@@ -1117,6 +1119,9 @@ fn buildRecordBatchFromFlatbuf(
         allocator.free(columns);
     }
 
+    var decoded = try decodeRecordBatchBody(allocator, record_batch_t, body);
+    defer decoded.deinit(allocator);
+
     var node_index: usize = 0;
     var buffer_index: usize = 0;
     var variadic_index: usize = 0;
@@ -1125,9 +1130,9 @@ fn buildRecordBatchFromFlatbuf(
             allocator,
             field.data_type.*,
             record_batch_t.nodes.items,
-            record_batch_t.buffers.items,
+            decoded.buffers_meta,
             record_batch_t.variadicBufferCounts.items,
-            body,
+            decoded.body,
             &node_index,
             &buffer_index,
             &variadic_index,
@@ -1135,7 +1140,7 @@ fn buildRecordBatchFromFlatbuf(
         );
         col_count += 1;
     }
-    if (node_index != record_batch_t.nodes.items.len or buffer_index != record_batch_t.buffers.items.len) {
+    if (node_index != record_batch_t.nodes.items.len or buffer_index != decoded.buffers_meta.len) {
         return StreamError.InvalidMetadata;
     }
     if (variadic_index != record_batch_t.variadicBufferCounts.items.len) return StreamError.InvalidMetadata;
@@ -1398,6 +1403,146 @@ fn bufferCountForType(dt: DataType, variadic_buffer_counts: []const i64, variadi
     };
 }
 
+const DecodedRecordBatchBody = struct {
+    body: array_data.SharedBuffer,
+    buffers_meta: []const fbs.BufferT,
+    owned_body: bool,
+    owned_meta: bool,
+
+    fn deinit(self: *DecodedRecordBatchBody, allocator: std.mem.Allocator) void {
+        if (self.owned_meta) {
+            allocator.free(@constCast(self.buffers_meta));
+        }
+        if (self.owned_body) {
+            var body_mut = self.body;
+            body_mut.release();
+        }
+    }
+};
+
+fn decodeRecordBatchBody(
+    allocator: std.mem.Allocator,
+    record_batch_t: *fbs.RecordBatchT,
+    body: array_data.SharedBuffer,
+) (StreamError || error{OutOfMemory})!DecodedRecordBatchBody {
+    if (record_batch_t.compression == null) {
+        return .{
+            .body = body,
+            .buffers_meta = record_batch_t.buffers.items,
+            .owned_body = false,
+            .owned_meta = false,
+        };
+    }
+
+    const compression = record_batch_t.compression.?;
+    if (compression.method != .BUFFER) return StreamError.UnsupportedType;
+
+    const buffers_len = record_batch_t.buffers.items.len;
+    const decoded_meta = try allocator.alloc(fbs.BufferT, buffers_len);
+    errdefer allocator.free(decoded_meta);
+    const decoded_parts = try allocator.alloc(array_data.SharedBuffer, buffers_len);
+    var part_count: usize = 0;
+    errdefer {
+        var i: usize = 0;
+        while (i < part_count) : (i += 1) {
+            var p = decoded_parts[i];
+            p.release();
+        }
+        allocator.free(decoded_parts);
+    }
+
+    var cursor: usize = 0;
+    for (record_batch_t.buffers.items, 0..) |meta, i| {
+        const start = std.math.cast(usize, meta.offset) orelse return StreamError.InvalidBody;
+        const len = std.math.cast(usize, meta.length) orelse return StreamError.InvalidBody;
+        const end = std.math.add(usize, start, len) catch return StreamError.InvalidBody;
+        if (end > body.len()) return StreamError.InvalidBody;
+
+        if (len == 0) {
+            decoded_parts[i] = array_data.SharedBuffer.empty;
+            decoded_meta[i] = .{ .offset = @intCast(cursor), .length = 0 };
+            part_count += 1;
+            continue;
+        }
+        if (len < 8) return StreamError.InvalidBody;
+
+        const chunk = body.data[start..end];
+        var ulen_bytes: [8]u8 = undefined;
+        @memcpy(ulen_bytes[0..], chunk[0..8]);
+        const uncompressed_len_i64 = std.mem.readInt(i64, &ulen_bytes, .little);
+        const payload = chunk[8..];
+
+        const part = if (uncompressed_len_i64 == -1)
+            body.slice(start + 8, end)
+        else blk: {
+            if (uncompressed_len_i64 < 0) return StreamError.InvalidBody;
+            const expected_len = std.math.cast(usize, uncompressed_len_i64) orelse return StreamError.InvalidBody;
+            break :blk switch (compression.codec) {
+                .ZSTD => try decompressZstdPayload(allocator, payload, expected_len),
+                .LZ4_FRAME => return StreamError.UnsupportedType,
+            };
+        };
+
+        decoded_parts[i] = part;
+        decoded_meta[i] = .{
+            .offset = @intCast(cursor),
+            .length = @intCast(part.len()),
+        };
+        part_count += 1;
+        cursor = std.math.add(usize, cursor, format.paddedLen(part.len())) catch return StreamError.InvalidBody;
+    }
+
+    const decoded_body = if (cursor == 0)
+        array_data.SharedBuffer.empty
+    else blk: {
+        var owned = try buffer.OwnedBuffer.init(allocator, cursor);
+        var out = owned.data[0..cursor];
+        @memset(out, 0);
+        for (decoded_meta, 0..) |meta, i| {
+            const start = std.math.cast(usize, meta.offset) orelse return StreamError.InvalidBody;
+            const len = std.math.cast(usize, meta.length) orelse return StreamError.InvalidBody;
+            if (len == 0) continue;
+            @memcpy(out[start .. start + len], decoded_parts[i].data[0..len]);
+        }
+        break :blk try owned.toShared(cursor);
+    };
+
+    var i: usize = 0;
+    while (i < decoded_parts.len) : (i += 1) {
+        var p = decoded_parts[i];
+        p.release();
+    }
+    allocator.free(decoded_parts);
+
+    return .{
+        .body = decoded_body,
+        .buffers_meta = decoded_meta,
+        .owned_body = true,
+        .owned_meta = true,
+    };
+}
+
+fn decompressZstdPayload(
+    allocator: std.mem.Allocator,
+    payload: []const u8,
+    expected_len: usize,
+) (StreamError || error{OutOfMemory})!array_data.SharedBuffer {
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+
+    var in: std.Io.Reader = .fixed(payload);
+    var zstd_stream: std.compress.zstd.Decompress = .init(&in, &.{}, .{});
+    _ = zstd_stream.reader.streamRemaining(&out.writer) catch return StreamError.InvalidBody;
+
+    const decoded = try out.toOwnedSlice();
+    defer allocator.free(decoded);
+    if (decoded.len != expected_len) return StreamError.InvalidBody;
+
+    var owned = try buffer.OwnedBuffer.init(allocator, decoded.len);
+    @memcpy(owned.data[0..decoded.len], decoded);
+    return try owned.toShared(decoded.len);
+}
+
 fn ingestDictionaryBatchWithMap(
     allocator: std.mem.Allocator,
     dictionary_values: *std.AutoHashMap(i64, ArrayRef),
@@ -1407,6 +1552,8 @@ fn ingestDictionaryBatchWithMap(
 ) (StreamError || array_data.ValidationError || error{OutOfMemory})!void {
     const record_batch_t = dictionary_batch_t.data orelse return StreamError.InvalidMetadata;
     const value_type = findDictionaryValueType(schema, dictionary_batch_t.id) orelse return StreamError.InvalidMetadata;
+    var decoded = try decodeRecordBatchBody(allocator, record_batch_t, body);
+    defer decoded.deinit(allocator);
 
     var node_index: usize = 0;
     var buffer_index: usize = 0;
@@ -1415,9 +1562,9 @@ fn ingestDictionaryBatchWithMap(
         allocator,
         value_type,
         record_batch_t.nodes.items,
-        record_batch_t.buffers.items,
+        decoded.buffers_meta,
         record_batch_t.variadicBufferCounts.items,
-        body,
+        decoded.body,
         &node_index,
         &buffer_index,
         &variadic_index,
@@ -1425,7 +1572,7 @@ fn ingestDictionaryBatchWithMap(
     );
     errdefer dictionary.release();
 
-    if (node_index != record_batch_t.nodes.items.len or buffer_index != record_batch_t.buffers.items.len) {
+    if (node_index != record_batch_t.nodes.items.len or buffer_index != decoded.buffers_meta.len) {
         return StreamError.InvalidMetadata;
     }
     if (variadic_index != record_batch_t.variadicBufferCounts.items.len) return StreamError.InvalidMetadata;
@@ -3427,6 +3574,54 @@ test "ipc stream roundtrip run-end encoded int32 values" {
     const a4 = @import("../array/primitive_array.zig").PrimitiveArray(i32){ .data = v4.data() };
     try std.testing.expectEqual(@as(i32, 100), a0.value(0));
     try std.testing.expectEqual(@as(i32, 200), a4.value(0));
+}
+
+test "ipc reader handles body compression framing for zstd and lz4 codecs" {
+    const allocator = std.testing.allocator;
+
+    const int_type = DataType{ .int32 = {} };
+    const fields = [_]Field{
+        .{ .name = "v", .data_type = &int_type, .nullable = true },
+    };
+    const schema = Schema{ .fields = fields[0..] };
+
+    const codecs = [_]@import("stream_writer.zig").BodyCompressionCodec{ .zstd, .lz4_frame };
+    for (codecs) |codec| {
+        var b = try @import("../array/primitive_array.zig").PrimitiveBuilder(i32, DataType{ .int32 = {} }).init(allocator, 3);
+        defer b.deinit();
+        try b.append(10);
+        try b.appendNull();
+        try b.append(30);
+        var col = try b.finish();
+        defer col.release();
+
+        var batch = try RecordBatch.initBorrowed(allocator, schema, &[_]ArrayRef{col});
+        defer batch.deinit();
+
+        var out = std.array_list.Managed(u8).init(allocator);
+        defer out.deinit();
+        var writer = @import("stream_writer.zig").StreamWriter(@TypeOf(out.writer())).initWithBodyCompression(allocator, out.writer(), codec);
+        defer writer.deinit();
+        try writer.writeSchema(schema);
+        try writer.writeRecordBatch(batch);
+        try writer.writeEnd();
+
+        var stream = std.io.fixedBufferStream(out.items);
+        var reader = StreamReader(@TypeOf(stream.reader())).init(allocator, stream.reader());
+        defer reader.deinit();
+
+        _ = try reader.readSchema();
+        const out_batch_opt = try reader.nextRecordBatch();
+        try std.testing.expect(out_batch_opt != null);
+        var out_batch = out_batch_opt.?;
+        defer out_batch.deinit();
+
+        const arr = @import("../array/primitive_array.zig").PrimitiveArray(i32){ .data = out_batch.columns[0].data() };
+        try std.testing.expectEqual(@as(usize, 3), arr.len());
+        try std.testing.expectEqual(@as(i32, 10), arr.value(0));
+        try std.testing.expect(arr.isNull(1));
+        try std.testing.expectEqual(@as(i32, 30), arr.value(2));
+    }
 }
 
 test "ipc reader decodes tensor message via tensor-like API" {

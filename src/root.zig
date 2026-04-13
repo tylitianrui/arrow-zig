@@ -45,6 +45,7 @@ pub const RecordBatchBuilder = record_batch.RecordBatchBuilder;
 pub const RecordBatchBuilderError = record_batch.RecordBatchBuilderError;
 pub const IpcFormat = ipc.format;
 pub const IpcStreamWriter = ipc.StreamWriter;
+pub const IpcBodyCompressionCodec = ipc.BodyCompressionCodec;
 pub const IpcStreamReader = ipc.StreamReader;
 pub const IpcFileWriter = ipc.FileWriter;
 pub const IpcFileReader = ipc.FileReader;
