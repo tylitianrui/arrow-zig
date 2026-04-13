@@ -161,6 +161,9 @@ pub fn StreamReader(comptime ReaderType: type) type {
                         if (msg.body == null) return StreamError.InvalidBody;
                         return try buildRecordBatchFromFlatbuf(self.allocator, schema_ref.retain(), msg.msg.header.RecordBatch.?, msg.body.?, &self.dictionary_values);
                     },
+                    // Tensor/SparseTensor are valid IPC message headers but are
+                    // outside this row-batch reader surface. Skip and continue.
+                    .Tensor, .SparseTensor => continue,
                     else => return StreamError.InvalidMessage,
                 }
             }

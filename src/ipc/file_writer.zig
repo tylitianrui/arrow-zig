@@ -243,6 +243,12 @@ fn parseStreamForFooter(allocator: std.mem.Allocator, stream_bytes: []const u8) 
                 }
                 msg_t.deinit(allocator);
             },
+            // Tensor/SparseTensor are valid IPC message headers. Arrow file
+            // footer only indexes dictionary/record blocks, so keep bytes but
+            // don't index these messages.
+            .Tensor, .SparseTensor => {
+                msg_t.deinit(allocator);
+            },
             else => {
                 msg_t.deinit(allocator);
                 return error.UnsupportedMessage;

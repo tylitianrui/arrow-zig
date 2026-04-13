@@ -416,6 +416,8 @@ pub fn FileReader(comptime ReaderType: type) type {
                 .Schema => .schema,
                 .DictionaryBatch => .dictionary_batch,
                 .RecordBatch => .record_batch,
+                .Tensor => .tensor,
+                .SparseTensor => .sparse_tensor,
                 else => .other,
             };
             return .{
@@ -436,6 +438,8 @@ const MessageHeaderKind = enum {
     schema,
     dictionary_batch,
     record_batch,
+    tensor,
+    sparse_tensor,
     other,
 };
 
