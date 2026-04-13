@@ -77,6 +77,5 @@ pub fn main() !void {
         .windows => try w.writeAll("hint: install zstd/lz4 and ensure DLLs are available on PATH\n"),
         else => try w.writeAll("hint: install zstd/lz4 system libraries for your platform\n"),
     }
-    try stderr.flush();
     return error.MissingCompressionDependency;
 }
