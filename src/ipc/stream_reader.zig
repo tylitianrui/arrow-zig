@@ -341,7 +341,7 @@ fn readMessageOptional(self: anytype) (StreamError || fb.common.PackError || @Ty
         var tmp = msg_t;
         tmp.deinit(self.allocator);
     }
-    if (msg_t.version != .V5 and msg_t.version != .V4) return StreamError.InvalidMetadata;
+    if (!isSupportedMetadataVersion(msg_t.version)) return StreamError.InvalidMetadata;
 
     var body_shared: ?array_data.SharedBuffer = null;
     const body_len = std.math.cast(usize, msg_t.bodyLength) orelse return StreamError.InvalidBody;
@@ -406,8 +406,14 @@ fn unpackMessageFromMetadata(
     const opts: fb.common.PackOptions = .{ .allocator = allocator };
     var msg_t = try fbs.MessageT.Unpack(msg, opts);
     errdefer msg_t.deinit(allocator);
-    if (msg_t.version != .V5 and msg_t.version != .V4) return StreamError.InvalidMetadata;
+    if (!isSupportedMetadataVersion(msg_t.version)) return StreamError.InvalidMetadata;
     return msg_t;
+}
+
+fn isSupportedMetadataVersion(version: fbs.MetadataVersion) bool {
+    return switch (version) {
+        .V1, .V2, .V3, .V4, .V5 => true,
+    };
 }
 
 pub fn decodeSchemaFromMessageMetadata(
@@ -4441,7 +4447,7 @@ test "ipc reader maps parse failures to deterministic errors" {
         try std.testing.expectError(error.EndOfStream, reader.readSchema());
     }
 
-    // Case 2: invalid metadata version maps to InvalidMetadata.
+    // Case 2: legacy metadata version remains supported.
     {
         var bytes = std.array_list.Managed(u8).init(allocator);
         defer bytes.deinit();
@@ -4450,7 +4456,8 @@ test "ipc reader maps parse failures to deterministic errors" {
         var stream = std.io.fixedBufferStream(bytes.items);
         var reader = StreamReader(@TypeOf(stream.reader())).init(allocator, stream.reader());
         defer reader.deinit();
-        try std.testing.expectError(StreamError.InvalidMetadata, reader.readSchema());
+        const schema = try reader.readSchema();
+        try std.testing.expectEqual(@as(usize, 0), schema.fields.len);
     }
 
     // Case 3: negative body length maps to InvalidBody.
