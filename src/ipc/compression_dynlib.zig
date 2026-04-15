@@ -40,13 +40,13 @@ extern fn LZ4F_compressFrame(
     prefs_ptr: ?*const anyopaque,
 ) callconv(.c) usize;
 
-const linked_zstd_symbols: ZstdSymbols = .{
+var linked_zstd_symbols: ZstdSymbols = .{
     .compress_bound = ZSTD_compressBound,
     .compress = ZSTD_compress,
     .is_error = ZSTD_isError,
 };
 
-const linked_lz4_symbols: Lz4Symbols = .{
+var linked_lz4_symbols: Lz4Symbols = .{
     .create_decompression_context = LZ4F_createDecompressionContext,
     .free_decompression_context = LZ4F_freeDecompressionContext,
     .decompress = LZ4F_decompress,
