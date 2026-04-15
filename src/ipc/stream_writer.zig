@@ -332,7 +332,7 @@ fn buildFieldT(allocator: std.mem.Allocator, field: Field, next_dictionary_id: *
             for (uni.fields) |child| try children.append(allocator, try buildFieldT(allocator, child, next_dictionary_id));
         },
         .run_end_encoded => |ree| {
-            const run_end_dt = dataTypeFromIntType(ree.run_end_type);
+            const run_end_dt = try dataTypeFromIntType(ree.run_end_type);
             const run_end_field = Field{
                 .name = "run_ends",
                 .data_type = &run_end_dt,
@@ -520,13 +520,13 @@ fn allocT(allocator: std.mem.Allocator, comptime T: type, value: T) error{OutOfM
     return ptr;
 }
 
-fn dataTypeFromIntType(int_type: datatype.IntType) DataType {
+fn dataTypeFromIntType(int_type: datatype.IntType) WriterError!DataType {
     return switch (int_type.bit_width) {
         8 => if (int_type.signed) .{ .int8 = {} } else .{ .uint8 = {} },
         16 => if (int_type.signed) .{ .int16 = {} } else .{ .uint16 = {} },
         32 => if (int_type.signed) .{ .int32 = {} } else .{ .uint32 = {} },
         64 => if (int_type.signed) .{ .int64 = {} } else .{ .uint64 = {} },
-        else => unreachable,
+        else => StreamError.UnsupportedType,
     };
 }
 

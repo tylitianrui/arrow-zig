@@ -61,7 +61,7 @@ pub const DictionaryArray = struct {
                 self.data.buffers[1].typedSlice(i64)[pos]
             else
                 @as(i64, @intCast(self.data.buffers[1].typedSlice(u64)[pos])),
-            else => unreachable,
+            else => std.debug.panic("invalid dictionary index bit width: {}", .{idx_ty.bit_width}),
         };
     }
 };

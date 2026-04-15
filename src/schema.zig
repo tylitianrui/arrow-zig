@@ -228,7 +228,8 @@ test "schema keeps metadata reference" {
         .metadata = metadata[0..],
     };
 
-    const md = schema.metadata orelse unreachable;
+    try std.testing.expect(schema.metadata != null);
+    const md = schema.metadata.?;
     try std.testing.expectEqual(@as(usize, 2), md.len);
     try std.testing.expectEqualStrings("owner", md[0].key);
     try std.testing.expectEqualStrings("analytics", md[0].value);

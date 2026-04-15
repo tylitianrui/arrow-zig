@@ -140,7 +140,7 @@ pub const RunEndEncodedArray = struct {
         return self.data.children[0].data().length;
     }
 
-    fn runEndAt(self: RunEndEncodedArray, run_index: usize) i64 {
+    fn runEndAt(self: RunEndEncodedArray, run_index: usize) !i64 {
         std.debug.assert(self.data.children.len == 2);
         const run_ends = self.data.children[0].data();
         const run_ty = self.data.data_type.run_end_encoded.run_end_type;
@@ -161,18 +161,18 @@ pub const RunEndEncodedArray = struct {
                 run_ends.buffers[1].typedSlice(i64)[run_ends.offset + run_index]
             else
                 @as(i64, @intCast(run_ends.buffers[1].typedSlice(u64)[run_ends.offset + run_index])),
-            else => unreachable,
+            else => error.InvalidRunEnds,
         };
     }
 
-    fn runIndexFor(self: RunEndEncodedArray, logical_index: usize) usize {
+    fn runIndexFor(self: RunEndEncodedArray, logical_index: usize) !usize {
         var lo: usize = 0;
         var hi: usize = self.runCount();
-        const target = @as(i64, @intCast(logical_index + 1));
+        const target = std.math.cast(i64, logical_index + 1) orelse return error.InvalidRunEnds;
 
         while (lo < hi) {
             const mid = lo + (hi - lo) / 2;
-            if (self.runEndAt(mid) >= target) {
+            if ((try self.runEndAt(mid)) >= target) {
                 hi = mid;
             } else {
                 lo = mid + 1;
@@ -185,7 +185,7 @@ pub const RunEndEncodedArray = struct {
     pub fn value(self: RunEndEncodedArray, i: usize) !ArrayRef {
         std.debug.assert(i < self.data.length);
         std.debug.assert(self.data.children.len == 2);
-        const run_idx = self.runIndexFor(self.data.offset + i);
+        const run_idx = try self.runIndexFor(self.data.offset + i);
         if (run_idx >= self.runCount()) return error.InvalidRunEnds;
         return self.data.children[1].slice(run_idx, 1);
     }
@@ -196,13 +196,13 @@ pub const RunEndEncodedArray = struct {
     }
 };
 
-fn dataTypeFromIntType(int_type: IntType) DataType {
+fn dataTypeFromIntType(int_type: IntType) ?DataType {
     return switch (int_type.bit_width) {
         8 => if (int_type.signed) .{ .int8 = {} } else .{ .uint8 = {} },
         16 => if (int_type.signed) .{ .int16 = {} } else .{ .uint16 = {} },
         32 => if (int_type.signed) .{ .int32 = {} } else .{ .uint32 = {} },
         64 => if (int_type.signed) .{ .int64 = {} } else .{ .uint64 = {} },
-        else => unreachable,
+        else => null,
     };
 }
 
@@ -573,7 +573,7 @@ pub const RunEndEncodedBuilder = struct {
         try self.ensureCapacity(next_runs);
 
         if (self.run_count > 0) {
-            const prev = self.getRunEnd(self.run_count - 1);
+            const prev = try self.getRunEnd(self.run_count - 1);
             if (run_end <= prev) return BuilderError.InvalidRunEnd;
         }
 
@@ -612,7 +612,7 @@ pub const RunEndEncodedBuilder = struct {
         self.run_count = next_runs;
     }
 
-    fn getRunEnd(self: *RunEndEncodedBuilder, index: usize) i64 {
+    fn getRunEnd(self: *RunEndEncodedBuilder, index: usize) BuilderError!i64 {
         return switch (self.run_end_type.bit_width) {
             8 => if (self.run_end_type.signed)
                 std.mem.bytesAsSlice(i8, self.run_ends.data)[index]
@@ -630,7 +630,7 @@ pub const RunEndEncodedBuilder = struct {
                 std.mem.bytesAsSlice(i64, self.run_ends.data)[index]
             else
                 @intCast(std.mem.bytesAsSlice(u64, self.run_ends.data)[index]),
-            else => unreachable,
+            else => BuilderError.InvalidRunEndType,
         };
     }
 
@@ -640,11 +640,14 @@ pub const RunEndEncodedBuilder = struct {
         if (!std.meta.eql(values.data().data_type, self.value_type.*)) return BuilderError.InvalidChildLength;
         if (values.data().length != self.run_count) return BuilderError.InvalidChildLength;
 
-        const total_len: usize = if (self.run_count == 0) 0 else @intCast(self.getRunEnd(self.run_count - 1));
+        const total_len: usize = if (self.run_count == 0)
+            0
+        else
+            std.math.cast(usize, try self.getRunEnd(self.run_count - 1)) orelse return BuilderError.InvalidRunEnd;
         const bytes = self.run_count * (@as(usize, self.run_end_type.bit_width) / 8);
         const run_ends_buf = try self.run_ends.toShared(bytes);
 
-        const run_end_dt = dataTypeFromIntType(self.run_end_type);
+        const run_end_dt = dataTypeFromIntType(self.run_end_type) orelse return BuilderError.InvalidRunEndType;
         const run_end_buffers = try self.allocator.alloc(SharedBuffer, 2);
         run_end_buffers[0] = SharedBuffer.empty;
         run_end_buffers[1] = run_ends_buf;

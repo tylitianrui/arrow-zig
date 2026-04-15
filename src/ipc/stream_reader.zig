@@ -1090,13 +1090,13 @@ fn intTypeFromDataType(dt: DataType) StreamError!datatype.IntType {
     };
 }
 
-fn dataTypeFromIntType(int_type: datatype.IntType) DataType {
+fn dataTypeFromIntType(int_type: datatype.IntType) StreamError!DataType {
     return switch (int_type.bit_width) {
         8 => if (int_type.signed) .{ .int8 = {} } else .{ .uint8 = {} },
         16 => if (int_type.signed) .{ .int16 = {} } else .{ .uint16 = {} },
         32 => if (int_type.signed) .{ .int32 = {} } else .{ .uint32 = {} },
         64 => if (int_type.signed) .{ .int64 = {} } else .{ .uint64 = {} },
-        else => unreachable,
+        else => StreamError.UnsupportedType,
     };
 }
 
@@ -1245,11 +1245,7 @@ fn readArrayFromMeta(
             filled += 1;
         }
     } else if (layout_dt == .sparse_union or layout_dt == .dense_union) {
-        const union_fields = switch (layout_dt) {
-            .sparse_union => layout_dt.sparse_union.fields,
-            .dense_union => layout_dt.dense_union.fields,
-            else => unreachable,
-        };
+        const union_fields = if (layout_dt == .sparse_union) layout_dt.sparse_union.fields else layout_dt.dense_union.fields;
         children = try allocator.alloc(ArrayRef, union_fields.len);
         var filled: usize = 0;
         errdefer {
@@ -1270,7 +1266,7 @@ fn readArrayFromMeta(
             allocator.free(children);
         }
 
-        const run_end_dt = dataTypeFromIntType(layout_dt.run_end_encoded.run_end_type);
+        const run_end_dt = try dataTypeFromIntType(layout_dt.run_end_encoded.run_end_type);
         children[0] = try readArrayFromMeta(allocator, run_end_dt, nodes, buffers_meta, variadic_buffer_counts, body, node_index, buffer_index, variadic_index, dictionary_values);
         filled += 1;
         children[1] = try readArrayFromMeta(allocator, layout_dt.run_end_encoded.value_type.*, nodes, buffers_meta, variadic_buffer_counts, body, node_index, buffer_index, variadic_index, dictionary_values);
