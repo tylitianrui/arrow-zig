@@ -965,44 +965,162 @@ fn compressBodyBufferPayload(
     };
 }
 
+const ZstdSymbols = struct {
+    lib: std.DynLib,
+    compress_bound: *const fn (usize) callconv(.c) usize,
+    compress: *const fn (?*anyopaque, usize, ?*const anyopaque, usize, c_int) callconv(.c) usize,
+    is_error: *const fn (usize) callconv(.c) c_uint,
+};
+
+fn loadZstdSymbols() !ZstdSymbols {
+    const candidates = switch (@import("builtin").os.tag) {
+        .macos => &[_][]const u8{
+            "libzstd.dylib",
+            "libzstd.1.dylib",
+            "/opt/homebrew/lib/libzstd.dylib",
+            "/usr/local/lib/libzstd.dylib",
+        },
+        .linux => &[_][]const u8{
+            "libzstd.so.1",
+            "libzstd.so",
+            "/lib/x86_64-linux-gnu/libzstd.so.1",
+            "/usr/lib/x86_64-linux-gnu/libzstd.so.1",
+            "/lib/aarch64-linux-gnu/libzstd.so.1",
+            "/usr/lib/aarch64-linux-gnu/libzstd.so.1",
+            "/lib64/libzstd.so.1",
+            "/usr/lib64/libzstd.so.1",
+            "/lib/libzstd.so.1",
+            "/usr/lib/libzstd.so.1",
+        },
+        .windows => &[_][]const u8{
+            "zstd.dll",
+            "libzstd.dll",
+        },
+        else => &[_][]const u8{},
+    };
+
+    var last_err: ?anyerror = null;
+    for (candidates) |path| {
+        var lib = std.DynLib.open(path) catch |err| {
+            last_err = err;
+            continue;
+        };
+        errdefer lib.close();
+
+        const bound_fn = lib.lookup(*const fn (usize) callconv(.c) usize, "ZSTD_compressBound") orelse continue;
+        const compress_fn = lib.lookup(*const fn (?*anyopaque, usize, ?*const anyopaque, usize, c_int) callconv(.c) usize, "ZSTD_compress") orelse continue;
+        const is_error_fn = lib.lookup(*const fn (usize) callconv(.c) c_uint, "ZSTD_isError") orelse continue;
+
+        return .{
+            .lib = lib,
+            .compress_bound = bound_fn,
+            .compress = compress_fn,
+            .is_error = is_error_fn,
+        };
+    }
+    return last_err orelse error.FileNotFound;
+}
+
 fn compressZstdPayload(
     allocator: std.mem.Allocator,
     input: []const u8,
 ) (WriterError || error{OutOfMemory})![]u8 {
-    const bound = ZSTD_compressBound(input.len);
+    var syms = loadZstdSymbols() catch return StreamError.UnsupportedType;
+    defer syms.lib.close();
+
+    const bound = syms.compress_bound(input.len);
     if (bound == 0) return StreamError.InvalidMetadata;
     const out = try allocator.alloc(u8, bound);
     errdefer allocator.free(out);
 
-    const written = ZSTD_compress(
+    const written = syms.compress(
         @ptrCast(out.ptr),
         out.len,
         if (input.len == 0) null else @ptrCast(input.ptr),
         input.len,
         1,
     );
-    if (ZSTD_isError(written) != 0) return StreamError.InvalidMetadata;
+    if (syms.is_error(written) != 0) return StreamError.InvalidMetadata;
     if (written == 0 or written > out.len) return StreamError.InvalidMetadata;
     return try allocator.realloc(out, written);
+}
+
+const Lz4Symbols = struct {
+    lib: std.DynLib,
+    compress_frame_bound: *const fn (usize, ?*const anyopaque) callconv(.c) usize,
+    compress_frame: *const fn (?*anyopaque, usize, ?*const anyopaque, usize, ?*const anyopaque) callconv(.c) usize,
+    is_error: *const fn (usize) callconv(.c) c_uint,
+};
+
+fn loadLz4Symbols() !Lz4Symbols {
+    const candidates = switch (@import("builtin").os.tag) {
+        .macos => &[_][]const u8{
+            "liblz4.dylib",
+            "liblz4.1.dylib",
+            "/opt/homebrew/lib/liblz4.dylib",
+            "/usr/local/lib/liblz4.dylib",
+        },
+        .linux => &[_][]const u8{
+            "liblz4.so.1",
+            "liblz4.so",
+            "/lib/x86_64-linux-gnu/liblz4.so.1",
+            "/usr/lib/x86_64-linux-gnu/liblz4.so.1",
+            "/lib/aarch64-linux-gnu/liblz4.so.1",
+            "/usr/lib/aarch64-linux-gnu/liblz4.so.1",
+            "/lib64/liblz4.so.1",
+            "/usr/lib64/liblz4.so.1",
+            "/lib/liblz4.so.1",
+            "/usr/lib/liblz4.so.1",
+        },
+        .windows => &[_][]const u8{
+            "lz4.dll",
+            "liblz4.dll",
+        },
+        else => &[_][]const u8{},
+    };
+
+    var last_err: ?anyerror = null;
+    for (candidates) |path| {
+        var lib = std.DynLib.open(path) catch |err| {
+            last_err = err;
+            continue;
+        };
+        errdefer lib.close();
+
+        const bound_fn = lib.lookup(*const fn (usize, ?*const anyopaque) callconv(.c) usize, "LZ4F_compressFrameBound") orelse continue;
+        const compress_fn = lib.lookup(*const fn (?*anyopaque, usize, ?*const anyopaque, usize, ?*const anyopaque) callconv(.c) usize, "LZ4F_compressFrame") orelse continue;
+        const is_error_fn = lib.lookup(*const fn (usize) callconv(.c) c_uint, "LZ4F_isError") orelse continue;
+
+        return .{
+            .lib = lib,
+            .compress_frame_bound = bound_fn,
+            .compress_frame = compress_fn,
+            .is_error = is_error_fn,
+        };
+    }
+    return last_err orelse error.FileNotFound;
 }
 
 fn compressLz4FramePayload(
     allocator: std.mem.Allocator,
     input: []const u8,
 ) (WriterError || error{OutOfMemory})![]u8 {
-    const bound = LZ4F_compressFrameBound(input.len, null);
-    if (bound == 0 or LZ4F_isError(bound) != 0) return StreamError.InvalidMetadata;
+    var syms = loadLz4Symbols() catch return StreamError.UnsupportedType;
+    defer syms.lib.close();
+
+    const bound = syms.compress_frame_bound(input.len, null);
+    if (bound == 0 or syms.is_error(bound) != 0) return StreamError.InvalidMetadata;
     const out = try allocator.alloc(u8, bound);
     errdefer allocator.free(out);
 
-    const written = LZ4F_compressFrame(
+    const written = syms.compress_frame(
         @ptrCast(out.ptr),
         out.len,
         if (input.len == 0) null else @ptrCast(input.ptr),
         input.len,
         null,
     );
-    if (LZ4F_isError(written) != 0) return StreamError.InvalidMetadata;
+    if (syms.is_error(written) != 0) return StreamError.InvalidMetadata;
     if (written == 0 or written > out.len) return StreamError.InvalidMetadata;
     return try allocator.realloc(out, written);
 }
