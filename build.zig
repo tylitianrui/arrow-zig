@@ -1,8 +1,11 @@
 const std = @import("std");
 
 fn configureIpcCompression(b: *std.Build, step: *std.Build.Step.Compile, deps_check: *std.Build.Step) void {
-    _ = b;
     step.step.dependOn(deps_check);
+    if (b.graph.host.result.os.tag != .windows) {
+        step.linkSystemLibrary("zstd");
+        step.linkSystemLibrary("lz4");
+    }
 }
 
 // Configure the zarrow package as a reusable module plus a dedicated test step.
