@@ -11,25 +11,25 @@ const arrow_fbs = @import("arrow_fbs");
 
 pub const StreamError = format.StreamError;
 
-extern fn ZSTD_compressBound(src_size: usize) usize;
+extern fn ZSTD_compressBound(src_size: usize) callconv(.c) usize;
 extern fn ZSTD_compress(
     dst: ?*anyopaque,
     dst_capacity: usize,
     src: ?*const anyopaque,
     src_size: usize,
     compression_level: c_int,
-) usize;
-extern fn ZSTD_isError(code: usize) c_uint;
+) callconv(.c) usize;
+extern fn ZSTD_isError(code: usize) callconv(.c) c_uint;
 
-extern fn LZ4F_compressFrameBound(src_size: usize, prefs_ptr: ?*const anyopaque) usize;
+extern fn LZ4F_compressFrameBound(src_size: usize, prefs_ptr: ?*const anyopaque) callconv(.c) usize;
 extern fn LZ4F_compressFrame(
     dst: ?*anyopaque,
     dst_capacity: usize,
     src: ?*const anyopaque,
     src_size: usize,
     prefs_ptr: ?*const anyopaque,
-) usize;
-extern fn LZ4F_isError(code: usize) c_uint;
+) callconv(.c) usize;
+extern fn LZ4F_isError(code: usize) callconv(.c) c_uint;
 
 pub const Schema = schema_mod.Schema;
 pub const Field = datatype.Field;
@@ -970,6 +970,7 @@ fn compressZstdPayload(
     input: []const u8,
 ) (WriterError || error{OutOfMemory})![]u8 {
     const bound = ZSTD_compressBound(input.len);
+    if (bound == 0) return StreamError.InvalidMetadata;
     const out = try allocator.alloc(u8, bound);
     errdefer allocator.free(out);
 
@@ -981,6 +982,7 @@ fn compressZstdPayload(
         1,
     );
     if (ZSTD_isError(written) != 0) return StreamError.InvalidMetadata;
+    if (written == 0 or written > out.len) return StreamError.InvalidMetadata;
     return try allocator.realloc(out, written);
 }
 
@@ -989,6 +991,7 @@ fn compressLz4FramePayload(
     input: []const u8,
 ) (WriterError || error{OutOfMemory})![]u8 {
     const bound = LZ4F_compressFrameBound(input.len, null);
+    if (bound == 0 or LZ4F_isError(bound) != 0) return StreamError.InvalidMetadata;
     const out = try allocator.alloc(u8, bound);
     errdefer allocator.free(out);
 
@@ -1000,6 +1003,7 @@ fn compressLz4FramePayload(
         null,
     );
     if (LZ4F_isError(written) != 0) return StreamError.InvalidMetadata;
+    if (written == 0 or written > out.len) return StreamError.InvalidMetadata;
     return try allocator.realloc(out, written);
 }
 

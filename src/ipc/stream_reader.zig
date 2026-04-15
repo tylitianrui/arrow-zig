@@ -12,8 +12,8 @@ const arrow_fbs = @import("arrow_fbs");
 
 pub const StreamError = format.StreamError;
 
-extern fn LZ4F_createDecompressionContext(ctx_ptr: *?*anyopaque, version: c_uint) usize;
-extern fn LZ4F_freeDecompressionContext(ctx: ?*anyopaque) usize;
+extern fn LZ4F_createDecompressionContext(ctx_ptr: *?*anyopaque, version: c_uint) callconv(.c) usize;
+extern fn LZ4F_freeDecompressionContext(ctx: ?*anyopaque) callconv(.c) usize;
 extern fn LZ4F_decompress(
     ctx: ?*anyopaque,
     dst: ?*anyopaque,
@@ -21,16 +21,16 @@ extern fn LZ4F_decompress(
     src: ?*const anyopaque,
     src_size_ptr: *usize,
     options_ptr: ?*const anyopaque,
-) usize;
-extern fn LZ4F_isError(code: usize) c_uint;
-extern fn LZ4F_compressFrameBound(src_size: usize, prefs_ptr: ?*const anyopaque) usize;
+) callconv(.c) usize;
+extern fn LZ4F_isError(code: usize) callconv(.c) c_uint;
+extern fn LZ4F_compressFrameBound(src_size: usize, prefs_ptr: ?*const anyopaque) callconv(.c) usize;
 extern fn LZ4F_compressFrame(
     dst: ?*anyopaque,
     dst_capacity: usize,
     src: ?*const anyopaque,
     src_size: usize,
     prefs_ptr: ?*const anyopaque,
-) usize;
+) callconv(.c) usize;
 
 pub const Schema = schema_mod.Schema;
 pub const Field = datatype.Field;
@@ -1614,6 +1614,7 @@ fn decompressLz4FramePayload(
 
 fn compressLz4FrameForTest(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
     const bound = LZ4F_compressFrameBound(input.len, null);
+    if (bound == 0 or LZ4F_isError(bound) != 0) return StreamError.InvalidBody;
     const out = try allocator.alloc(u8, bound);
     errdefer allocator.free(out);
 
@@ -1625,6 +1626,7 @@ fn compressLz4FrameForTest(allocator: std.mem.Allocator, input: []const u8) ![]u
         null,
     );
     if (LZ4F_isError(written) != 0) return StreamError.InvalidBody;
+    if (written == 0 or written > out.len) return StreamError.InvalidBody;
     return try allocator.realloc(out, written);
 }
 
