@@ -1468,7 +1468,10 @@ fn decodeRecordBatchBody(
 
         if (len == 0) {
             decoded_parts[i] = array_data.SharedBuffer.empty;
-            decoded_meta[i] = .{ .offset = @intCast(cursor), .length = 0 };
+            decoded_meta[i] = .{
+                .offset = std.math.cast(i64, cursor) orelse return StreamError.InvalidBody,
+                .length = 0,
+            };
             part_count += 1;
             continue;
         }
@@ -1493,8 +1496,8 @@ fn decodeRecordBatchBody(
 
         decoded_parts[i] = part;
         decoded_meta[i] = .{
-            .offset = @intCast(cursor),
-            .length = @intCast(part.len()),
+            .offset = std.math.cast(i64, cursor) orelse return StreamError.InvalidBody,
+            .length = std.math.cast(i64, part.len()) orelse return StreamError.InvalidBody,
         };
         part_count += 1;
         cursor = std.math.add(usize, cursor, format.paddedLen(part.len())) catch return StreamError.InvalidBody;

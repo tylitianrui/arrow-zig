@@ -74,6 +74,14 @@ const fbs = struct {
     const BodyCompressionMethod = arrow_fbs.org_apache_arrow_flatbuf_BodyCompressionMethod.BodyCompressionMethod;
 };
 
+fn castI64Metadata(value: anytype) WriterError!i64 {
+    return std.math.cast(i64, value) orelse StreamError.InvalidMetadata;
+}
+
+fn castU32Metadata(value: usize) WriterError!u32 {
+    return std.math.cast(u32, value) orelse StreamError.InvalidMetadata;
+}
+
 pub const BodyCompressionCodec = enum {
     lz4_frame,
     zstd,
@@ -213,7 +221,7 @@ pub fn StreamWriter(comptime WriterType: type) type {
             const record_batch_ptr = try self.allocator.create(fbs.RecordBatchT);
             errdefer self.allocator.destroy(record_batch_ptr);
             record_batch_ptr.* = .{
-                .length = @intCast(batch.numRows()),
+                .length = try castI64Metadata(batch.numRows()),
                 .nodes = nodes,
                 .buffers = buffers,
                 .compression = compression_ptr,
@@ -223,7 +231,7 @@ pub fn StreamWriter(comptime WriterType: type) type {
             var msg = fbs.MessageT{
                 .version = .V5,
                 .header = .{ .RecordBatch = record_batch_ptr },
-                .bodyLength = @intCast(body_offset),
+                .bodyLength = try castI64Metadata(body_offset),
                 .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(self.allocator, 0),
             };
             defer msg.deinit(self.allocator);
@@ -248,7 +256,7 @@ fn writeMessage(allocator: std.mem.Allocator, writer: anytype, msg: fbs.MessageT
 
     // IPC stream framing stores the padded metadata length in the prefix.
     const metadata_len = format.paddedLen(metadata.len);
-    try format.writeMessageLength(writer, @intCast(metadata_len));
+    try format.writeMessageLength(writer, try castU32Metadata(metadata_len));
     try writer.writeAll(metadata);
     try format.writePadding(writer, format.padLen(metadata.len));
 
@@ -617,7 +625,7 @@ fn writeDictionaryBatch(
     const record_batch_ptr = try allocator.create(fbs.RecordBatchT);
     errdefer allocator.destroy(record_batch_ptr);
     record_batch_ptr.* = .{
-        .length = @intCast(dictionary_data.length),
+        .length = try castI64Metadata(dictionary_data.length),
         .nodes = nodes,
         .buffers = buffers,
         .variadicBufferCounts = variadic_buffer_counts,
@@ -634,7 +642,7 @@ fn writeDictionaryBatch(
     var msg = fbs.MessageT{
         .version = .V5,
         .header = .{ .DictionaryBatch = dictionary_batch_ptr },
-        .bodyLength = @intCast(body_offset),
+        .bodyLength = try castI64Metadata(body_offset),
         .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0),
     };
     defer msg.deinit(allocator);
@@ -842,18 +850,24 @@ fn appendArrayMeta(
     body_offset: *u64,
 ) WriterError!void {
     const null_count = if (data.null_count) |count| count else computeNullCount(data);
-    try nodes.append(allocator, .{ .length = @intCast(data.length), .null_count = @intCast(null_count) });
+    try nodes.append(allocator, .{
+        .length = try castI64Metadata(data.length),
+        .null_count = try castI64Metadata(null_count),
+    });
     const layout_dt = storageDataType(data.data_type);
 
     for (data.buffers) |buf| {
-        try buffers.append(allocator, .{ .offset = @intCast(body_offset.*), .length = @intCast(buf.len()) });
+        try buffers.append(allocator, .{
+            .offset = try castI64Metadata(body_offset.*),
+            .length = try castI64Metadata(buf.len()),
+        });
         try body_buffers.append(allocator, buf);
-        body_offset.* += @intCast(format.paddedLen(buf.len()));
+        body_offset.* = std.math.add(u64, body_offset.*, format.paddedLen(buf.len())) catch return StreamError.InvalidMetadata;
     }
     if (layout_dt == .string_view or layout_dt == .binary_view) {
         if (data.buffers.len < 2) return StreamError.InvalidMetadata;
         const variadic_count = std.math.sub(usize, data.buffers.len, 2) catch return StreamError.InvalidMetadata;
-        try variadic_buffer_counts.append(allocator, @intCast(variadic_count));
+        try variadic_buffer_counts.append(allocator, try castI64Metadata(variadic_count));
     }
 
     switch (layout_dt) {
@@ -900,7 +914,7 @@ fn applyBodyCompression(
 
     for (original, 0..) |src, i| {
         if (src.len() == 0) {
-            buffers.items[i] = .{ .offset = @intCast(cursor), .length = 0 };
+            buffers.items[i] = .{ .offset = try castI64Metadata(cursor), .length = 0 };
             try body_buffers.append(allocator, array_data.SharedBuffer.empty);
             continue;
         }
@@ -912,14 +926,17 @@ fn applyBodyCompression(
         errdefer encoded.deinit();
 
         var header: [8]u8 = undefined;
-        std.mem.writeInt(i64, &header, @intCast(src.len()), .little);
+        std.mem.writeInt(i64, &header, try castI64Metadata(src.len()), .little);
         @memcpy(encoded.data[0..8], header[0..]);
         @memcpy(encoded.data[8..encoded_len], compressed_payload);
 
         const shared = try encoded.toShared(encoded_len);
         try body_buffers.append(allocator, shared);
-        buffers.items[i] = .{ .offset = @intCast(cursor), .length = @intCast(encoded_len) };
-        cursor += @intCast(format.paddedLen(encoded_len));
+        buffers.items[i] = .{
+            .offset = try castI64Metadata(cursor),
+            .length = try castI64Metadata(encoded_len),
+        };
+        cursor = std.math.add(u64, cursor, format.paddedLen(encoded_len)) catch return StreamError.InvalidMetadata;
     }
 
     body_offset.* = cursor;

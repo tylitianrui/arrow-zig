@@ -213,7 +213,7 @@ fn exportRootSchema(allocator: std.mem.Allocator, schema: Schema) Error!ArrowSch
         .name = null,
         .metadata = if (priv.metadata_storage) |m| @ptrCast(m.ptr) else null,
         .flags = 0,
-        .n_children = @intCast(schema.fields.len),
+        .n_children = std.math.cast(i64, schema.fields.len) orelse return error.InvalidChildren,
         .children = if (priv.children_ptrs.len == 0) null else priv.children_ptrs.ptr,
         .dictionary = null,
         .release = releaseExportedSchema,
@@ -327,7 +327,7 @@ fn exportFieldSchema(allocator: std.mem.Allocator, field: Field) Error!ArrowSche
         .name = if (priv.name_z) |n| n.ptr else null,
         .metadata = if (priv.metadata_storage) |m| @ptrCast(m.ptr) else null,
         .flags = flags,
-        .n_children = @intCast(priv.children_ptrs.len),
+        .n_children = std.math.cast(i64, priv.children_ptrs.len) orelse return error.InvalidChildren,
         .children = if (priv.children_ptrs.len == 0) null else priv.children_ptrs.ptr,
         .dictionary = dict_ptr,
         .release = releaseExportedSchema,
@@ -410,11 +410,11 @@ fn exportArrayRecursive(allocator: std.mem.Allocator, arr: ArrayRef) Error!Arrow
     }
 
     return ArrowArray{
-        .length = @intCast(data.length),
-        .null_count = if (data.null_count) |n| @intCast(n) else -1,
-        .offset = @intCast(data.offset),
-        .n_buffers = @intCast(n_buffers),
-        .n_children = @intCast(data.children.len),
+        .length = std.math.cast(i64, data.length) orelse return error.InvalidLength,
+        .null_count = if (data.null_count) |n| (std.math.cast(i64, n) orelse return error.InvalidLength) else -1,
+        .offset = std.math.cast(i64, data.offset) orelse return error.InvalidLength,
+        .n_buffers = std.math.cast(i64, n_buffers) orelse return error.InvalidLength,
+        .n_children = std.math.cast(i64, data.children.len) orelse return error.InvalidLength,
         .buffers = if (n_buffers == 0) null else priv.buffers_ptrs.ptr,
         .children = if (data.children.len == 0) null else priv.children_ptrs.ptr,
         .dictionary = dict_ptr,
@@ -742,11 +742,11 @@ fn importArrayRecursive(
 
         if ((layout_dt == .string or layout_dt == .binary or layout_dt == .list) and i == 1) {
             offsets_i32 = buffers[i].typedSlice(i32);
-            data_buffer_len = @intCast(offsets_i32.?[total_len]);
+            data_buffer_len = std.math.cast(usize, offsets_i32.?[total_len]) orelse return error.InvalidOffset;
         }
         if ((layout_dt == .large_string or layout_dt == .large_binary or layout_dt == .large_list) and i == 1) {
             offsets_i64 = buffers[i].typedSlice(i64);
-            data_buffer_len = @intCast(offsets_i64.?[total_len]);
+            data_buffer_len = std.math.cast(usize, offsets_i64.?[total_len]) orelse return error.InvalidOffset;
         }
     }
 
@@ -840,12 +840,12 @@ fn neededBufferLen(
         .int64, .uint64, .double, .date64, .timestamp, .time64, .duration, .interval_day_time, .decimal64 => if (idx == 1) total_len * 8 else null,
         .interval_month_day_nano, .decimal128 => if (idx == 1) total_len * 16 else null,
         .decimal256 => if (idx == 1) total_len * 32 else null,
-        .fixed_size_binary => |fsb| if (idx == 1) total_len * @as(usize, @intCast(fsb.byte_width)) else null,
+        .fixed_size_binary => |fsb| if (idx == 1) total_len * (std.math.cast(usize, fsb.byte_width) orelse return null) else null,
         .string, .binary, .list => {
             if (idx == 1) return (total_len + 1) * @sizeOf(i32);
             if (idx == 2) {
                 const offs = offsets_i32 orelse return null;
-                return @intCast(offs[total_len]);
+                return std.math.cast(usize, offs[total_len]) orelse return null;
             }
             return null;
         },
@@ -876,7 +876,7 @@ fn neededBufferLen(
             if (idx == 1) return (total_len + 1) * @sizeOf(i64);
             if (idx == 2) {
                 const offs = offsets_i64 orelse return null;
-                return @intCast(offs[total_len]);
+                return std.math.cast(usize, offs[total_len]) orelse return null;
             }
             return null;
         },

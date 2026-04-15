@@ -125,7 +125,8 @@ pub fn FileWriter(comptime WriterType: type) type {
             const footer_pad = format.padLen(parsed.stream_end);
             try format.writePadding(self.writer, footer_pad);
             try self.writer.writeAll(footer_bytes);
-            try writeU32Le(self.writer, @intCast(footer_bytes.len));
+            const footer_len = std.math.cast(u32, footer_bytes.len) orelse return FileError.InvalidMessage;
+            try writeU32Le(self.writer, footer_len);
             try self.writer.writeAll(FileMagic);
 
             self.finished = true;
