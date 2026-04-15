@@ -143,7 +143,7 @@ pub const StringBuilder = struct {
         try self.data.resize(needed_len);
     }
 
-    const BuilderError = error{ AlreadyFinished, NotFinished };
+    const BuilderError = error{ AlreadyFinished, NotFinished, OffsetOverflow };
 
     /// Append one logical value into the builder.
     pub fn append(self: *StringBuilder, value: []const u8) !void {
@@ -154,8 +154,9 @@ pub const StringBuilder = struct {
         @memcpy(self.data.data[self.data_len .. self.data_len + value.len], value);
         self.data_len += value.len;
 
+        const cast_offset = std.math.cast(i32, self.data_len) orelse return BuilderError.OffsetOverflow;
         const offsets_slice = std.mem.bytesAsSlice(i32, self.offsets.data);
-        offsets_slice[next_len] = @intCast(self.data_len);
+        offsets_slice[next_len] = cast_offset;
         try array_utils.setValidBit(&self.validity, self.len);
         self.len = next_len;
     }
@@ -165,8 +166,9 @@ pub const StringBuilder = struct {
         if (self.state == .finished) return BuilderError.AlreadyFinished;
         const next_len = self.len + 1;
         try self.ensureOffsetsCapacity(next_len + 1);
+        const cast_offset = std.math.cast(i32, self.data_len) orelse return BuilderError.OffsetOverflow;
         const offsets_slice = std.mem.bytesAsSlice(i32, self.offsets.data);
-        offsets_slice[next_len] = @intCast(self.data_len);
+        offsets_slice[next_len] = cast_offset;
         try array_utils.ensureValidityForNull(self.allocator, &self.validity, &self.null_count, next_len);
         self.len = next_len;
     }
@@ -387,6 +389,14 @@ test "string builder appends slices" {
     try std.testing.expectEqualStrings("zig", built.value(0));
     try std.testing.expect(built.isNull(1));
     try std.testing.expectEqualStrings("lang", built.value(2));
+}
+
+test "string builder returns offset overflow for 32-bit offsets" {
+    var builder = try StringBuilder.init(std.testing.allocator, 1, 0);
+    defer builder.deinit();
+
+    builder.data_len = @as(usize, @intCast(std.math.maxInt(i32))) + 1;
+    try std.testing.expectError(StringBuilder.BuilderError.OffsetOverflow, builder.appendNull());
 }
 
 test "large string array reads slices" {

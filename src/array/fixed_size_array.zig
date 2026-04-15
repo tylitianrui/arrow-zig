@@ -64,6 +64,7 @@ pub const FixedSizeBinaryBuilder = struct {
     /// Initialize and return a new instance.
     pub fn init(allocator: std.mem.Allocator, byte_width: usize, capacity: usize) !FixedSizeBinaryBuilder {
         if (byte_width == 0) return BuilderError.InvalidByteWidth;
+        _ = std.math.cast(i32, byte_width) orelse return BuilderError.InvalidByteWidth;
         return .{
             .allocator = allocator,
             .byte_width = byte_width,
@@ -165,7 +166,7 @@ pub const FixedSizeBinaryBuilder = struct {
         buffers[1] = self.buffers[1];
 
         const data = ArrayData{
-            .data_type = DataType{ .fixed_size_binary = .{ .byte_width = @intCast(self.byte_width) } },
+            .data_type = DataType{ .fixed_size_binary = .{ .byte_width = std.math.cast(i32, self.byte_width) orelse return BuilderError.InvalidByteWidth } },
             .length = self.len,
             .null_count = self.null_count,
             .buffers = buffers,
@@ -238,7 +239,7 @@ pub const FixedSizeListBuilder = struct {
 
     /// Initialize and return a new instance.
     pub fn init(allocator: std.mem.Allocator, value_field: Field, list_size: usize) !FixedSizeListBuilder {
-        if (@as(i64, @intCast(list_size)) < 0) return BuilderError.InvalidListSize;
+        _ = std.math.cast(i32, list_size) orelse return BuilderError.InvalidListSize;
         return .{
             .allocator = allocator,
             .value_field = value_field,
@@ -330,7 +331,7 @@ pub const FixedSizeListBuilder = struct {
         children[0] = values.retain();
 
         const data = ArrayData{
-            .data_type = DataType{ .fixed_size_list = .{ .value_field = self.value_field, .list_size = @intCast(self.list_size) } },
+            .data_type = DataType{ .fixed_size_list = .{ .value_field = self.value_field, .list_size = std.math.cast(i32, self.list_size) orelse return BuilderError.InvalidListSize } },
             .length = self.len,
             .null_count = self.null_count,
             .buffers = buffers,

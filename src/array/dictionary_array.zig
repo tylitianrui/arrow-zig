@@ -183,7 +183,8 @@ pub const DictionaryBuilder = struct {
                 std.mem.bytesAsSlice(i64, self.indices.data)[pos] = index;
             } else {
                 if (index < 0) return BuilderError.IndexOutOfRange;
-                std.mem.bytesAsSlice(u64, self.indices.data)[pos] = @intCast(index);
+                const v = std.math.cast(u64, index) orelse return BuilderError.IndexOutOfRange;
+                std.mem.bytesAsSlice(u64, self.indices.data)[pos] = v;
             },
             else => return BuilderError.InvalidIndexType,
         }

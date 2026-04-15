@@ -160,7 +160,7 @@ pub const RunEndEncodedArray = struct {
             64 => if (run_ty.signed)
                 run_ends.buffers[1].typedSlice(i64)[run_ends.offset + run_index]
             else
-                @as(i64, @intCast(run_ends.buffers[1].typedSlice(u64)[run_ends.offset + run_index])),
+                std.math.cast(i64, run_ends.buffers[1].typedSlice(u64)[run_ends.offset + run_index]) orelse return error.InvalidRunEnds,
             else => error.InvalidRunEnds,
         };
     }
@@ -603,7 +603,7 @@ pub const RunEndEncodedBuilder = struct {
                 if (self.run_end_type.signed) {
                     std.mem.bytesAsSlice(i64, self.run_ends.data)[self.run_count] = run_end;
                 } else {
-                    std.mem.bytesAsSlice(u64, self.run_ends.data)[self.run_count] = @intCast(run_end);
+                    std.mem.bytesAsSlice(u64, self.run_ends.data)[self.run_count] = std.math.cast(u64, run_end) orelse return BuilderError.Overflow;
                 }
             },
             else => return BuilderError.InvalidRunEndType,
@@ -629,7 +629,7 @@ pub const RunEndEncodedBuilder = struct {
             64 => if (self.run_end_type.signed)
                 std.mem.bytesAsSlice(i64, self.run_ends.data)[index]
             else
-                @intCast(std.mem.bytesAsSlice(u64, self.run_ends.data)[index]),
+                std.math.cast(i64, std.mem.bytesAsSlice(u64, self.run_ends.data)[index]) orelse return BuilderError.InvalidRunEnd,
             else => BuilderError.InvalidRunEndType,
         };
     }
