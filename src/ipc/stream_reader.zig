@@ -209,11 +209,19 @@ pub fn StreamReader(comptime ReaderType: type) type {
                             schema_ref.schema().*,
                             msg.msg.header.DictionaryBatch.?,
                             msg.body.?,
+                            msg.msg.version,
                         );
                     },
                     .RecordBatch => {
                         if (msg.body == null) return StreamError.InvalidBody;
-                        return try buildRecordBatchFromFlatbuf(self.allocator, schema_ref.retain(), msg.msg.header.RecordBatch.?, msg.body.?, &self.dictionary_values);
+                        return try buildRecordBatchFromFlatbuf(
+                            self.allocator,
+                            schema_ref.retain(),
+                            msg.msg.header.RecordBatch.?,
+                            msg.body.?,
+                            &self.dictionary_values,
+                            msg.msg.version,
+                        );
                     },
                     // Tensor/SparseTensor are valid IPC message headers but are
                     // outside this row-batch reader surface. Skip and continue.
@@ -642,7 +650,14 @@ pub fn ingestDictionaryBatchFromMessageMetadata(
     var msg_t = try unpackMessageFromMetadata(allocator, metadata);
     defer msg_t.deinit(allocator);
     if (msg_t.header != .DictionaryBatch) return StreamError.InvalidMessage;
-    try ingestDictionaryBatchWithMap(allocator, dictionary_values, schema, msg_t.header.DictionaryBatch.?, body);
+    try ingestDictionaryBatchWithMap(
+        allocator,
+        dictionary_values,
+        schema,
+        msg_t.header.DictionaryBatch.?,
+        body,
+        msg_t.version,
+    );
 }
 
 pub fn buildRecordBatchFromMessageMetadata(
@@ -655,7 +670,14 @@ pub fn buildRecordBatchFromMessageMetadata(
     var msg_t = try unpackMessageFromMetadata(allocator, metadata);
     defer msg_t.deinit(allocator);
     if (msg_t.header != .RecordBatch) return StreamError.InvalidMessage;
-    return try buildRecordBatchFromFlatbuf(allocator, schema_ref, msg_t.header.RecordBatch.?, body, dictionary_values);
+    return try buildRecordBatchFromFlatbuf(
+        allocator,
+        schema_ref,
+        msg_t.header.RecordBatch.?,
+        body,
+        dictionary_values,
+        msg_t.version,
+    );
 }
 
 pub fn buildSchemaFromFlatbuf(allocator: std.mem.Allocator, schema_t: *fbs.SchemaT) (StreamError || error{OutOfMemory})!Schema {
@@ -1100,6 +1122,7 @@ fn buildRecordBatchFromFlatbuf(
     record_batch_t: *fbs.RecordBatchT,
     body: array_data.SharedBuffer,
     dictionary_values: *const std.AutoHashMap(i64, ArrayRef),
+    metadata_version: fbs.MetadataVersion,
 ) (StreamError || array_data.ValidationError || record_batch.RecordBatchError || error{OutOfMemory})!RecordBatch {
     // schema_ref is already retained by the caller; track it so early‑error paths release it.
     var schema_taken = false;
@@ -1132,6 +1155,7 @@ fn buildRecordBatchFromFlatbuf(
             &buffer_index,
             &variadic_index,
             dictionary_values,
+            metadata_version,
         );
         col_count += 1;
     }
@@ -1163,14 +1187,17 @@ fn readArrayFromMeta(
     buffer_index: *usize,
     variadic_index: *usize,
     dictionary_values: *const std.AutoHashMap(i64, ArrayRef),
+    metadata_version: fbs.MetadataVersion,
 ) (StreamError || array_data.ValidationError || error{OutOfMemory})!ArrayRef {
     if (node_index.* >= nodes.len) return StreamError.InvalidMetadata;
     const node = nodes[node_index.*];
     node_index.* += 1;
+    const array_len = std.math.cast(usize, node.length) orelse return StreamError.InvalidMetadata;
+    const null_count = std.math.cast(usize, node.null_count) orelse return StreamError.InvalidMetadata;
 
     const layout_dt = storageDataType(dt);
-    const buffer_count = try bufferCountForType(layout_dt, variadic_buffer_counts, variadic_index);
-    const buffers = try allocator.alloc(array_data.SharedBuffer, buffer_count);
+    const buffer_count = try bufferCountForType(layout_dt, variadic_buffer_counts, variadic_index, metadata_version);
+    var buffers = try allocator.alloc(array_data.SharedBuffer, buffer_count);
     var buf_count: usize = 0;
     errdefer {
         var i: usize = 0;
@@ -1193,7 +1220,7 @@ fn readArrayFromMeta(
         if (meta.length == 0) {
             buffers[i] = array_data.SharedBuffer.empty;
         } else {
-            const required_alignment = requiredBufferAlignment(layout_dt, i);
+            const required_alignment = requiredBufferAlignment(layout_dt, i, metadata_version);
             if (canReuseBodySlice(body, start, required_alignment)) {
                 buffers[i] = body.slice(start, end);
             } else {
@@ -1206,6 +1233,36 @@ fn readArrayFromMeta(
         buf_count += 1;
     }
 
+    if ((layout_dt == .sparse_union or layout_dt == .dense_union) and metadataVersionUsesV4UnionLayout(metadata_version)) {
+        try validateV4UnionValidityBuffer(buffers[0], array_len, null_count);
+        const normalized_len = std.math.sub(usize, buffers.len, 1) catch return StreamError.InvalidMetadata;
+        const normalized = try allocator.alloc(array_data.SharedBuffer, normalized_len);
+        var normalized_count: usize = 0;
+        errdefer {
+            var j: usize = 0;
+            while (j < normalized_count) : (j += 1) {
+                var owned = normalized[j];
+                owned.release();
+            }
+            allocator.free(normalized);
+        }
+        var normalized_i: usize = 0;
+        while (normalized_i < normalized_len) : (normalized_i += 1) {
+            normalized[normalized_i] = buffers[normalized_i + 1].retain();
+            normalized_count += 1;
+        }
+
+        var j: usize = 0;
+        while (j < buf_count) : (j += 1) {
+            var owned = buffers[j];
+            owned.release();
+        }
+        allocator.free(buffers);
+
+        buffers = normalized;
+        buf_count = normalized_len;
+    }
+
     var children: []ArrayRef = &.{};
     var dictionary_ref: ?ArrayRef = null;
     errdefer if (dictionary_ref) |*dict| dict.release();
@@ -1216,7 +1273,7 @@ fn readArrayFromMeta(
             (layout_dt.map.entries_type orelse return StreamError.InvalidMetadata).*
         else
             childValueType(layout_dt);
-        children[0] = try readArrayFromMeta(allocator, child_dt, nodes, buffers_meta, variadic_buffer_counts, body, node_index, buffer_index, variadic_index, dictionary_values);
+        children[0] = try readArrayFromMeta(allocator, child_dt, nodes, buffers_meta, variadic_buffer_counts, body, node_index, buffer_index, variadic_index, dictionary_values, metadata_version);
     } else if (layout_dt == .struct_) {
         const field_count = layout_dt.struct_.fields.len;
         children = try allocator.alloc(ArrayRef, field_count);
@@ -1228,7 +1285,7 @@ fn readArrayFromMeta(
         }
         var idx: usize = 0;
         while (idx < field_count) : (idx += 1) {
-            children[idx] = try readArrayFromMeta(allocator, layout_dt.struct_.fields[idx].data_type.*, nodes, buffers_meta, variadic_buffer_counts, body, node_index, buffer_index, variadic_index, dictionary_values);
+            children[idx] = try readArrayFromMeta(allocator, layout_dt.struct_.fields[idx].data_type.*, nodes, buffers_meta, variadic_buffer_counts, body, node_index, buffer_index, variadic_index, dictionary_values, metadata_version);
             filled += 1;
         }
     } else if (layout_dt == .sparse_union or layout_dt == .dense_union) {
@@ -1241,7 +1298,7 @@ fn readArrayFromMeta(
             allocator.free(children);
         }
         for (union_fields, 0..) |field, idx| {
-            children[idx] = try readArrayFromMeta(allocator, field.data_type.*, nodes, buffers_meta, variadic_buffer_counts, body, node_index, buffer_index, variadic_index, dictionary_values);
+            children[idx] = try readArrayFromMeta(allocator, field.data_type.*, nodes, buffers_meta, variadic_buffer_counts, body, node_index, buffer_index, variadic_index, dictionary_values, metadata_version);
             filled += 1;
         }
     } else if (layout_dt == .run_end_encoded) {
@@ -1254,18 +1311,15 @@ fn readArrayFromMeta(
         }
 
         const run_end_dt = try dataTypeFromIntType(layout_dt.run_end_encoded.run_end_type);
-        children[0] = try readArrayFromMeta(allocator, run_end_dt, nodes, buffers_meta, variadic_buffer_counts, body, node_index, buffer_index, variadic_index, dictionary_values);
+        children[0] = try readArrayFromMeta(allocator, run_end_dt, nodes, buffers_meta, variadic_buffer_counts, body, node_index, buffer_index, variadic_index, dictionary_values, metadata_version);
         filled += 1;
-        children[1] = try readArrayFromMeta(allocator, layout_dt.run_end_encoded.value_type.*, nodes, buffers_meta, variadic_buffer_counts, body, node_index, buffer_index, variadic_index, dictionary_values);
+        children[1] = try readArrayFromMeta(allocator, layout_dt.run_end_encoded.value_type.*, nodes, buffers_meta, variadic_buffer_counts, body, node_index, buffer_index, variadic_index, dictionary_values, metadata_version);
         filled += 1;
     } else if (layout_dt == .dictionary) {
         const dictionary_id = layout_dt.dictionary.id orelse return StreamError.InvalidMetadata;
         const dict_ref = dictionary_values.get(dictionary_id) orelse return StreamError.InvalidMetadata;
         dictionary_ref = dict_ref.retain();
     }
-
-    const array_len = std.math.cast(usize, node.length) orelse return StreamError.InvalidMetadata;
-    const null_count = std.math.cast(usize, node.null_count) orelse return StreamError.InvalidMetadata;
 
     const data = ArrayData{
         .data_type = dt,
@@ -1338,8 +1392,47 @@ fn primitiveValueAlignment(dt: DataType) usize {
     };
 }
 
-fn requiredBufferAlignment(dt: DataType, buffer_idx: usize) usize {
+fn metadataVersionUsesV4UnionLayout(version: fbs.MetadataVersion) bool {
+    return switch (version) {
+        .V1, .V2, .V3, .V4 => true,
+        .V5 => false,
+    };
+}
+
+test "ipc reader treats V1-V4 as legacy union buffer layout" {
+    try std.testing.expect(metadataVersionUsesV4UnionLayout(.V1));
+    try std.testing.expect(metadataVersionUsesV4UnionLayout(.V2));
+    try std.testing.expect(metadataVersionUsesV4UnionLayout(.V3));
+    try std.testing.expect(metadataVersionUsesV4UnionLayout(.V4));
+    try std.testing.expect(!metadataVersionUsesV4UnionLayout(.V5));
+}
+
+fn validateV4UnionValidityBuffer(validity: array_data.SharedBuffer, length: usize, null_count: usize) StreamError!void {
+    if (null_count != 0) return StreamError.UnsupportedType;
+    if (length == 0 or validity.isEmpty()) return;
+    if (validity.len() < bitmap.byteLength(length)) return StreamError.InvalidMetadata;
+
+    const validity_bitmap = bitmap.ValidityBitmap.fromBuffer(validity, length);
+    var i: usize = 0;
+    while (i < length) : (i += 1) {
+        if (!validity_bitmap.isValid(i)) return StreamError.UnsupportedType;
+    }
+}
+
+fn requiredBufferAlignment(dt: DataType, buffer_idx: usize, metadata_version: fbs.MetadataVersion) usize {
     const layout_dt = storageDataType(dt);
+    if (metadataVersionUsesV4UnionLayout(metadata_version)) {
+        switch (layout_dt) {
+            .sparse_union => return if (buffer_idx == 0) @alignOf(u8) else @alignOf(i8),
+            .dense_union => return switch (buffer_idx) {
+                0 => @alignOf(u8),
+                1 => @alignOf(i8),
+                else => @alignOf(i32),
+            },
+            else => {},
+        }
+    }
+
     if (hasTopLevelValidityBitmap(layout_dt)) {
         if (buffer_idx == 0) return @alignOf(u8);
         const value_idx = buffer_idx - 1;
@@ -1372,7 +1465,12 @@ fn canReuseBodySlice(body: array_data.SharedBuffer, start: usize, required_align
     return (addr & (required_alignment - 1)) == 0;
 }
 
-fn bufferCountForType(dt: DataType, variadic_buffer_counts: []const i64, variadic_index: *usize) StreamError!usize {
+fn bufferCountForType(
+    dt: DataType,
+    variadic_buffer_counts: []const i64,
+    variadic_index: *usize,
+    metadata_version: fbs.MetadataVersion,
+) StreamError!usize {
     return switch (storageDataType(dt)) {
         .null => 0,
         .struct_, .fixed_size_list => 1,
@@ -1387,8 +1485,8 @@ fn bufferCountForType(dt: DataType, variadic_buffer_counts: []const i64, variadi
         },
         .bool, .uint8, .int8, .uint16, .int16, .uint32, .int32, .uint64, .int64, .half_float, .float, .double, .fixed_size_binary, .date32, .date64, .time32, .time64, .timestamp, .duration, .interval_months, .interval_day_time, .interval_month_day_nano, .decimal32, .decimal64, .decimal128, .decimal256 => 2,
         .dictionary => 2,
-        .sparse_union => 1,
-        .dense_union => 2,
+        .sparse_union => if (metadataVersionUsesV4UnionLayout(metadata_version)) 2 else 1,
+        .dense_union => if (metadataVersionUsesV4UnionLayout(metadata_version)) 3 else 2,
         .run_end_encoded => 0,
         else => StreamError.UnsupportedType,
     };
@@ -1607,6 +1705,7 @@ fn ingestDictionaryBatchWithMap(
     schema: Schema,
     dictionary_batch_t: *fbs.DictionaryBatchT,
     body: array_data.SharedBuffer,
+    metadata_version: fbs.MetadataVersion,
 ) (StreamError || array_data.ValidationError || error{OutOfMemory})!void {
     const record_batch_t = dictionary_batch_t.data orelse return StreamError.InvalidMetadata;
     const value_type = findDictionaryValueType(schema, dictionary_batch_t.id) orelse return StreamError.InvalidMetadata;
@@ -1627,6 +1726,7 @@ fn ingestDictionaryBatchWithMap(
         &buffer_index,
         &variadic_index,
         dictionary_values,
+        metadata_version,
     );
     errdefer dictionary.release();
 

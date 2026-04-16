@@ -214,8 +214,6 @@ pub fn StreamWriter(comptime WriterType: type) type {
         }
 
         pub fn writeRecordBatch(self: *Self, batch: RecordBatch) (WriterError || @TypeOf(self.writer).Error)!void {
-            if (self.metadata_version == .v4 and schemaUsesUnion(batch.schema().*)) return StreamError.UnsupportedType;
-
             var dictionary_ids = try std.ArrayList(i64).initCapacity(self.allocator, 0);
             defer dictionary_ids.deinit(self.allocator);
             var next_dictionary_id: i64 = 0;
@@ -275,7 +273,16 @@ pub fn StreamWriter(comptime WriterType: type) type {
 
             var body_offset: u64 = 0;
             for (batch.columns) |col| {
-                try appendArrayMeta(self.allocator, col.data(), &nodes, &buffers, &variadic_buffer_counts, &body_buffers, &body_offset);
+                try appendArrayMeta(
+                    self.allocator,
+                    col.data(),
+                    &nodes,
+                    &buffers,
+                    &variadic_buffer_counts,
+                    &body_buffers,
+                    &body_offset,
+                    self.metadata_version,
+                );
             }
 
             var compression_ptr: ?*fbs.BodyCompressionT = null;
@@ -553,10 +560,10 @@ fn buildSchemaT(
     endianness_mode: EndiannessMode,
     metadata_version: MetadataVersion,
 ) WriterError!fbs.SchemaT {
+    _ = metadata_version;
     if (schema.endianness != .little and !(schema.endianness == .big and endianness_mode == .normalize_to_little)) {
         return StreamError.UnsupportedType;
     }
-    if (metadata_version == .v4 and schemaUsesUnion(schema)) return StreamError.UnsupportedType;
 
     var fields = try std.ArrayList(fbs.FieldT).initCapacity(allocator, 0);
     for (schema.fields) |field| {
@@ -894,35 +901,6 @@ fn collectDictionaryArraysFromData(
     }
 }
 
-fn schemaUsesUnion(schema: Schema) bool {
-    for (schema.fields) |field| {
-        if (dataTypeUsesUnion(field.data_type.*)) return true;
-    }
-    return false;
-}
-
-fn dataTypeUsesUnion(dt: DataType) bool {
-    const storage = storageDataType(dt);
-    return switch (storage) {
-        .sparse_union, .dense_union => true,
-        .list => |lst| dataTypeUsesUnion(lst.value_field.data_type.*),
-        .large_list => |lst| dataTypeUsesUnion(lst.value_field.data_type.*),
-        .list_view => |lst| dataTypeUsesUnion(lst.value_field.data_type.*),
-        .large_list_view => |lst| dataTypeUsesUnion(lst.value_field.data_type.*),
-        .fixed_size_list => |lst| dataTypeUsesUnion(lst.value_field.data_type.*),
-        .map => |map_t| dataTypeUsesUnion(map_t.key_field.data_type.*) or dataTypeUsesUnion(map_t.item_field.data_type.*),
-        .struct_ => |st| blk: {
-            for (st.fields) |field| {
-                if (dataTypeUsesUnion(field.data_type.*)) break :blk true;
-            }
-            break :blk false;
-        },
-        .run_end_encoded => |ree| dataTypeUsesUnion(ree.value_type.*),
-        .dictionary => |dict| dataTypeUsesUnion(dict.value_type.*),
-        else => false,
-    };
-}
-
 fn writeDictionaryBatch(
     allocator: std.mem.Allocator,
     writer: anytype,
@@ -938,7 +916,16 @@ fn writeDictionaryBatch(
     defer body_buffers.deinit(allocator);
 
     var body_offset: u64 = 0;
-    try appendArrayMeta(allocator, dictionary_data, &nodes, &buffers, &variadic_buffer_counts, &body_buffers, &body_offset);
+    try appendArrayMeta(
+        allocator,
+        dictionary_data,
+        &nodes,
+        &buffers,
+        &variadic_buffer_counts,
+        &body_buffers,
+        &body_offset,
+        metadata_version,
+    );
 
     const record_batch_ptr = try allocator.create(fbs.RecordBatchT);
     errdefer allocator.destroy(record_batch_ptr);
@@ -1166,6 +1153,7 @@ fn appendArrayMeta(
     variadic_buffer_counts: *std.ArrayList(i64),
     body_buffers: *std.ArrayList(array_data.SharedBuffer),
     body_offset: *u64,
+    metadata_version: MetadataVersion,
 ) WriterError!void {
     const null_count = if (data.null_count) |count| count else computeNullCount(data);
     try nodes.append(allocator, .{
@@ -1173,6 +1161,16 @@ fn appendArrayMeta(
         .null_count = try castI64Metadata(null_count),
     });
     const layout_dt = storageDataType(data.data_type);
+
+    if (metadata_version == .v4 and (layout_dt == .sparse_union or layout_dt == .dense_union)) {
+        // V4 union layout includes an explicit validity bitmap buffer.
+        // We don't currently model union nulls, so emit a 0-byte bitmap when null_count==0.
+        try buffers.append(allocator, .{
+            .offset = try castI64Metadata(body_offset.*),
+            .length = 0,
+        });
+        try body_buffers.append(allocator, array_data.SharedBuffer.empty);
+    }
 
     for (data.buffers) |buf| {
         try buffers.append(allocator, .{
@@ -1191,24 +1189,24 @@ fn appendArrayMeta(
     switch (layout_dt) {
         .list, .large_list, .fixed_size_list, .map, .list_view, .large_list_view => {
             if (data.children.len != 1) return StreamError.InvalidMetadata;
-            try appendArrayMeta(allocator, data.children[0].data(), nodes, buffers, variadic_buffer_counts, body_buffers, body_offset);
+            try appendArrayMeta(allocator, data.children[0].data(), nodes, buffers, variadic_buffer_counts, body_buffers, body_offset, metadata_version);
         },
         .struct_ => {
             for (data.children) |child| {
-                try appendArrayMeta(allocator, child.data(), nodes, buffers, variadic_buffer_counts, body_buffers, body_offset);
+                try appendArrayMeta(allocator, child.data(), nodes, buffers, variadic_buffer_counts, body_buffers, body_offset, metadata_version);
             }
         },
         .sparse_union, .dense_union => {
             for (data.children) |child| {
-                try appendArrayMeta(allocator, child.data(), nodes, buffers, variadic_buffer_counts, body_buffers, body_offset);
+                try appendArrayMeta(allocator, child.data(), nodes, buffers, variadic_buffer_counts, body_buffers, body_offset, metadata_version);
             }
         },
         .run_end_encoded => |ree| {
             _ = ree;
             if (data.buffers.len != 0) return StreamError.InvalidMetadata;
             if (data.children.len != 2) return StreamError.InvalidMetadata;
-            try appendArrayMeta(allocator, data.children[0].data(), nodes, buffers, variadic_buffer_counts, body_buffers, body_offset);
-            try appendArrayMeta(allocator, data.children[1].data(), nodes, buffers, variadic_buffer_counts, body_buffers, body_offset);
+            try appendArrayMeta(allocator, data.children[0].data(), nodes, buffers, variadic_buffer_counts, body_buffers, body_offset, metadata_version);
+            try appendArrayMeta(allocator, data.children[1].data(), nodes, buffers, variadic_buffer_counts, body_buffers, body_offset, metadata_version);
         },
         .dictionary => {},
         else => {},
@@ -1900,18 +1898,18 @@ test "ipc writer can emit metadata version V4 for schema and record batch" {
     try std.testing.expect(batch_msg.header == .RecordBatch);
 }
 
-test "ipc writer rejects metadata version V4 when schema has union type" {
+test "ipc writer emits V4-compatible sparse union buffers" {
     const allocator = std.testing.allocator;
 
     const i32_type = DataType{ .int32 = {} };
-    const f32_type = DataType{ .float = {} };
+    const b_type = DataType{ .bool = {} };
     const union_children = [_]Field{
         .{ .name = "i", .data_type = &i32_type, .nullable = true },
-        .{ .name = "f", .data_type = &f32_type, .nullable = true },
+        .{ .name = "b", .data_type = &b_type, .nullable = true },
     };
     const union_type = DataType{
         .sparse_union = .{
-            .type_ids = &[_]i8{ 0, 1 },
+            .type_ids = &[_]i8{ 5, 7 },
             .fields = union_children[0..],
             .mode = .sparse,
         },
@@ -1928,7 +1926,60 @@ test "ipc writer rejects metadata version V4 when schema has union type" {
     });
     defer writer.deinit();
 
-    try std.testing.expectError(StreamError.UnsupportedType, writer.writeSchema(schema));
+    var int_builder = try @import("../array/primitive_array.zig").PrimitiveBuilder(i32, DataType{ .int32 = {} }).init(allocator, 2);
+    defer int_builder.deinit();
+    try int_builder.append(11);
+    try int_builder.append(22);
+    var int_ref = try int_builder.finish();
+    defer int_ref.release();
+
+    var bool_builder = try @import("../array/boolean_array.zig").BooleanBuilder.init(allocator, 2);
+    defer bool_builder.deinit();
+    try bool_builder.append(false);
+    try bool_builder.append(true);
+    var bool_ref = try bool_builder.finish();
+    defer bool_ref.release();
+
+    var union_builder = try @import("../array/advanced_array.zig").SparseUnionBuilder.init(allocator, union_type.sparse_union, 2);
+    defer union_builder.deinit();
+    try union_builder.appendTypeId(5);
+    try union_builder.appendTypeId(7);
+    var union_ref = try union_builder.finish(&[_]ArrayRef{ int_ref, bool_ref });
+    defer union_ref.release();
+
+    var batch = try RecordBatch.initBorrowed(allocator, schema, &[_]ArrayRef{union_ref});
+    defer batch.deinit();
+
+    try writer.writeSchema(schema);
+    try writer.writeRecordBatch(batch);
+    try writer.writeEnd();
+
+    var stream = std.io.fixedBufferStream(out.items);
+    const reader = stream.reader();
+    const schema_msg_opt = try readNextMessageForTest(allocator, reader);
+    try std.testing.expect(schema_msg_opt != null);
+    var schema_msg = schema_msg_opt.?;
+    defer schema_msg.deinit(allocator);
+    const batch_msg_opt = try readNextMessageForTest(allocator, reader);
+    try std.testing.expect(batch_msg_opt != null);
+    var batch_msg = batch_msg_opt.?;
+    defer batch_msg.deinit(allocator);
+    try std.testing.expectEqual(fbs.MetadataVersion.V4, batch_msg.version);
+    const rb = batch_msg.header.RecordBatch.?;
+    try std.testing.expect(rb.buffers.items.len >= 2);
+    try std.testing.expectEqual(@as(i64, 0), rb.buffers.items[0].length);
+
+    var out_stream = std.io.fixedBufferStream(out.items);
+    var out_reader = @import("stream_reader.zig").StreamReader(@TypeOf(out_stream.reader())).init(allocator, out_stream.reader());
+    defer out_reader.deinit();
+    _ = try out_reader.readSchema();
+    const out_batch_opt = try out_reader.nextRecordBatch();
+    try std.testing.expect(out_batch_opt != null);
+    var out_batch = out_batch_opt.?;
+    defer out_batch.deinit();
+    const out_union = @import("../array/advanced_array.zig").SparseUnionArray{ .data = out_batch.columns[0].data() };
+    try std.testing.expectEqual(@as(i8, 5), out_union.typeId(0));
+    try std.testing.expectEqual(@as(i8, 7), out_union.typeId(1));
 }
 
 test "ipc writer emits tensor message via public tensor-like api" {
