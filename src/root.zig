@@ -47,6 +47,7 @@ pub const IpcFormat = ipc.format;
 pub const IpcStreamWriter = ipc.StreamWriter;
 pub const IpcBodyCompressionCodec = ipc.BodyCompressionCodec;
 pub const IpcEndiannessMode = ipc.EndiannessMode;
+pub const IpcMetadataVersion = ipc.MetadataVersion;
 pub const IpcStreamWriterOptions = ipc.StreamWriterOptions;
 pub const IpcStreamReader = ipc.StreamReader;
 pub const IpcStreamReaderOptions = ipc.StreamReaderOptions;

@@ -2,6 +2,7 @@ pub const format = @import("format.zig");
 pub const StreamWriter = @import("stream_writer.zig").StreamWriter;
 pub const BodyCompressionCodec = @import("stream_writer.zig").BodyCompressionCodec;
 pub const EndiannessMode = @import("stream_writer.zig").EndiannessMode;
+pub const MetadataVersion = @import("stream_writer.zig").MetadataVersion;
 pub const StreamWriterOptions = @import("stream_writer.zig").WriterOptions;
 pub const StreamReader = @import("stream_reader.zig").StreamReader;
 pub const StreamReaderOptions = @import("stream_reader.zig").ReaderOptions;

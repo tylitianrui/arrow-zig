@@ -109,9 +109,22 @@ pub const EndiannessMode = enum {
     normalize_to_little,
 };
 
+pub const MetadataVersion = enum {
+    v4,
+    v5,
+};
+
+fn toFbsMetadataVersion(version: MetadataVersion) fbs.MetadataVersion {
+    return switch (version) {
+        .v4 => .V4,
+        .v5 => .V5,
+    };
+}
+
 pub const WriterOptions = struct {
     body_compression: ?BodyCompressionCodec = null,
     endianness_mode: EndiannessMode = .strict,
+    metadata_version: MetadataVersion = .v5,
 };
 
 pub fn StreamWriter(comptime WriterType: type) type {
@@ -121,6 +134,7 @@ pub fn StreamWriter(comptime WriterType: type) type {
         dictionary_values: std.AutoHashMap(i64, ArrayRef),
         body_compression: ?BodyCompressionCodec = null,
         endianness_mode: EndiannessMode = .strict,
+        metadata_version: MetadataVersion = .v5,
 
         const Self = @This();
 
@@ -139,11 +153,20 @@ pub fn StreamWriter(comptime WriterType: type) type {
                 .dictionary_values = std.AutoHashMap(i64, ArrayRef).init(allocator),
                 .body_compression = options.body_compression,
                 .endianness_mode = options.endianness_mode,
+                .metadata_version = options.metadata_version,
             };
         }
 
         pub fn setBodyCompression(self: *Self, codec: ?BodyCompressionCodec) void {
             self.body_compression = codec;
+        }
+
+        pub fn metadataVersion(self: *const Self) MetadataVersion {
+            return self.metadata_version;
+        }
+
+        pub fn flatbufMetadataVersion(self: *const Self) fbs.MetadataVersion {
+            return toFbsMetadataVersion(self.metadata_version);
         }
 
         pub fn deinit(self: *Self) void {
@@ -165,10 +188,16 @@ pub fn StreamWriter(comptime WriterType: type) type {
             const schema_ptr = try self.allocator.create(fbs.SchemaT);
             errdefer self.allocator.destroy(schema_ptr);
             var next_dictionary_id: i64 = 0;
-            schema_ptr.* = try buildSchemaT(self.allocator, schema, &next_dictionary_id, self.endianness_mode);
+            schema_ptr.* = try buildSchemaT(
+                self.allocator,
+                schema,
+                &next_dictionary_id,
+                self.endianness_mode,
+                self.metadata_version,
+            );
 
             var msg = fbs.MessageT{
-                .version = .V5,
+                .version = toFbsMetadataVersion(self.metadata_version),
                 .header = .{ .Schema = schema_ptr },
                 .bodyLength = 0,
                 .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(self.allocator, 0),
@@ -179,12 +208,14 @@ pub fn StreamWriter(comptime WriterType: type) type {
         }
 
         pub fn writeTensorLikeMessage(self: *Self, metadata: TensorLikeMetadata, body: []const u8) (WriterError || @TypeOf(self.writer).Error)!void {
-            var msg = try buildTensorLikeMessage(self.allocator, metadata, body);
+            var msg = try buildTensorLikeMessage(self.allocator, metadata, body, self.metadata_version);
             defer msg.deinit(self.allocator);
             try writeMessage(self.allocator, self.writer, msg, &.{array_data.SharedBuffer.fromSlice(body)});
         }
 
         pub fn writeRecordBatch(self: *Self, batch: RecordBatch) (WriterError || @TypeOf(self.writer).Error)!void {
+            if (self.metadata_version == .v4 and schemaUsesUnion(batch.schema().*)) return StreamError.UnsupportedType;
+
             var dictionary_ids = try std.ArrayList(i64).initCapacity(self.allocator, 0);
             defer dictionary_ids.deinit(self.allocator);
             var next_dictionary_id: i64 = 0;
@@ -208,7 +239,14 @@ pub fn StreamWriter(comptime WriterType: type) type {
             for (dictionary_ids.items, dictionary_arrays.items) |dictionary_id, dict_ref| {
                 const emission = try planDictionaryEmission(self.dictionary_values.get(dictionary_id), dict_ref);
                 if (emission.mode != .skip) {
-                    try writeDictionaryBatch(self.allocator, self.writer, dictionary_id, emission.array.data(), emission.mode == .delta);
+                    try writeDictionaryBatch(
+                        self.allocator,
+                        self.writer,
+                        dictionary_id,
+                        emission.array.data(),
+                        emission.mode == .delta,
+                        self.metadata_version,
+                    );
                 }
                 if (emission.owned_slice) |slice| {
                     var owned = slice;
@@ -263,7 +301,7 @@ pub fn StreamWriter(comptime WriterType: type) type {
             };
 
             var msg = fbs.MessageT{
-                .version = .V5,
+                .version = toFbsMetadataVersion(self.metadata_version),
                 .header = .{ .RecordBatch = record_batch_ptr },
                 .bodyLength = try castI64Metadata(body_offset),
                 .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(self.allocator, 0),
@@ -363,7 +401,12 @@ fn buildTensorTypeT(allocator: std.mem.Allocator, dt: DataType) WriterError!fbs.
     return try buildTypeT(allocator, dt);
 }
 
-fn buildTensorLikeMessage(allocator: std.mem.Allocator, metadata: TensorLikeMetadata, body: []const u8) WriterError!fbs.MessageT {
+fn buildTensorLikeMessage(
+    allocator: std.mem.Allocator,
+    metadata: TensorLikeMetadata,
+    body: []const u8,
+    metadata_version: MetadataVersion,
+) WriterError!fbs.MessageT {
     return switch (metadata) {
         .tensor => |tensor| blk: {
             const type_t = try buildTensorTypeT(allocator, tensor.value_type);
@@ -394,7 +437,7 @@ fn buildTensorLikeMessage(allocator: std.mem.Allocator, metadata: TensorLikeMeta
             });
 
             break :blk fbs.MessageT{
-                .version = .V5,
+                .version = toFbsMetadataVersion(metadata_version),
                 .header = .{ .Tensor = tensor_ptr },
                 .bodyLength = try castI64Metadata(body.len),
                 .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0),
@@ -494,7 +537,7 @@ fn buildTensorLikeMessage(allocator: std.mem.Allocator, metadata: TensorLikeMeta
             });
 
             break :blk fbs.MessageT{
-                .version = .V5,
+                .version = toFbsMetadataVersion(metadata_version),
                 .header = .{ .SparseTensor = sparse_ptr },
                 .bodyLength = try castI64Metadata(body.len),
                 .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0),
@@ -508,10 +551,13 @@ fn buildSchemaT(
     schema: Schema,
     next_dictionary_id: *i64,
     endianness_mode: EndiannessMode,
+    metadata_version: MetadataVersion,
 ) WriterError!fbs.SchemaT {
     if (schema.endianness != .little and !(schema.endianness == .big and endianness_mode == .normalize_to_little)) {
         return StreamError.UnsupportedType;
     }
+    if (metadata_version == .v4 and schemaUsesUnion(schema)) return StreamError.UnsupportedType;
+
     var fields = try std.ArrayList(fbs.FieldT).initCapacity(allocator, 0);
     for (schema.fields) |field| {
         try fields.append(allocator, try buildFieldT(allocator, field, next_dictionary_id));
@@ -848,12 +894,42 @@ fn collectDictionaryArraysFromData(
     }
 }
 
+fn schemaUsesUnion(schema: Schema) bool {
+    for (schema.fields) |field| {
+        if (dataTypeUsesUnion(field.data_type.*)) return true;
+    }
+    return false;
+}
+
+fn dataTypeUsesUnion(dt: DataType) bool {
+    const storage = storageDataType(dt);
+    return switch (storage) {
+        .sparse_union, .dense_union => true,
+        .list => |lst| dataTypeUsesUnion(lst.value_field.data_type.*),
+        .large_list => |lst| dataTypeUsesUnion(lst.value_field.data_type.*),
+        .list_view => |lst| dataTypeUsesUnion(lst.value_field.data_type.*),
+        .large_list_view => |lst| dataTypeUsesUnion(lst.value_field.data_type.*),
+        .fixed_size_list => |lst| dataTypeUsesUnion(lst.value_field.data_type.*),
+        .map => |map_t| dataTypeUsesUnion(map_t.key_field.data_type.*) or dataTypeUsesUnion(map_t.item_field.data_type.*),
+        .struct_ => |st| blk: {
+            for (st.fields) |field| {
+                if (dataTypeUsesUnion(field.data_type.*)) break :blk true;
+            }
+            break :blk false;
+        },
+        .run_end_encoded => |ree| dataTypeUsesUnion(ree.value_type.*),
+        .dictionary => |dict| dataTypeUsesUnion(dict.value_type.*),
+        else => false,
+    };
+}
+
 fn writeDictionaryBatch(
     allocator: std.mem.Allocator,
     writer: anytype,
     dictionary_id: i64,
     dictionary_data: *const ArrayData,
     is_delta: bool,
+    metadata_version: MetadataVersion,
 ) (WriterError || @TypeOf(writer).Error)!void {
     var nodes = try std.ArrayList(fbs.FieldNodeT).initCapacity(allocator, 0);
     var buffers = try std.ArrayList(fbs.BufferT).initCapacity(allocator, 0);
@@ -882,7 +958,7 @@ fn writeDictionaryBatch(
     };
 
     var msg = fbs.MessageT{
-        .version = .V5,
+        .version = toFbsMetadataVersion(metadata_version),
         .header = .{ .DictionaryBatch = dictionary_batch_ptr },
         .bodyLength = try castI64Metadata(body_offset),
         .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0),
@@ -1774,6 +1850,85 @@ test "ipc writer normalizes big-endian schema when configured" {
     defer reader.deinit();
     const out_schema = try reader.readSchema();
     try std.testing.expectEqual(datatype.Endianness.little, out_schema.endianness);
+}
+
+test "ipc writer can emit metadata version V4 for schema and record batch" {
+    const allocator = std.testing.allocator;
+
+    const id_type = DataType{ .int32 = {} };
+    const fields = [_]Field{
+        .{ .name = "id", .data_type = &id_type, .nullable = false },
+    };
+    const schema = Schema{ .fields = fields[0..] };
+
+    var id_builder = try @import("../array/primitive_array.zig").PrimitiveBuilder(i32, DataType{ .int32 = {} }).init(allocator, 2);
+    defer id_builder.deinit();
+    try id_builder.append(10);
+    try id_builder.append(20);
+    var id_ref = try id_builder.finish();
+    defer id_ref.release();
+
+    var batch = try RecordBatch.initBorrowed(allocator, schema, &[_]ArrayRef{id_ref});
+    defer batch.deinit();
+
+    var out = std.array_list.Managed(u8).init(allocator);
+    defer out.deinit();
+    var writer = StreamWriter(@TypeOf(out.writer())).initWithOptions(allocator, out.writer(), .{
+        .metadata_version = .v4,
+    });
+    defer writer.deinit();
+
+    try writer.writeSchema(schema);
+    try writer.writeRecordBatch(batch);
+    try writer.writeEnd();
+
+    var stream = std.io.fixedBufferStream(out.items);
+    const reader = stream.reader();
+
+    const schema_msg_opt = try readNextMessageForTest(allocator, reader);
+    try std.testing.expect(schema_msg_opt != null);
+    var schema_msg = schema_msg_opt.?;
+    defer schema_msg.deinit(allocator);
+    try std.testing.expectEqual(fbs.MetadataVersion.V4, schema_msg.version);
+    try std.testing.expect(schema_msg.header == .Schema);
+
+    const batch_msg_opt = try readNextMessageForTest(allocator, reader);
+    try std.testing.expect(batch_msg_opt != null);
+    var batch_msg = batch_msg_opt.?;
+    defer batch_msg.deinit(allocator);
+    try std.testing.expectEqual(fbs.MetadataVersion.V4, batch_msg.version);
+    try std.testing.expect(batch_msg.header == .RecordBatch);
+}
+
+test "ipc writer rejects metadata version V4 when schema has union type" {
+    const allocator = std.testing.allocator;
+
+    const i32_type = DataType{ .int32 = {} };
+    const f32_type = DataType{ .float = {} };
+    const union_children = [_]Field{
+        .{ .name = "i", .data_type = &i32_type, .nullable = true },
+        .{ .name = "f", .data_type = &f32_type, .nullable = true },
+    };
+    const union_type = DataType{
+        .sparse_union = .{
+            .type_ids = &[_]i8{ 0, 1 },
+            .fields = union_children[0..],
+            .mode = .sparse,
+        },
+    };
+    const schema_fields = [_]Field{
+        .{ .name = "u", .data_type = &union_type, .nullable = true },
+    };
+    const schema = Schema{ .fields = schema_fields[0..] };
+
+    var out = std.array_list.Managed(u8).init(allocator);
+    defer out.deinit();
+    var writer = StreamWriter(@TypeOf(out.writer())).initWithOptions(allocator, out.writer(), .{
+        .metadata_version = .v4,
+    });
+    defer writer.deinit();
+
+    try std.testing.expectError(StreamError.UnsupportedType, writer.writeSchema(schema));
 }
 
 test "ipc writer emits tensor message via public tensor-like api" {

@@ -130,6 +130,7 @@ pub fn FileWriter(comptime WriterType: type) type {
                 self.schema_msg.?.header.Schema.?,
                 self.dictionary_blocks,
                 self.record_batch_blocks,
+                self.stream.flatbufMetadataVersion(),
             );
             defer self.allocator.free(footer_bytes);
 
@@ -275,12 +276,13 @@ fn buildFooterBytes(
     schema: *fbs.SchemaT,
     dictionary_blocks: std.ArrayList(fbs.BlockT),
     record_batch_blocks: std.ArrayList(fbs.BlockT),
+    metadata_version: fbs.MetadataVersion,
 ) FileError![]u8 {
     var custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0);
     defer custom_metadata.deinit(allocator);
 
     const footer = fbs.FooterT{
-        .version = .V5,
+        .version = metadata_version,
         .schema = schema,
         .dictionaries = dictionary_blocks,
         .recordBatches = record_batch_blocks,
@@ -374,6 +376,51 @@ test "ipc file writer emits arrow file magic and footer" {
         FileMagic,
         out.items[out.items.len - FileMagic.len .. out.items.len],
     );
+}
+
+test "ipc file writer can emit footer metadata version V4" {
+    const allocator = std.testing.allocator;
+
+    const id_type = DataType{ .int32 = {} };
+    const fields = [_]Field{
+        .{ .name = "id", .data_type = &id_type, .nullable = false },
+    };
+    const schema = Schema{ .fields = fields[0..] };
+
+    var out = std.ArrayList(u8){};
+    defer out.deinit(allocator);
+    const Sink = struct {
+        allocator: std.mem.Allocator,
+        out: *std.ArrayList(u8),
+        pub const Error = error{OutOfMemory};
+        pub fn writeAll(self: @This(), bytes: []const u8) Error!void {
+            try self.out.appendSlice(self.allocator, bytes);
+        }
+    };
+    var writer = try FileWriter(Sink).initWithOptions(allocator, .{ .allocator = allocator, .out = &out }, .{
+        .metadata_version = .v4,
+    });
+    defer writer.deinit();
+
+    try writer.writeSchema(schema);
+    try writer.writeEnd();
+
+    const trailer_len = 4 + FileMagic.len;
+    try std.testing.expect(out.items.len > trailer_len + FileMagic.len);
+    const trailer = out.items[out.items.len - trailer_len .. out.items.len];
+    try std.testing.expectEqualSlices(u8, FileMagic, trailer[4..]);
+
+    const footer_len_u32 = readU32Le(trailer[0..4]);
+    const footer_len = std.math.cast(usize, footer_len_u32) orelse return error.InvalidMessage;
+    const footer_start = out.items.len - trailer_len - footer_len;
+    const footer_bytes = out.items[footer_start .. out.items.len - trailer_len];
+
+    const footer = fbs.Footer.GetRootAs(@constCast(footer_bytes), 0);
+    const opts: fb.common.PackOptions = .{ .allocator = allocator };
+    var footer_t = try fbs.FooterT.Unpack(footer, opts);
+    defer footer_t.deinit(allocator);
+
+    try std.testing.expectEqual(fbs.MetadataVersion.V4, footer_t.version);
 }
 
 test "ipc file writer streams incrementally and accepts tensor-like messages" {
