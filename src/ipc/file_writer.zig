@@ -58,6 +58,8 @@ pub fn FileWriter(comptime WriterType: type) type {
         schema_metadata_bytes: ?[]u8 = null,
         dictionary_blocks: std.ArrayList(fbs.BlockT),
         record_batch_blocks: std.ArrayList(fbs.BlockT),
+        tensor_blocks: std.ArrayList(fbs.BlockT),
+        sparse_tensor_blocks: std.ArrayList(fbs.BlockT),
         stream_offset: usize = 0,
         header_written: bool = false,
         saw_stream_end: bool = false,
@@ -84,6 +86,8 @@ pub fn FileWriter(comptime WriterType: type) type {
                 .stream = stream_writer.StreamWriter(CollectWriter).initWithOptions(allocator, collect_writer, options),
                 .dictionary_blocks = try std.ArrayList(fbs.BlockT).initCapacity(allocator, 0),
                 .record_batch_blocks = try std.ArrayList(fbs.BlockT).initCapacity(allocator, 0),
+                .tensor_blocks = try std.ArrayList(fbs.BlockT).initCapacity(allocator, 0),
+                .sparse_tensor_blocks = try std.ArrayList(fbs.BlockT).initCapacity(allocator, 0),
             };
         }
 
@@ -96,6 +100,8 @@ pub fn FileWriter(comptime WriterType: type) type {
             if (self.schema_metadata_bytes) |bytes| self.allocator.free(bytes);
             self.dictionary_blocks.deinit(self.allocator);
             self.record_batch_blocks.deinit(self.allocator);
+            self.tensor_blocks.deinit(self.allocator);
+            self.sparse_tensor_blocks.deinit(self.allocator);
             self.stream_bytes.deinit(self.allocator);
             self.allocator.destroy(self.stream_bytes);
         }
@@ -130,6 +136,8 @@ pub fn FileWriter(comptime WriterType: type) type {
                 self.schema_msg.?.header.Schema.?,
                 self.dictionary_blocks,
                 self.record_batch_blocks,
+                self.tensor_blocks,
+                self.sparse_tensor_blocks,
                 self.stream.flatbufMetadataVersion(),
             );
             defer self.allocator.free(footer_bytes);
@@ -248,6 +256,18 @@ pub fn FileWriter(comptime WriterType: type) type {
                         msg_t.deinit(self.allocator);
                     },
                     .Tensor, .SparseTensor => {
+                        const file_offset = std.math.cast(i64, FileMagic.len + 2 + self.stream_offset) orelse return error.InvalidMessage;
+                        const meta_data_length = std.math.cast(i32, prefix_len + format.paddedLen(metadata_len)) orelse return error.InvalidMessage;
+                        const block = fbs.BlockT{
+                            .offset = file_offset,
+                            .metaDataLength = meta_data_length,
+                            .bodyLength = msg_t.bodyLength,
+                        };
+                        if (msg_t.header == .Tensor) {
+                            try self.tensor_blocks.append(self.allocator, block);
+                        } else {
+                            try self.sparse_tensor_blocks.append(self.allocator, block);
+                        }
                         msg_t.deinit(self.allocator);
                     },
                     else => {
@@ -271,15 +291,48 @@ fn writeU32Le(writer: anytype, value: u32) !void {
     try writer.writeAll(bytes[0..4]);
 }
 
+fn encodeBlocksToString(allocator: std.mem.Allocator, blocks: []const fbs.BlockT) error{OutOfMemory}![]u8 {
+    var buf = std.ArrayList(u8).init(allocator);
+    defer buf.deinit();
+    for (blocks, 0..) |blk, i| {
+        if (i > 0) try buf.append(',');
+        try buf.writer().print("{d}:{d}:{d}", .{ blk.offset, blk.metaDataLength, blk.bodyLength });
+    }
+    return buf.toOwnedSlice();
+}
+
 fn buildFooterBytes(
     allocator: std.mem.Allocator,
     schema: *fbs.SchemaT,
     dictionary_blocks: std.ArrayList(fbs.BlockT),
     record_batch_blocks: std.ArrayList(fbs.BlockT),
+    tensor_blocks: std.ArrayList(fbs.BlockT),
+    sparse_tensor_blocks: std.ArrayList(fbs.BlockT),
     metadata_version: fbs.MetadataVersion,
 ) FileError![]u8 {
-    var custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0);
-    defer custom_metadata.deinit(allocator);
+    var custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 2);
+    defer {
+        for (custom_metadata.items) |*kv| {
+            if (kv.key) |k| allocator.free(k);
+            if (kv.value) |v| allocator.free(v);
+        }
+        custom_metadata.deinit(allocator);
+    }
+
+    if (tensor_blocks.items.len > 0) {
+        const encoded = try encodeBlocksToString(allocator, tensor_blocks.items);
+        errdefer allocator.free(encoded);
+        const key = try allocator.dupe(u8, "zarrow:tensor_blocks");
+        errdefer allocator.free(key);
+        try custom_metadata.append(allocator, fbs.KeyValueT{ .key = key, .value = encoded });
+    }
+    if (sparse_tensor_blocks.items.len > 0) {
+        const encoded = try encodeBlocksToString(allocator, sparse_tensor_blocks.items);
+        errdefer allocator.free(encoded);
+        const key = try allocator.dupe(u8, "zarrow:sparse_tensor_blocks");
+        errdefer allocator.free(key);
+        try custom_metadata.append(allocator, fbs.KeyValueT{ .key = key, .value = encoded });
+    }
 
     const footer = fbs.FooterT{
         .version = metadata_version,

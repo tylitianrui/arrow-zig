@@ -36,6 +36,8 @@ const fbs = struct {
 const IndexedFile = struct {
     dictionaries: []IndexedBlock,
     record_batches: []IndexedBlock,
+    tensors: []IndexedBlock,
+    sparse_tensors: []IndexedBlock,
     message_order: []IndexedBlock, // dictionaries + record batches sorted by offset
     record_message_positions: []usize, // record index -> message_order position
 
@@ -44,6 +46,8 @@ const IndexedFile = struct {
         allocator.free(self.message_order);
         allocator.free(self.record_batches);
         allocator.free(self.dictionaries);
+        allocator.free(self.sparse_tensors);
+        allocator.free(self.tensors);
         self.* = undefined;
     }
 };
@@ -136,6 +140,65 @@ pub fn FileReader(comptime ReaderType: type) type {
             const idx = self.indexed.?;
             if (self.next_record_index >= idx.record_batches.len) return null;
             return try self.readRecordBatchAt(self.next_record_index);
+        }
+
+        pub fn tensorCount(self: *Self) (FileError || ReaderIoError)!usize {
+            try self.ensureLoaded();
+            return self.indexed.?.tensors.len;
+        }
+
+        pub fn readTensorAt(self: *Self, index: usize) (FileError || ReaderIoError)!stream_reader.OwnedTensorLikeMessage {
+            try self.ensureLoaded();
+            const idx = self.indexed.?;
+            if (index >= idx.tensors.len) return error.InvalidFile;
+            return try self.readTensorLikeBlock(idx.tensors[index]);
+        }
+
+        pub fn sparseTensorCount(self: *Self) (FileError || ReaderIoError)!usize {
+            try self.ensureLoaded();
+            return self.indexed.?.sparse_tensors.len;
+        }
+
+        pub fn readSparseTensorAt(self: *Self, index: usize) (FileError || ReaderIoError)!stream_reader.OwnedTensorLikeMessage {
+            try self.ensureLoaded();
+            const idx = self.indexed.?;
+            if (index >= idx.sparse_tensors.len) return error.InvalidFile;
+            return try self.readTensorLikeBlock(idx.sparse_tensors[index]);
+        }
+
+        fn readTensorLikeBlock(self: *Self, block: IndexedBlock) (FileError || ReaderIoError)!stream_reader.OwnedTensorLikeMessage {
+            var decoded_block = try self.readDecodedBlock(block);
+            const retained_body = decoded_block.body.retain();
+            defer decoded_block.deinit(self.allocator);
+
+            var arena = std.heap.ArenaAllocator.init(self.allocator);
+            errdefer arena.deinit();
+            var body_for_result = retained_body;
+            errdefer body_for_result.release();
+
+            const meta = switch (block.header) {
+                .tensor => stream_reader.TensorLikeMetadata{
+                    .tensor = try stream_reader.decodeTensorFromMessageMetadata(
+                        arena.allocator(),
+                        decoded_block.metadata,
+                        retained_body,
+                    ),
+                },
+                .sparse_tensor => stream_reader.TensorLikeMetadata{
+                    .sparse_tensor = try stream_reader.decodeSparseTensorFromMessageMetadata(
+                        arena.allocator(),
+                        decoded_block.metadata,
+                        retained_body,
+                    ),
+                },
+                else => return error.InvalidFile,
+            };
+
+            return stream_reader.OwnedTensorLikeMessage{
+                .arena = arena,
+                .metadata = meta,
+                .body = body_for_result,
+            };
         }
 
         fn ensureLoaded(self: *Self) (FileError || ReaderIoError)!void {
@@ -295,6 +358,24 @@ pub fn FileReader(comptime ReaderType: type) type {
             const record_message_positions = try self.allocator.alloc(usize, record_count);
             errdefer self.allocator.free(record_message_positions);
 
+            const tensors = try self.collectTensorBlocksFromCustomMetadata(
+                footer_t,
+                header_len,
+                footer_start,
+                .tensor,
+                "zarrow:tensor_blocks",
+            );
+            errdefer self.allocator.free(tensors);
+
+            const sparse_tensors = try self.collectTensorBlocksFromCustomMetadata(
+                footer_t,
+                header_len,
+                footer_start,
+                .sparse_tensor,
+                "zarrow:sparse_tensor_blocks",
+            );
+            errdefer self.allocator.free(sparse_tensors);
+
             var d_i: usize = 0;
             var r_i: usize = 0;
             for (message_order, 0..) |blk, pos| {
@@ -315,9 +396,49 @@ pub fn FileReader(comptime ReaderType: type) type {
             return .{
                 .dictionaries = dictionaries,
                 .record_batches = record_batches,
+                .tensors = tensors,
+                .sparse_tensors = sparse_tensors,
                 .message_order = message_order,
                 .record_message_positions = record_message_positions,
             };
+        }
+
+        fn collectTensorBlocksFromCustomMetadata(
+            self: *Self,
+            footer_t: fbs.FooterT,
+            header_len: usize,
+            footer_start: usize,
+            expected_header: MessageHeaderKind,
+            meta_key: []const u8,
+        ) (FileError || ReaderIoError)![]IndexedBlock {
+            var blocks = std.ArrayList(IndexedBlock).init(self.allocator);
+            errdefer blocks.deinit(self.allocator);
+
+            for (footer_t.custom_metadata.items) |kv| {
+                const key = kv.key orelse continue;
+                if (!std.mem.eql(u8, key, meta_key)) continue;
+                const value = kv.value orelse continue;
+
+                var it = std.mem.splitScalar(u8, value, ',');
+                while (it.next()) |entry| {
+                    if (entry.len == 0) continue;
+                    var parts = std.mem.splitScalar(u8, entry, ':');
+                    const off_str = parts.next() orelse return error.InvalidFile;
+                    const meta_str = parts.next() orelse return error.InvalidFile;
+                    const body_str = parts.next() orelse return error.InvalidFile;
+                    if (parts.next() != null) return error.InvalidFile;
+
+                    const fb_block = fbs.BlockT{
+                        .offset = std.fmt.parseInt(i64, off_str, 10) catch return error.InvalidFile,
+                        .metaDataLength = std.fmt.parseInt(i32, meta_str, 10) catch return error.InvalidFile,
+                        .bodyLength = std.fmt.parseInt(i64, body_str, 10) catch return error.InvalidFile,
+                    };
+                    try self.appendCheckedBlock(&blocks, fb_block, expected_header, header_len, footer_start);
+                }
+                break;
+            }
+
+            return try blocks.toOwnedSlice();
         }
 
         fn collectIndexedBlocks(
