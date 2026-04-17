@@ -37,9 +37,13 @@ pub const SharedBuffer = struct {
 
     const Self = @This();
 
+    /// Recoverable errors returned by `slice` and `typedSlice`.
     pub const Error = error{
+        /// Invalid slice range: `start > end` or `end > self.data.len`.
         SliceOutOfBounds,
+        /// `typedSlice(T)` requires pointer alignment compatible with `@alignOf(T)`.
         MisalignedPointer,
+        /// `typedSlice(T)` requires byte length to be a multiple of `@sizeOf(T)`.
         LengthNotMultipleOfTypeSize,
     };
 
@@ -118,6 +122,7 @@ pub const OwnedBuffer = struct {
     /// Initialize and return a new instance.
     pub fn init(allocator: std.mem.Allocator, capacity: usize) !Self {
         const actualCapacity = alignedSize(if (capacity == 0) ALIGNMENT else capacity);
+
         const data = try allocator.alignedAlloc(u8, std.mem.Alignment.fromByteUnits(ALIGNMENT), actualCapacity);
         @memset(data, 0);
         return .{ .data = data, .allocator = allocator };
