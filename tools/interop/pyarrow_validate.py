@@ -41,6 +41,40 @@ def _read_all_batches(reader) -> list[pa.RecordBatch]:
     return list(reader)
 
 
+def _extract_stream_payload(in_path: pathlib.Path, container: str) -> bytes:
+    raw = in_path.read_bytes()
+    if container == "stream":
+        return raw
+    if container != "file":
+        raise ValueError(f"unknown container mode: {container}")
+
+    # Arrow file layout:
+    # [magic(6) + pad(2)] [stream payload] [footer flatbuffer] [footer_len u32] [magic(6)]
+    if len(raw) < 8 + 4 + 6:
+        raise RuntimeError("file too small")
+    if raw[0:6] != b"ARROW1" or raw[6:8] != b"\x00\x00":
+        raise RuntimeError("invalid file header magic")
+    if raw[-6:] != b"ARROW1":
+        raise RuntimeError("invalid file footer magic")
+
+    footer_len = int.from_bytes(raw[-10:-6], "little", signed=False)
+    footer_start = len(raw) - 10 - footer_len
+    if footer_start < 8:
+        raise RuntimeError("invalid file footer offset")
+    return raw[8:footer_start]
+
+
+def _read_all_messages_from_payload(payload: bytes) -> list[ipc.Message]:
+    reader = ipc.MessageReader.open_stream(pa.BufferReader(payload))
+    out: list[ipc.Message] = []
+    while True:
+        try:
+            out.append(reader.read_next_message())
+        except StopIteration:
+            break
+    return out
+
+
 def validate_canonical(in_path: pathlib.Path, container: str) -> None:
     # Expected decoded content:
     # - one batch with 3 rows
@@ -224,10 +258,34 @@ def validate_view(in_path: pathlib.Path, container: str) -> None:
         raise RuntimeError("invalid bv values")
 
 
+def validate_tensor(in_path: pathlib.Path, container: str) -> None:
+    payload = _extract_stream_payload(in_path, container)
+    messages = _read_all_messages_from_payload(payload)
+    if len(messages) != 2:
+        raise RuntimeError("expected exactly schema + tensor messages")
+    if messages[0].type != "schema":
+        raise RuntimeError("first message must be schema")
+    if messages[1].type != "tensor":
+        raise RuntimeError("second message must be tensor")
+
+    tensor_bytes = messages[1].serialize().to_pybytes()
+    tensor = ipc.read_tensor(pa.BufferReader(tensor_bytes))
+    if tensor.type != pa.int32():
+        raise RuntimeError("tensor type must be int32")
+    if tuple(tensor.shape) != (2, 3):
+        raise RuntimeError(f"invalid tensor shape: {tensor.shape!r}")
+    if tuple(tensor.strides) != (12, 4):
+        raise RuntimeError(f"invalid tensor strides: {tensor.strides!r}")
+    if tuple(tensor.dim_names) != ("rows", "cols"):
+        raise RuntimeError(f"invalid tensor dim_names: {tensor.dim_names!r}")
+    if tensor.size != 6:
+        raise RuntimeError(f"invalid tensor size: {tensor.size!r}")
+
+
 def main() -> int:
     if len(sys.argv) not in (2, 3, 4):
         print(
-            "usage: pyarrow_validate.py <in.arrow> [canonical|dict-delta|ree|ree-int16|ree-int64|complex|extension|view] [stream|file]",
+            "usage: pyarrow_validate.py <in.arrow> [canonical|dict-delta|ree|ree-int16|ree-int64|complex|extension|view|tensor] [stream|file]",
             file=sys.stderr,
         )
         return 2
@@ -267,6 +325,9 @@ def main() -> int:
         return 0
     if mode == "view":
         validate_view(in_path, container)
+        return 0
+    if mode == "tensor":
+        validate_tensor(in_path, container)
         return 0
     print(f"unknown mode: {mode}", file=sys.stderr)
     return 2

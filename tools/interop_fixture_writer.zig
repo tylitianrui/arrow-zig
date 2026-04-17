@@ -23,6 +23,7 @@ const FixtureCase = enum {
     complex,
     extension,
     view,
+    tensor,
 };
 
 const ContainerMode = enum {
@@ -39,7 +40,7 @@ pub fn main() !void {
     defer args.deinit();
     _ = args.next(); // exe
     const out_path = args.next() orelse {
-        std.log.err("usage: interop-fixture-writer <out.arrow> [canonical|dict-delta|ree|ree-int16|ree-int64|complex|extension|view] [stream|file]", .{});
+        std.log.err("usage: interop-fixture-writer <out.arrow> [canonical|dict-delta|ree|ree-int16|ree-int64|complex|extension|view|tensor] [stream|file]", .{});
         return error.InvalidArgs;
     };
     const fixture_case: FixtureCase = blk: {
@@ -52,6 +53,7 @@ pub fn main() !void {
         if (std.mem.eql(u8, mode, "complex")) break :blk .complex;
         if (std.mem.eql(u8, mode, "extension")) break :blk .extension;
         if (std.mem.eql(u8, mode, "view")) break :blk .view;
+        if (std.mem.eql(u8, mode, "tensor")) break :blk .tensor;
         std.log.err("unknown fixture mode: {s}", .{mode});
         return error.InvalidArgs;
     };
@@ -63,7 +65,7 @@ pub fn main() !void {
         return error.InvalidArgs;
     };
     if (args.next() != null) {
-        std.log.err("usage: interop-fixture-writer <out.arrow> [canonical|dict-delta|ree|ree-int16|ree-int64|complex|extension|view] [stream|file]", .{});
+        std.log.err("usage: interop-fixture-writer <out.arrow> [canonical|dict-delta|ree|ree-int16|ree-int64|complex|extension|view|tensor] [stream|file]", .{});
         return error.InvalidArgs;
     }
     if (container_mode == .file and fixture_case == .dict_delta) {
@@ -101,7 +103,46 @@ fn writeFixture(allocator: std.mem.Allocator, writer: anytype, fixture_case: Fix
         .complex => try writeComplexFixture(allocator, writer),
         .extension => try writeExtensionFixture(allocator, writer),
         .view => try writeViewFixture(allocator, writer),
+        .tensor => try writeTensorFixture(allocator, writer),
     }
+}
+
+fn writeTensorFixture(allocator: std.mem.Allocator, writer: anytype) !void {
+    _ = allocator;
+    // Writes one fixture with:
+    // - schema: id: int32 (non-null)
+    // - one tensor message: int32[2,3], values=[1,2,3,4,5,6], strides=[12,4]
+    const id_type = zarrow.DataType{ .int32 = {} };
+    const fields = [_]zarrow.Field{
+        .{ .name = "id", .data_type = &id_type, .nullable = false },
+    };
+    const schema = zarrow.Schema{ .fields = fields[0..] };
+
+    var tensor_body: [24]u8 = undefined;
+    for (0..6) |i| {
+        const value: i32 = @intCast(i + 1);
+        var encoded: [4]u8 = undefined;
+        std.mem.writeInt(i32, &encoded, value, .little);
+        @memcpy(tensor_body[i * 4 .. i * 4 + 4], encoded[0..]);
+    }
+
+    const dims = [_]zarrow.IpcTensorDim{
+        .{ .size = 2, .name = "rows" },
+        .{ .size = 3, .name = "cols" },
+    };
+    const strides = [_]i64{ 12, 4 };
+    const tensor_meta = zarrow.IpcTensorLikeMetadata{
+        .tensor = .{
+            .value_type = zarrow.DataType{ .int32 = {} },
+            .shape = dims[0..],
+            .strides = strides[0..],
+            .data = .{ .offset = 0, .length = tensor_body.len },
+        },
+    };
+
+    try writer.writeSchema(schema);
+    try writer.writeTensorLikeMessage(tensor_meta, tensor_body[0..]);
+    try writer.writeEnd();
 }
 
 fn writeViewFixture(allocator: std.mem.Allocator, writer: anytype) !void {
