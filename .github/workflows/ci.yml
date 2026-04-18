@@ -32,7 +32,7 @@ jobs:
       fail-fast: false
       matrix:
         os: ["ubuntu-latest", "macos-latest", "windows-latest"]
-        zig: ["0.15.1", "0.15.2"]
+        zig: ["0.15.1", "0.15.2", "0.16.0"]
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -42,12 +42,12 @@ jobs:
         with:
           version: "${{ matrix.zig }}"
 
-      - name: Run tests (all matrix targets except Linux Zig 0.15.2)
-        if: ${{ !(runner.os == 'Linux' && matrix.zig == '0.15.2') }}
+      - name: Run tests (all matrix targets except Linux with examples-enabled Zig versions)
+        if: ${{ !(runner.os == 'Linux' && (matrix.zig == '0.15.1' || matrix.zig == '0.16.0')) }}
         run: zig build test
 
-      - name: Run tests then examples serially (Linux Zig 0.15.2)
-        if: ${{ runner.os == 'Linux' && matrix.zig == '0.15.2' }}
+      - name: Run tests then examples serially (Linux Zig 0.15.1/0.16.0)
+        if: ${{ runner.os == 'Linux' && (matrix.zig == '0.15.1' || matrix.zig == '0.16.0') }}
         run: |
           zig build test
           zig build examples
