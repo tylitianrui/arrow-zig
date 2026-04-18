@@ -7,6 +7,7 @@ const array = @import("array/array.zig");
 const record_batch = @import("record_batch.zig");
 const ipc = @import("ipc/mod.zig");
 const ffi = @import("ffi/mod.zig");
+const compute = @import("compute/mod.zig");
 
 pub const SharedBuffer = buffer.SharedBuffer;
 pub const OwnedBuffer = buffer.OwnedBuffer;
@@ -173,6 +174,17 @@ pub const MapBuilder = array.MapBuilder;
 pub const SparseUnionBuilder = array.SparseUnionBuilder;
 pub const DenseUnionBuilder = array.DenseUnionBuilder;
 pub const RunEndEncodedBuilder = array.RunEndEncodedBuilder;
+pub const ComputeFunctionKind = compute.FunctionKind;
+pub const ComputeScalarValue = compute.ScalarValue;
+pub const ComputeScalar = compute.Scalar;
+pub const ComputeDatum = compute.Datum;
+pub const ComputeKernelError = compute.KernelError;
+pub const ComputeTypeCheckFn = compute.TypeCheckFn;
+pub const ComputeKernelExecFn = compute.KernelExecFn;
+pub const ComputeKernelSignature = compute.KernelSignature;
+pub const ComputeKernel = compute.Kernel;
+pub const ComputeFunctionRegistry = compute.FunctionRegistry;
+pub const ComputeExecContext = compute.ExecContext;
 
 // Pull buffer tests into the root test target.
 test {
@@ -186,6 +198,8 @@ test {
     _ = @import("ipc/file_writer.zig");
     _ = @import("ipc/file_reader.zig");
     _ = @import("ffi/c_data.zig");
+    _ = @import("ffi/c_stream.zig");
+    _ = @import("compute/core.zig");
     _ = @import("array/array.zig");
     _ = @import("array/array_data.zig");
     _ = @import("array/primitive_array.zig");

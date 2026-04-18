@@ -20,12 +20,12 @@ pub const RecordBatch = record_batch_mod.RecordBatch;
 pub const ArrowArrayStream = extern struct {
     get_schema: ?*const fn (?*ArrowArrayStream, ?*ArrowSchema) callconv(.c) c_int,
     get_next: ?*const fn (?*ArrowArrayStream, ?*ArrowArray) callconv(.c) c_int,
-    get_last_error: ?*const fn (?*ArrowArrayStream) callconv(.c) ?[*c]const u8,
+    get_last_error: ?*const fn (?*ArrowArrayStream) callconv(.c) [*c]const u8,
     release: ?*const fn (?*ArrowArrayStream) callconv(.c) void,
     private_data: ?*anyopaque,
 };
 
-pub const Error = c_data.Error || record_batch_mod.RecordBatchError || error{
+pub const Error = c_data.Error || record_batch_mod.RecordBatchError || array_data_mod.ValidationError || error{
     InvalidStream,
     StreamCallbackFailed,
     SchemaMismatch,
@@ -259,7 +259,7 @@ fn streamGetNext(raw_stream: ?*ArrowArrayStream, raw_out_array: ?*ArrowArray) ca
     return C_OK;
 }
 
-fn streamGetLastError(raw_stream: ?*ArrowArrayStream) callconv(.c) ?[*c]const u8 {
+fn streamGetLastError(raw_stream: ?*ArrowArrayStream) callconv(.c) [*c]const u8 {
     if (raw_stream == null) return null;
     const stream = raw_stream.?;
     if (stream.release == null) return null;
