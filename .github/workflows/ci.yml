@@ -42,12 +42,15 @@ jobs:
         with:
           version: "${{ matrix.zig }}"
 
-      - name: Run tests
+      - name: Run tests (all matrix targets except Linux Zig 0.15.2)
+        if: ${{ !(runner.os == 'Linux' && matrix.zig == '0.15.2') }}
         run: zig build test
 
-      - name: Run examples
+      - name: Run tests then examples serially (Linux Zig 0.15.2)
         if: ${{ runner.os == 'Linux' && matrix.zig == '0.15.2' }}
-        run: zig build examples
+        run: |
+          zig build test
+          zig build examples
 
       - name: CI diagnostics (Linux, on failure)
         if: ${{ failure() && runner.os == 'Linux' }}
