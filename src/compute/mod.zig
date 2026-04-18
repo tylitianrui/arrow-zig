@@ -4,6 +4,7 @@ pub const FunctionKind = core.FunctionKind;
 pub const ScalarValue = core.ScalarValue;
 pub const Scalar = core.Scalar;
 pub const Datum = core.Datum;
+pub const ChunkedArray = core.ChunkedArray;
 pub const KernelError = core.KernelError;
 pub const TypeCheckFn = core.TypeCheckFn;
 pub const KernelExecFn = core.KernelExecFn;

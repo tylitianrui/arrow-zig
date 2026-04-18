@@ -311,6 +311,90 @@ pub const DataType = union(TypeId) {
     pub fn eql(self: DataType, other: DataType) bool {
         return dataTypeEql(self, other);
     }
+
+    pub fn isInteger(self: DataType) bool {
+        return switch (self.physicalType()) {
+            .int8, .int16, .int32, .int64, .uint8, .uint16, .uint32, .uint64 => true,
+            else => false,
+        };
+    }
+
+    pub fn isFloating(self: DataType) bool {
+        return switch (self.physicalType()) {
+            .half_float, .float, .double => true,
+            else => false,
+        };
+    }
+
+    pub fn isNumeric(self: DataType) bool {
+        return self.isInteger() or self.isFloating();
+    }
+
+    pub fn isDecimal(self: DataType) bool {
+        return switch (self.physicalType()) {
+            .decimal32, .decimal64, .decimal128, .decimal256 => true,
+            else => false,
+        };
+    }
+
+    pub fn isStringLike(self: DataType) bool {
+        return switch (self.physicalType()) {
+            .string, .binary, .large_string, .large_binary, .string_view, .binary_view, .fixed_size_binary => true,
+            else => false,
+        };
+    }
+
+    pub fn isTemporal(self: DataType) bool {
+        return switch (self.physicalType()) {
+            .date32, .date64, .time32, .time64, .timestamp, .duration, .interval_months, .interval_day_time, .interval_month_day_nano => true,
+            else => false,
+        };
+    }
+
+    pub fn isNested(self: DataType) bool {
+        return switch (self) {
+            .list,
+            .large_list,
+            .list_view,
+            .large_list_view,
+            .fixed_size_list,
+            .struct_,
+            .map,
+            .sparse_union,
+            .dense_union,
+            .dictionary,
+            .run_end_encoded,
+            .extension,
+            => true,
+            else => false,
+        };
+    }
+
+    pub fn bitWidth(self: DataType) ?usize {
+        return switch (self.physicalType()) {
+            .bool => 1,
+            .int8, .uint8 => 8,
+            .int16, .uint16, .half_float => 16,
+            .int32, .uint32, .float, .date32, .time32, .interval_months, .decimal32 => 32,
+            .int64, .uint64, .double, .date64, .time64, .timestamp, .duration, .interval_day_time, .decimal64 => 64,
+            .interval_month_day_nano, .decimal128 => 128,
+            .decimal256 => 256,
+            .fixed_size_binary => |fixed| blk: {
+                if (fixed.byte_width < 0) break :blk null;
+                const bytes: usize = @intCast(fixed.byte_width);
+                break :blk std.math.mul(usize, bytes, 8) catch null;
+            },
+            else => null,
+        };
+    }
+
+    pub fn physicalType(self: DataType) DataType {
+        return switch (self) {
+            .dictionary => |dict| dict.value_type.*.physicalType(),
+            .extension => |ext| ext.storage_type.*.physicalType(),
+            else => self,
+        };
+    }
 };
 
 fn dataTypePtrEql(lhs: ?*const DataType, rhs: ?*const DataType) bool {
@@ -486,4 +570,57 @@ test "field eql compares metadata and nested type" {
         .metadata = meta_2[0..],
     };
     try std.testing.expect(lhs.eql(rhs));
+}
+
+test "data type helpers classify primitive categories" {
+    const i32_dt = DataType{ .int32 = {} };
+    const f64_dt = DataType{ .double = {} };
+    const dec_dt = DataType{ .decimal128 = .{ .precision = 10, .scale = 2 } };
+    const str_dt = DataType{ .string = {} };
+    const ts_dt = DataType{ .timestamp = .{ .unit = .microsecond, .timezone = null } };
+    const list_value = DataType{ .int32 = {} };
+    const list_field = Field{ .name = "item", .data_type = &list_value };
+    const list_dt = DataType{ .list = .{ .value_field = list_field } };
+
+    try std.testing.expect(i32_dt.isInteger());
+    try std.testing.expect(i32_dt.isNumeric());
+    try std.testing.expect(!i32_dt.isFloating());
+
+    try std.testing.expect(f64_dt.isFloating());
+    try std.testing.expect(f64_dt.isNumeric());
+
+    try std.testing.expect(dec_dt.isDecimal());
+    try std.testing.expectEqual(@as(?usize, 128), dec_dt.bitWidth());
+
+    try std.testing.expect(str_dt.isStringLike());
+    try std.testing.expectEqual(@as(?usize, null), str_dt.bitWidth());
+
+    try std.testing.expect(ts_dt.isTemporal());
+    try std.testing.expectEqual(@as(?usize, 64), ts_dt.bitWidth());
+
+    try std.testing.expect(list_dt.isNested());
+    try std.testing.expectEqual(@as(?usize, null), list_dt.bitWidth());
+}
+
+test "data type physical type unwraps dictionary and extension" {
+    const storage = DataType{ .int64 = {} };
+    const extension = DataType{
+        .extension = .{
+            .name = "my.ext",
+            .storage_type = &storage,
+        },
+    };
+    const dict = DataType{
+        .dictionary = .{
+            .id = 1,
+            .index_type = .{ .bit_width = 32, .signed = true },
+            .value_type = &extension,
+            .ordered = false,
+        },
+    };
+
+    const physical = dict.physicalType();
+    try std.testing.expect(physical == .int64);
+    try std.testing.expect(dict.isInteger());
+    try std.testing.expectEqual(@as(?usize, 64), dict.bitWidth());
 }

@@ -1,9 +1,11 @@
 const std = @import("std");
 const datatype = @import("../datatype.zig");
 const array_ref_mod = @import("../array/array_ref.zig");
+const chunked_array_mod = @import("../chunked_array.zig");
 
 pub const DataType = datatype.DataType;
 pub const ArrayRef = array_ref_mod.ArrayRef;
+pub const ChunkedArray = chunked_array_mod.ChunkedArray;
 
 pub const FunctionKind = enum {
     scalar,
@@ -14,9 +16,20 @@ pub const FunctionKind = enum {
 pub const ScalarValue = union(enum) {
     null,
     bool: bool,
+    i8: i8,
+    i16: i16,
+    i32: i32,
     i64: i64,
+    u8: u8,
+    u16: u16,
+    u32: u32,
     u64: u64,
+    f16: f16,
+    f32: f32,
     f64: f64,
+    decimal128: i128,
+    string: []const u8,
+    binary: []const u8,
 };
 
 pub const Scalar = struct {
@@ -26,11 +39,13 @@ pub const Scalar = struct {
 
 pub const Datum = union(enum) {
     array: ArrayRef,
+    chunked: ChunkedArray,
     scalar: Scalar,
 
     pub fn retain(self: Datum) Datum {
         return switch (self) {
             .array => |arr| .{ .array = arr.retain() },
+            .chunked => |chunks| .{ .chunked = chunks.retain() },
             .scalar => |s| .{ .scalar = s },
         };
     }
@@ -38,6 +53,7 @@ pub const Datum = union(enum) {
     pub fn release(self: *Datum) void {
         switch (self.*) {
             .array => |*arr| arr.release(),
+            .chunked => |*chunks| chunks.release(),
             .scalar => {},
         }
     }
@@ -45,6 +61,7 @@ pub const Datum = union(enum) {
     pub fn dataType(self: Datum) DataType {
         return switch (self) {
             .array => |arr| arr.data().data_type,
+            .chunked => |chunks| chunks.dataType(),
             .scalar => |s| s.data_type,
         };
     }
@@ -54,6 +71,9 @@ pub const KernelError = error{
     OutOfMemory,
     FunctionNotFound,
     InvalidArity,
+    InvalidOptions,
+    InvalidInput,
+    UnsupportedType,
     NoMatchingKernel,
 };
 
@@ -263,3 +283,23 @@ test "compute registry reports function and arity errors" {
     );
 }
 
+test "compute datum chunked variant retain and release" {
+    const allocator = std.testing.allocator;
+    const int32_builder = @import("../array/array.zig").Int32Builder;
+
+    var builder = try int32_builder.init(allocator, 2);
+    defer builder.deinit();
+    try builder.append(1);
+    try builder.append(2);
+    var arr = try builder.finish();
+    defer arr.release();
+
+    var chunked = try ChunkedArray.fromSingle(allocator, arr);
+    defer chunked.release();
+
+    var datum = Datum{ .chunked = chunked.retain() };
+    defer datum.release();
+
+    try std.testing.expect(datum.dataType().eql(.{ .int32 = {} }));
+    try std.testing.expectEqual(@as(usize, 2), datum.chunked.len());
+}
