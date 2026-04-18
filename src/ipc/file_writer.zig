@@ -3,6 +3,8 @@ const datatype = @import("../datatype.zig");
 const schema_mod = @import("../schema.zig");
 const record_batch = @import("../record_batch.zig");
 const stream_writer = @import("stream_writer.zig");
+const fbs_lite_reader = @import("fbs_lite/reader.zig");
+const fbs_lite_verify = @import("fbs_lite/verify.zig");
 const format = @import("format.zig");
 const fb = @import("flatbufferz");
 const arrow_fbs = @import("arrow_fbs");
@@ -208,14 +210,15 @@ pub fn FileWriter(comptime WriterType: type) type {
                 }
 
                 const metadata = self.stream_bytes.items[prefix_len..needed_metadata];
-                if (!isSaneFlatbufferTable(metadata)) return error.InvalidMessage;
+                const envelope = fbs_lite_verify.parseArrowMessageEnvelope(metadata) catch return error.InvalidMessage;
+                if (envelope.body_length < 0) return error.InvalidMessage;
+                const body_len = std.math.cast(usize, envelope.body_length) orelse return error.InvalidMessage;
                 const msg = fbs.Message.GetRootAs(@constCast(metadata), 0);
                 const opts: fb.common.PackOptions = .{ .allocator = self.allocator };
                 var msg_t = try fbs.MessageT.Unpack(msg, opts);
                 errdefer msg_t.deinit(self.allocator);
 
-                if (msg_t.bodyLength < 0) return error.InvalidMessage;
-                const body_len = std.math.cast(usize, msg_t.bodyLength) orelse return error.InvalidMessage;
+                if (msg_t.bodyLength != envelope.body_length) return error.InvalidMessage;
                 const body_pad = format.padLen(body_len);
                 const body_total = std.math.add(usize, body_len, body_pad) catch return error.InvalidMessage;
                 const message_total = std.math.add(usize, needed_metadata, body_total) catch return error.InvalidMessage;
@@ -246,7 +249,7 @@ pub fn FileWriter(comptime WriterType: type) type {
                         const block = fbs.BlockT{
                             .offset = file_offset,
                             .metaDataLength = meta_data_length,
-                            .bodyLength = msg_t.bodyLength,
+                            .bodyLength = envelope.body_length,
                         };
                         if (msg_t.header == .DictionaryBatch) {
                             try self.dictionary_blocks.append(self.allocator, block);
@@ -261,7 +264,7 @@ pub fn FileWriter(comptime WriterType: type) type {
                         const block = fbs.BlockT{
                             .offset = file_offset,
                             .metaDataLength = meta_data_length,
-                            .bodyLength = msg_t.bodyLength,
+                            .bodyLength = envelope.body_length,
                         };
                         if (msg_t.header == .Tensor) {
                             try self.tensor_blocks.append(self.allocator, block);
@@ -345,37 +348,27 @@ fn buildFooterBytes(
     return try allocator.dupe(u8, footer_bytes);
 }
 
-fn isSaneFlatbufferTable(buf: []const u8) bool {
-    if (buf.len < 8) return false;
-
-    const root_u32 = std.mem.readInt(u32, @ptrCast(buf[0..4]), .little);
-    const root = std.math.cast(usize, root_u32) orelse return false;
-    if (root > buf.len - 4) return false;
-
-    const rel = std.mem.readInt(i32, @ptrCast(buf[root .. root + 4]), .little);
-    if (rel <= 0) return false;
-    const rel_usize = std.math.cast(usize, rel) orelse return false;
-    if (rel_usize > root) return false;
-
-    const vtable = root - rel_usize;
-    if (vtable > buf.len - 4) return false;
-
-    const vtable_len = std.mem.readInt(u16, @ptrCast(buf[vtable .. vtable + 2]), .little);
-    const object_len = std.mem.readInt(u16, @ptrCast(buf[vtable + 2 .. vtable + 4]), .little);
-    if (vtable_len < 4) return false;
-
-    const vtable_len_usize = @as(usize, vtable_len);
-    const object_len_usize = @as(usize, object_len);
-    if (vtable + vtable_len_usize > buf.len) return false;
-    if (root + object_len_usize > buf.len) return false;
-
-    return true;
-}
-
 fn readU32Le(bytes: []const u8) u32 {
     var buf: [4]u8 = undefined;
     @memcpy(buf[0..], bytes[0..4]);
     return std.mem.readInt(u32, &buf, .little);
+}
+
+fn firstMessageMetadataForTest(bytes: []u8) error{InvalidFixture}![]u8 {
+    if (bytes.len < 4) return error.InvalidFixture;
+    const first = readU32Le(bytes[0..4]);
+    var prefix_len: usize = 4;
+    var metadata_len_u32 = first;
+    if (first == format.ContinuationMarker) {
+        if (bytes.len < 8) return error.InvalidFixture;
+        metadata_len_u32 = readU32Le(bytes[4..8]);
+        prefix_len = 8;
+    }
+    if (metadata_len_u32 == 0) return error.InvalidFixture;
+    const metadata_len = std.math.cast(usize, metadata_len_u32) orelse return error.InvalidFixture;
+    const message_prefix = std.math.add(usize, prefix_len, metadata_len) catch return error.InvalidFixture;
+    if (bytes.len < message_prefix) return error.InvalidFixture;
+    return bytes[prefix_len..message_prefix];
 }
 
 test "ipc file writer emits arrow file magic and footer" {
@@ -545,4 +538,66 @@ test "ipc file writer streams incrementally and accepts tensor-like messages" {
     var out_batch = maybe_batch.?;
     defer out_batch.deinit();
     try std.testing.expectEqual(@as(usize, 3), out_batch.numRows());
+}
+
+test "ipc file writer rejects damaged metadata root offset" {
+    const allocator = std.testing.allocator;
+
+    const id_type = DataType{ .int32 = {} };
+    const fields = [_]Field{
+        .{ .name = "id", .data_type = &id_type, .nullable = false },
+    };
+    const schema = Schema{ .fields = fields[0..] };
+
+    var out = std.ArrayList(u8){};
+    defer out.deinit(allocator);
+    const Sink = struct {
+        allocator: std.mem.Allocator,
+        out: *std.ArrayList(u8),
+        pub const Error = error{OutOfMemory};
+        pub fn writeAll(self: @This(), bytes: []const u8) Error!void {
+            try self.out.appendSlice(self.allocator, bytes);
+        }
+    };
+    var writer = try FileWriter(Sink).init(allocator, .{ .allocator = allocator, .out = &out });
+    defer writer.deinit();
+
+    // Bypass file_writer flush and corrupt the pending stream metadata in place.
+    try writer.stream.writeSchema(schema);
+    const metadata = try firstMessageMetadataForTest(writer.stream_bytes.items);
+    @memset(metadata[0..@sizeOf(u32)], 0xFF); // root offset now out of range
+
+    try std.testing.expectError(error.InvalidMessage, writer.flushPendingMessages(true));
+}
+
+test "ipc file writer rejects damaged metadata header type" {
+    const allocator = std.testing.allocator;
+
+    const id_type = DataType{ .int32 = {} };
+    const fields = [_]Field{
+        .{ .name = "id", .data_type = &id_type, .nullable = false },
+    };
+    const schema = Schema{ .fields = fields[0..] };
+
+    var out = std.ArrayList(u8){};
+    defer out.deinit(allocator);
+    const Sink = struct {
+        allocator: std.mem.Allocator,
+        out: *std.ArrayList(u8),
+        pub const Error = error{OutOfMemory};
+        pub fn writeAll(self: @This(), bytes: []const u8) Error!void {
+            try self.out.appendSlice(self.allocator, bytes);
+        }
+    };
+    var writer = try FileWriter(Sink).init(allocator, .{ .allocator = allocator, .out = &out });
+    defer writer.deinit();
+
+    // Corrupt Message.header_type to NONE(0); parseArrowMessageEnvelope must reject.
+    try writer.stream.writeSchema(schema);
+    const metadata = try firstMessageMetadataForTest(writer.stream_bytes.items);
+    const table = try fbs_lite_reader.rootTable(metadata);
+    const header_type_abs = table.fieldAbsOffset(1) orelse return error.InvalidFixture;
+    metadata[header_type_abs] = 0;
+
+    try std.testing.expectError(error.InvalidMessage, writer.flushPendingMessages(true));
 }
