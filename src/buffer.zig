@@ -1,11 +1,12 @@
 const std = @import("std");
 
-// Default byte alignment used for Arrow-compatible buffer allocations.
-pub const ALIGNMENT: usize = 64; // 64-byte alignment for buffers
+/// Default byte alignment for Arrow-compatible buffer allocations (64-byte SIMD-friendly).
+pub const ALIGNMENT: usize = 64;
 
 const empty_storage: [0]u8 align(ALIGNMENT) = .{};
 
-// Round a requested size up to the next buffer alignment boundary.
+/// Round `size` up to the next `ALIGNMENT`-byte boundary.
+/// Use this to determine the minimum capacity for a buffer storing `size` bytes.
 pub fn alignedSize(size: usize) usize {
     return (size + ALIGNMENT - 1) & ~(ALIGNMENT - 1);
 }
@@ -28,11 +29,19 @@ const BufferStorage = struct {
     }
 };
 
-// SharedBuffer is a read-only view with shared ownership of its storage.
+/// Reference-counted, read-only view over a contiguous byte region.
+///
+/// Ownership model:
+/// - When `storage` is non-null the view is *owning*: `retain`/`release` manage
+///   the shared reference count and free the backing allocation on last release.
+/// - When `storage` is null the view is *borrowed*: callers must ensure the
+///   pointed-to memory outlives all `SharedBuffer` handles derived from it.
+///
+/// Slicing (`slice`) produces a new owning handle sharing the same storage.
 pub const SharedBuffer = struct {
-    // Shared owner/control block. When null, this is a borrowed non-owning view.
+    /// Shared control block. `null` for borrowed (non-owning) views.
     storage: ?*BufferStorage,
-    // Logical byte view for this handle. May be a sub-slice of storage.data.
+    /// Logical byte window for this handle; may be a sub-slice of `storage.data`.
     data: []const u8,
 
     const Self = @This();
@@ -47,6 +56,7 @@ pub const SharedBuffer = struct {
         LengthNotMultipleOfTypeSize,
     };
 
+    /// Zero-length borrowed buffer that can be used as a sentinel or placeholder.
     pub const empty: SharedBuffer = .{ .storage = null, .data = &.{} };
 
     /// Build a borrowed non-owning shared buffer view from an existing slice.
@@ -78,6 +88,7 @@ pub const SharedBuffer = struct {
         return self.data.len;
     }
 
+    /// Return `true` when the logical length is zero.
     pub fn isEmpty(self: Self) bool {
         return self.data.len == 0;
     }
@@ -112,15 +123,27 @@ pub const SharedBuffer = struct {
     }
 };
 
-// OwnedBuffer is a mutable, uniquely owned buffer for builders.
+/// Mutable, uniquely owned buffer used by array builders.
+///
+/// Capacity is always a multiple of `ALIGNMENT` bytes and the backing memory
+/// is zero-initialised on allocation and resize.  Call `toShared` to transfer
+/// ownership to an immutable `SharedBuffer` — the `OwnedBuffer` is emptied in
+/// the process and must not be written to afterwards.
 pub const OwnedBuffer = struct {
+    /// Aligned mutable backing storage.
     data: []align(ALIGNMENT) u8,
+    /// Allocator used for all (re)allocations.
     allocator: std.mem.Allocator,
 
     const Self = @This();
 
-    /// Initialize and return a new instance.
+    /// Allocate a zeroed buffer with at least `capacity` usable bytes.
+    ///
+    /// The actual allocation is rounded up to the nearest `ALIGNMENT` boundary.
+    /// A capacity of 0 still allocates one alignment-unit so that the pointer
+    /// is always valid and correctly aligned.
     pub fn init(allocator: std.mem.Allocator, capacity: usize) !Self {
+        // Ensure a minimum of ALIGNMENT bytes so the pointer is never null.
         const actualCapacity = alignedSize(if (capacity == 0) ALIGNMENT else capacity);
 
         const data = try allocator.alignedAlloc(u8, std.mem.Alignment.fromByteUnits(ALIGNMENT), actualCapacity);
@@ -140,10 +163,17 @@ pub const OwnedBuffer = struct {
         return self.data.len;
     }
 
+    /// Return `true` when the logical length is zero.
     pub fn isEmpty(self: Self) bool {
         return self.data.len == 0;
     }
 
+    /// Transfer ownership to a new `SharedBuffer` and invalidate this buffer.
+    ///
+    /// `used` is the number of bytes to expose through the returned view;
+    /// it must be ≤ `self.data.len`.  After the call `self.data` is reset to
+    /// the empty sentinel — any previously held pointer into `self.data` must
+    /// not be dereferenced.
     pub fn toShared(self: *Self, used: usize) !SharedBuffer {
         const storage = try self.allocator.create(BufferStorage);
         storage.* = .{
@@ -157,10 +187,21 @@ pub const OwnedBuffer = struct {
         return shared;
     }
 
+    /// Reinterpret the backing bytes as a mutable slice of `T`.
+    ///
+    /// The buffer's alignment (`ALIGNMENT` ≥ 64) satisfies any primitive type,
+    /// so this never fails at runtime.  The returned slice covers the full
+    /// allocated capacity, not just the logically written portion.
     pub fn typedSlice(self: Self, comptime T: type) []T {
         return std.mem.bytesAsSlice(T, self.data);
     }
 
+    /// Grow or shrink the buffer to hold at least `newSize` bytes.
+    ///
+    /// - Existing bytes in `[0, min(oldLen, newSize))` are preserved.
+    /// - Any newly allocated bytes beyond the old length are zeroed.
+    /// - `newSize` is rounded up to the next `ALIGNMENT` boundary before
+    ///   allocating, so `self.data.len` may exceed `newSize` after the call.
     pub fn resize(self: *Self, newSize: usize) !void {
         const actualSize = alignedSize(newSize);
         const newData = try self.allocator.alignedAlloc(u8, std.mem.Alignment.fromByteUnits(ALIGNMENT), actualSize);
