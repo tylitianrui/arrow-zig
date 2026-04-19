@@ -10,7 +10,7 @@ const fbs_lite_builder = @import("fbs_lite/builder.zig");
 const fbs_lite_verify = @import("fbs_lite/verify.zig");
 const compression_dynlib = @import("compression_dynlib.zig");
 const tensor_types = @import("tensor_types.zig");
-const arrow_fbs = @import("arrow_fbs");
+const arrow_fbs = @import("ipc_schema");
 
 pub const StreamError = format.StreamError;
 

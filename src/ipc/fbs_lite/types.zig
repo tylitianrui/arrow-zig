@@ -1,5 +1,5 @@
-const flatbufferz = @import("flatbufferz");
-const arrow_fbs = @import("arrow_fbs");
+const flatbufferz = @import("fbs_runtime");
+const arrow_fbs = @import("ipc_schema");
 
 pub const PackError = flatbufferz.common.PackError;
 pub const PackOptions = flatbufferz.common.PackOptions;

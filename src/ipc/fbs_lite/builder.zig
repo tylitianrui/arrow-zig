@@ -1,5 +1,5 @@
 const std = @import("std");
-const fb = @import("flatbufferz");
+const fb = @import("fbs_runtime");
 const types = @import("types.zig");
 
 pub const PackError = types.PackError;

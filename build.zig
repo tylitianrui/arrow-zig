@@ -68,12 +68,12 @@ pub fn build(b: *std.Build) !void {
     compression_deps_check_step.dependOn(&run_compression_deps_check.step);
 
     const arrow_fbs_module = b.createModule(.{
-        .root_source_file = b.path("src/arrow_fbs/lib.zig"),
-        .imports = &.{.{ .name = "flatbufferz", .module = fbz_module }},
+        .root_source_file = b.path("src/ipc_schema/lib.zig"),
+        .imports = &.{.{ .name = "fbs_runtime", .module = fbz_module }},
     });
 
-    zarrow_module.addImport("flatbufferz", fbz_module);
-    zarrow_module.addImport("arrow_fbs", arrow_fbs_module);
+    zarrow_module.addImport("fbs_runtime", fbz_module);
+    zarrow_module.addImport("ipc_schema", arrow_fbs_module);
 
     // Tests still build a runnable artifact, but the package itself does not.
     const test_module = b.createModule(.{
@@ -81,8 +81,8 @@ pub fn build(b: *std.Build) !void {
         .target = target,
         .optimize = optimize,
     });
-    test_module.addImport("flatbufferz", fbz_module);
-    test_module.addImport("arrow_fbs", arrow_fbs_module);
+    test_module.addImport("fbs_runtime", fbz_module);
+    test_module.addImport("ipc_schema", arrow_fbs_module);
 
     const tests = b.addTest(.{ .root_module = test_module });
     configureIpcCompression(b, tests, &run_compression_deps_check.step);

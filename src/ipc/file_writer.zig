@@ -7,7 +7,7 @@ const fbs_lite_reader = @import("fbs_lite/reader.zig");
 const fbs_lite_builder = @import("fbs_lite/builder.zig");
 const fbs_lite_verify = @import("fbs_lite/verify.zig");
 const format = @import("format.zig");
-const arrow_fbs = @import("arrow_fbs");
+const arrow_fbs = @import("ipc_schema");
 
 pub const FileMagic = "ARROW1";
 

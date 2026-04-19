@@ -8,7 +8,7 @@ const format = @import("format.zig");
 const file_writer = @import("file_writer.zig");
 const array_data = @import("../array/array_data.zig");
 const buffer = @import("../buffer.zig");
-const arrow_fbs = @import("arrow_fbs");
+const arrow_fbs = @import("ipc_schema");
 
 pub const FileMagic = file_writer.FileMagic;
 
