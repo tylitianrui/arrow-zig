@@ -22,6 +22,14 @@ jobs:
         with:
           version: "0.15.2"
 
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Set up Rust (interop lint)
+        uses: dtolnay/rust-toolchain@stable
+
       - name: Check Zig formatting
         run: |
           files="$(git ls-files '*.zig')"
@@ -30,6 +38,12 @@ jobs:
             exit 0
           fi
           echo "$files" | xargs zig fmt --check
+
+      - name: Check Python syntax
+        run: python -m compileall -q tools
+
+      - name: Check Rust interop tool builds
+        run: cargo check --manifest-path tools/interop/arrow-rs/Cargo.toml
 
   fuzz-corpus:
     name: Fuzz Corpus Replay
@@ -45,6 +59,28 @@ jobs:
 
       - name: Replay fuzz corpus seeds
         run: zig build fuzz-corpus
+
+      - name: Random fuzz smoke for ArrayData.validateLayout
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .fuzz-smoke
+          for i in $(seq 1 30); do
+            size=$(( (RANDOM % 512) + 1 ))
+            head -c "$size" /dev/urandom > .fuzz-smoke/layout.bin
+            zig build fuzz-array-layout -- .fuzz-smoke/layout.bin
+          done
+
+      - name: Random fuzz smoke for IPC reader
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .fuzz-smoke
+          for i in $(seq 1 30); do
+            size=$(( (RANDOM % 4096) + 1 ))
+            head -c "$size" /dev/urandom > .fuzz-smoke/ipc.bin
+            zig build fuzz-ipc-reader -- .fuzz-smoke/ipc.bin
+          done
 
   test:
     name: Test on ${{ matrix.os }} with Zig ${{ matrix.zig }}
@@ -153,12 +189,21 @@ jobs:
       - name: Validate benchmark CI CSV format
         run: python3 tools/benchmark_ci_check.py benchmark-ci.csv
 
+      - name: Validate benchmark CI regression thresholds
+        run: python3 tools/benchmark_ci_regression_check.py benchmark-ci.csv tools/benchmark_ci_thresholds.json
+
       - name: Run benchmark CI checker unit tests
-        run: python3 tools/test_benchmark_ci_check.py
+        run: |
+          python3 tools/test_benchmark_ci_check.py
+          python3 tools/test_benchmark_ci_regression_check.py
 
   pyarrow-fixture-check:
-    name: PyArrow Fixture Check
+    name: PyArrow Fixture Check (${{ matrix.pyarrow_version }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        pyarrow_version: ["22.0.0", "23.0.1"]
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -171,13 +216,85 @@ jobs:
       - name: Install PyArrow
         run: |
           python -m pip install --upgrade pip
-          python -m pip install pyarrow==23.0.1
+          python -m pip install pyarrow==${{ matrix.pyarrow_version }}
 
       - name: Regenerate IPC fixtures
         run: python tools/generate_ipc_fixtures.py
 
       - name: Ensure fixtures are up to date
         run: git diff --exit-code -- src/ipc/testdata
+
+  interop-pyarrow-version-smoke:
+    name: IPC Interop Smoke (PyArrow ${{ matrix.pyarrow_version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        pyarrow_version: ["22.0.0", "23.0.1"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: "0.15.2"
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install PyArrow
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pyarrow==${{ matrix.pyarrow_version }}
+
+      - name: PyArrow smoke roundtrip (canonical stream+file)
+        run: |
+          mkdir -p .interop-fixtures
+          zig build interop-fixture-writer -- .interop-fixtures/zarrow.arrow canonical stream
+          zig build interop-fixture-writer -- .interop-fixtures/zarrow_file.arrow canonical file
+          python tools/interop/pyarrow_generate.py .interop-fixtures/pyarrow.arrow canonical stream
+          python tools/interop/pyarrow_generate.py .interop-fixtures/pyarrow_file.arrow canonical file
+          zig build interop-fixture-check -- .interop-fixtures/pyarrow.arrow canonical stream
+          zig build interop-fixture-check -- .interop-fixtures/pyarrow_file.arrow canonical file
+          python tools/interop/pyarrow_validate.py .interop-fixtures/zarrow.arrow canonical stream
+          python tools/interop/pyarrow_validate.py .interop-fixtures/zarrow_file.arrow canonical file
+
+  interop-pyarrow-cross-platform-smoke:
+    name: IPC Interop Smoke (${{ matrix.os }} PyArrow)
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ["macos-latest", "windows-latest"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: "0.15.2"
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install PyArrow
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pyarrow==23.0.1
+
+      - name: Cross-platform smoke roundtrip (canonical stream)
+        run: |
+          python -c "from pathlib import Path; Path('.interop-fixtures').mkdir(exist_ok=True)"
+          zig build interop-fixture-writer -- .interop-fixtures/zarrow.arrow canonical stream
+          python tools/interop/pyarrow_generate.py .interop-fixtures/pyarrow.arrow canonical stream
+          zig build interop-fixture-check -- .interop-fixtures/pyarrow.arrow canonical stream
+          python tools/interop/pyarrow_validate.py .interop-fixtures/zarrow.arrow canonical stream
 
   interop-pyarrow:
     name: IPC Interop (zarrow <-> PyArrow)
@@ -350,6 +467,67 @@ jobs:
           zig build interop-fixture-check -- .interop-fixtures/arrow_rs_view_file.arrow view file
           cargo run --manifest-path tools/interop/arrow-rs/Cargo.toml -- validate .interop-fixtures/zarrow_view_file.arrow view file
 
+  interop-arrow-rs-version-smoke:
+    name: IPC Interop Smoke (arrow-rs, Rust ${{ matrix.rust_toolchain }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        rust_toolchain: ["stable", "beta"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: "0.15.2"
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.rust_toolchain }}
+
+      - name: Arrow-RS smoke roundtrip (canonical stream)
+        run: |
+          mkdir -p .interop-fixtures
+          zig build interop-fixture-writer -- .interop-fixtures/zarrow.arrow canonical stream
+          cargo run --manifest-path tools/interop/arrow-rs/Cargo.toml -- generate .interop-fixtures/arrow_rs.arrow canonical stream
+          zig build interop-fixture-check -- .interop-fixtures/arrow_rs.arrow canonical stream
+          cargo run --manifest-path tools/interop/arrow-rs/Cargo.toml -- validate .interop-fixtures/zarrow.arrow canonical stream
+
+  interop-arrow-rs-cross-platform-smoke:
+    name: IPC Interop Smoke (${{ matrix.os }} arrow-rs)
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ["macos-latest", "windows-latest"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: "0.15.2"
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Arrow-RS cross-platform smoke (canonical stream)
+        run: |
+          python -c "from pathlib import Path; Path('.interop-fixtures').mkdir(exist_ok=True)"
+          zig build interop-fixture-writer -- .interop-fixtures/zarrow.arrow canonical stream
+          cargo run --manifest-path tools/interop/arrow-rs/Cargo.toml -- generate .interop-fixtures/arrow_rs.arrow canonical stream
+          zig build interop-fixture-check -- .interop-fixtures/arrow_rs.arrow canonical stream
+          cargo run --manifest-path tools/interop/arrow-rs/Cargo.toml -- validate .interop-fixtures/zarrow.arrow canonical stream
+
   interop-arrow-cpp:
     name: IPC Interop (zarrow <-> Arrow C++)
     runs-on: ubuntu-latest
@@ -459,3 +637,49 @@ jobs:
           ./.interop-bin/interop_cpp validate .interop-fixtures/zarrow_complex_file.arrow complex file
           ./.interop-bin/interop_cpp validate .interop-fixtures/zarrow_extension_file.arrow extension file
           ./.interop-bin/interop_cpp validate .interop-fixtures/zarrow_view_file.arrow view file
+
+  interop-arrow-cpp-version-smoke:
+    name: IPC Interop Smoke (Arrow C++ ${{ matrix.arrow_cpp_version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arrow_cpp_version: ["22.0.0", "23.0.1"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: "0.15.2"
+
+      - name: Set up Conda (arrow-cpp)
+        uses: conda-incubator/setup-miniconda@v3
+        with:
+          auto-activate-base: false
+          activate-environment: arrow-cpp-env
+          channels: conda-forge
+          python-version: "3.11"
+
+      - name: Install Arrow C++ toolchain
+        shell: bash -l {0}
+        run: |
+          conda activate arrow-cpp-env
+          conda install -y arrow-cpp=${{ matrix.arrow_cpp_version }} pkg-config cxx-compiler
+
+      - name: Build C++ interop tool
+        shell: bash -l {0}
+        run: |
+          conda activate arrow-cpp-env
+          mkdir -p .interop-bin .interop-fixtures
+          c++ -std=c++17 tools/interop/cpp/interop.cpp -o .interop-bin/interop_cpp $(pkg-config --cflags --libs arrow)
+
+      - name: Arrow C++ smoke roundtrip (canonical stream)
+        shell: bash -l {0}
+        run: |
+          conda activate arrow-cpp-env
+          zig build interop-fixture-writer -- .interop-fixtures/zarrow.arrow canonical stream
+          ./.interop-bin/interop_cpp generate .interop-fixtures/arrow_cpp.arrow canonical stream
+          zig build interop-fixture-check -- .interop-fixtures/arrow_cpp.arrow canonical stream
+          ./.interop-bin/interop_cpp validate .interop-fixtures/zarrow.arrow canonical stream
