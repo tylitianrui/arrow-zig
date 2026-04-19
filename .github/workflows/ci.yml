@@ -356,6 +356,48 @@ jobs:
           zig build interop-fixture-check -- .interop-fixtures/pyarrow_view_file.arrow view file
           python tools/interop/pyarrow_validate.py .interop-fixtures/zarrow_view_file.arrow view file
 
+  interop-pyarrow-cross-platform-smoke:
+    name: IPC Interop Smoke (${{ matrix.os }} PyArrow)
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ["macos-latest", "windows-latest"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: "0.15.2"
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install PyArrow
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pyarrow==23.0.1
+
+      - name: PyArrow cross-platform smoke (canonical stream+file, tensor stream)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -c "from pathlib import Path; Path('.interop-fixtures').mkdir(exist_ok=True)"
+          zig build interop-fixture-writer -- .interop-fixtures/zarrow.arrow canonical stream
+          zig build interop-fixture-writer -- .interop-fixtures/zarrow_file.arrow canonical file
+          zig build interop-fixture-writer -- .interop-fixtures/zarrow_tensor.arrow tensor stream
+          python tools/interop/pyarrow_generate.py .interop-fixtures/pyarrow.arrow canonical stream
+          python tools/interop/pyarrow_generate.py .interop-fixtures/pyarrow_file.arrow canonical file
+          zig build interop-fixture-check -- .interop-fixtures/pyarrow.arrow canonical stream
+          zig build interop-fixture-check -- .interop-fixtures/pyarrow_file.arrow canonical file
+          python tools/interop/pyarrow_validate.py .interop-fixtures/zarrow.arrow canonical stream
+          python tools/interop/pyarrow_validate.py .interop-fixtures/zarrow_file.arrow canonical file
+          python tools/interop/pyarrow_validate.py .interop-fixtures/zarrow_tensor.arrow tensor stream
+
   interop-arrow-rs:
     name: IPC Interop (zarrow <-> arrow-rs)
     runs-on: ubuntu-latest
@@ -662,3 +704,57 @@ jobs:
       - name: Validate Arrow C++ fixture with zarrow (smoke)
         run: |
           zig build interop-fixture-check -- .interop-fixtures/arrow_cpp.arrow canonical stream
+
+  interop-arrow-cpp-cross-platform-smoke:
+    name: IPC Interop Smoke (${{ matrix.os }} Arrow C++)
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ["macos-latest", "windows-latest"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: "0.15.2"
+
+      - name: Set up Conda (arrow-cpp)
+        uses: conda-incubator/setup-miniconda@v3
+        with:
+          auto-activate-base: false
+          activate-environment: arrow-cpp-env
+          channels: conda-forge
+          python-version: "3.11"
+
+      - name: Install Arrow C++ toolchain
+        shell: bash -l {0}
+        run: |
+          set -euo pipefail
+          conda activate arrow-cpp-env
+          conda install -y arrow-cpp=23.0.1 pkg-config cxx-compiler
+
+      - name: Build C++ interop tool
+        shell: bash -l {0}
+        run: |
+          set -euo pipefail
+          conda activate arrow-cpp-env
+          mkdir -p .interop-bin .interop-fixtures
+          interop_bin=".interop-bin/interop_cpp"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            interop_bin=".interop-bin/interop_cpp.exe"
+          fi
+          c++ -std=c++17 tools/interop/cpp/interop.cpp -o "$interop_bin" $(pkg-config --cflags --libs arrow)
+          echo "INTEROP_BIN=$interop_bin" >> "$GITHUB_ENV"
+
+      - name: Arrow C++ cross-platform smoke (canonical stream)
+        shell: bash -l {0}
+        run: |
+          set -euo pipefail
+          conda activate arrow-cpp-env
+          zig build interop-fixture-writer -- .interop-fixtures/zarrow.arrow canonical stream
+          "$INTEROP_BIN" generate .interop-fixtures/arrow_cpp.arrow canonical stream
+          zig build interop-fixture-check -- .interop-fixtures/arrow_cpp.arrow canonical stream
+          "$INTEROP_BIN" validate .interop-fixtures/zarrow.arrow canonical stream
