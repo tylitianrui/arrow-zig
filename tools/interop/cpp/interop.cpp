@@ -12,7 +12,15 @@
 
 namespace {
 
-#if !defined(ARROW_VERSION_MAJOR) || (ARROW_VERSION_MAJOR < 23)
+#if defined(ARROW_VERSION_MAJOR)
+#define ZARROW_ARROW_VERSION_MAJOR ARROW_VERSION_MAJOR
+#elif defined(ARROW_VERSION)
+#define ZARROW_ARROW_VERSION_MAJOR (ARROW_VERSION / 1000000)
+#else
+#error "tools/interop/cpp/interop.cpp requires Arrow C++ version macros from <arrow/util/config.h>"
+#endif
+
+#if (ZARROW_ARROW_VERSION_MAJOR < 23)
 #error "tools/interop/cpp/interop.cpp requires Arrow C++ >= 23.0.0 (view + complex interop paths)"
 #endif
 

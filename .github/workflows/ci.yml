@@ -203,7 +203,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        pyarrow_version: ["22.0.0", "23.0.1"]
+        pyarrow_version: ["23.0.1"]
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -644,7 +644,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        arrow_cpp_version: ["22.0.0", "23.0.1"]
+        arrow_cpp_version: ["23.0.1"]
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -675,11 +675,17 @@ jobs:
           mkdir -p .interop-bin .interop-fixtures
           c++ -std=c++17 tools/interop/cpp/interop.cpp -o .interop-bin/interop_cpp $(pkg-config --cflags --libs arrow)
 
-      - name: Arrow C++ smoke roundtrip (canonical stream)
+      - name: Generate Zig fixtures (smoke)
+        run: |
+          zig build interop-fixture-writer -- .interop-fixtures/zarrow.arrow canonical stream
+
+      - name: Arrow C++ smoke generate + validate
         shell: bash -l {0}
         run: |
           conda activate arrow-cpp-env
-          zig build interop-fixture-writer -- .interop-fixtures/zarrow.arrow canonical stream
           ./.interop-bin/interop_cpp generate .interop-fixtures/arrow_cpp.arrow canonical stream
-          zig build interop-fixture-check -- .interop-fixtures/arrow_cpp.arrow canonical stream
           ./.interop-bin/interop_cpp validate .interop-fixtures/zarrow.arrow canonical stream
+
+      - name: Validate Arrow C++ fixture with zarrow (smoke)
+        run: |
+          zig build interop-fixture-check -- .interop-fixtures/arrow_cpp.arrow canonical stream
