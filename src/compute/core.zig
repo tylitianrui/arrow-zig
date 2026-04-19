@@ -711,8 +711,8 @@ test "compute datum accessors and signature helpers" {
     try std.testing.expect(datum_scalar.isScalar());
     try std.testing.expectEqual(@as(i32, 7), datum_scalar.asScalar().?.value.i32);
 
-    const args_bad = [_]Datum{Datum.fromScalar(Scalar.init(.{ .int32 = {} }, .{ .i32 = 1 })), Datum.fromScalar(Scalar.init(.{ .int64 = {} }, .{ .i64 = 2 }))};
-    const args_ok = [_]Datum{Datum.fromScalar(scalar), Datum.fromScalar(scalar)};
+    const args_bad = [_]Datum{ Datum.fromScalar(Scalar.init(.{ .int32 = {} }, .{ .i32 = 1 })), Datum.fromScalar(Scalar.init(.{ .int64 = {} }, .{ .i64 = 2 })) };
+    const args_ok = [_]Datum{ Datum.fromScalar(scalar), Datum.fromScalar(scalar) };
     const sig_any = KernelSignature.any(2);
     const sig_binary_int32 = KernelSignature.binary(isTwoInt32);
     try std.testing.expect(sig_any.matches(args_bad[0..]));
