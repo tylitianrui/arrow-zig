@@ -54,7 +54,7 @@ const CaseOutput = struct {
     name: []const u8,
     status: CaseStatus,
     values: ?[]?i64 = null,
-    error: ?[]const u8 = null,
+    @"error": ?[]const u8 = null,
 };
 
 const Output = struct {
@@ -481,14 +481,14 @@ pub fn main() !void {
                 .name = case.name,
                 .status = .ok,
                 .values = values,
-                .error = null,
+                .@"error" = null,
             }) catch return error.OutOfMemory;
         } else |err| {
             results.append(allocator, .{
                 .name = case.name,
                 .status = .@"error",
                 .values = null,
-                .error = @errorName(err),
+                .@"error" = @errorName(err),
             }) catch return error.OutOfMemory;
         }
     }
