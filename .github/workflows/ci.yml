@@ -224,6 +224,36 @@ jobs:
       - name: Ensure fixtures are up to date
         run: git diff --exit-code -- src/ipc/testdata
 
+  compute-pyarrow-compat:
+    name: Compute Compat (PyArrow ${{ matrix.pyarrow_version }} / ${{ matrix.suite }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        pyarrow_version: ["23.0.1"]
+        suite: ["numeric", "nulls", "boundary", "chunked"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: "0.15.2"
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install PyArrow
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pyarrow==${{ matrix.pyarrow_version }}
+
+      - name: Compute compatibility against pyarrow.compute
+        run: python tools/compute/pyarrow_compute_compat.py --suite ${{ matrix.suite }}
+
   interop-pyarrow-version-smoke:
     name: IPC Interop Smoke (PyArrow ${{ matrix.pyarrow_version }})
     runs-on: ubuntu-latest

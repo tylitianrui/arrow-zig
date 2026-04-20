@@ -237,6 +237,22 @@ pub fn build(b: *std.Build) !void {
     const interop_check_step = b.step("interop-fixture-check", "Validate canonical IPC fixture with zarrow");
     interop_check_step.dependOn(&run_interop_check.step);
 
+    // Compute compatibility runner used by PyArrow compute alignment checks.
+    const compute_compat_exe = b.addExecutable(.{
+        .name = "compute-compat-runner",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/compute_compat_runner.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    compute_compat_exe.root_module.addImport("zarrow-core", b.modules.get("zarrow-core").?);
+
+    const run_compute_compat = b.addRunArtifact(compute_compat_exe);
+    if (b.args) |args| run_compute_compat.addArgs(args);
+    const compute_compat_step = b.step("compute-compat-check", "Run compute compatibility check cases");
+    compute_compat_step.dependOn(&run_compute_compat.step);
+
     // Discover benchmark files in `benchmarks` and wire dedicated run steps.
     const benches_dir = b.path("benchmarks");
     var benches = std.fs.openDirAbsolute(benches_dir.getPath(b), .{ .iterate = true }) catch |err| {

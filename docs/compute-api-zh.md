@@ -126,3 +126,11 @@
 - 先用 `BinaryExecChunkIterator.init(...)` 创建迭代器
 - 每次 `next()` 得到对齐分块（`BinaryExecChunk`）
 - 在分块内用 `binaryNullAt` 或 `binaryNullPropagates` 处理 null 语义
+
+## 11. Compute 兼容矩阵（CI）
+
+CI 增加了专门的 compute 对齐门禁（`pyarrow.compute` 对比）：
+
+- 入口脚本：`tools/compute/pyarrow_compute_compat.py`
+- Zig 执行器：`zig build compute-compat-check -- <cases.json>`
+- 覆盖维度：`numeric` / `nulls` / `boundary` / `chunked`
