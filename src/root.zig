@@ -220,6 +220,8 @@ pub const ComputeExecContext = compute_mod.ExecContext;
 pub const computeUnaryNullPropagates = compute_mod.unaryNullPropagates;
 pub const computeBinaryNullPropagates = compute_mod.binaryNullPropagates;
 pub const computeInferBinaryExecLen = compute_mod.inferBinaryExecLen;
+pub const computeIntCastOrInvalidCast = compute_mod.intCastOrInvalidCast;
+pub const computeArithmeticDivI64 = compute_mod.arithmeticDivI64;
 
 // Pull buffer tests into the root test target.
 test {

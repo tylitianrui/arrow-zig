@@ -35,6 +35,17 @@
 - `resolveResultType(...)`：注册表级推导
 
 当 options 或类型不匹配时，会返回 `KernelError`（如 `InvalidOptions` / `NoMatchingKernel`）。
+为方便上层库做策略处理，错误模型还包含：
+
+- `Overflow`
+- `DivideByZero`
+- `InvalidCast`
+- `NotImplemented`
+
+建议在算术/转换 kernel 内统一复用：
+
+- `arithmeticDivI64(...)`（除零时返回 `DivideByZero`）
+- `intCastOrInvalidCast(...)`（转换失败时返回 `InvalidCast`）
 
 ## 5. ScalarValue 语义
 

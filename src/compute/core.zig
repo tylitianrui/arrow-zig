@@ -139,7 +139,11 @@ pub const KernelError = error{
     InvalidArity,
     InvalidOptions,
     InvalidInput,
+    Overflow,
+    DivideByZero,
+    InvalidCast,
     UnsupportedType,
+    NotImplemented,
     MissingLifecycle,
     AggregateStateMismatch,
     NoMatchingKernel,
@@ -1015,6 +1019,23 @@ pub const BinaryExecChunkIterator = struct {
     }
 };
 
+/// Convert integer-like values using a standardized InvalidCast error path.
+pub fn intCastOrInvalidCast(comptime T: type, value: anytype) KernelError!T {
+    return std.math.cast(T, value) orelse error.InvalidCast;
+}
+
+/// i64 division helper with standardized DivideByZero / Overflow behavior.
+pub fn arithmeticDivI64(lhs: i64, rhs: i64, options: ArithmeticOptions) KernelError!i64 {
+    if (rhs == 0) {
+        if (options.divide_by_zero_is_error) return error.DivideByZero;
+        return 0;
+    }
+    if (options.check_overflow and lhs == std.math.minInt(i64) and rhs == -1) {
+        return error.Overflow;
+    }
+    return @divTrunc(lhs, rhs);
+}
+
 pub fn hasArity(args: []const Datum, expected_arity: usize) bool {
     return args.len == expected_arity;
 }
@@ -1063,6 +1084,14 @@ fn isTwoInt32(args: []const Datum) bool {
     return args.len == 2 and args[0].dataType() == .int32 and args[1].dataType() == .int32;
 }
 
+fn isInt64Scalar(args: []const Datum) bool {
+    return args.len == 1 and args[0].isScalar() and args[0].scalar.data_type == .int64;
+}
+
+fn isTwoInt64Scalars(args: []const Datum) bool {
+    return args.len == 2 and args[0].isScalar() and args[1].isScalar() and args[0].scalar.data_type == .int64 and args[1].scalar.data_type == .int64;
+}
+
 fn passthroughInt32Kernel(ctx: *ExecContext, args: []const Datum, options: Options) KernelError!Datum {
     _ = ctx;
     _ = options;
@@ -1090,6 +1119,13 @@ fn onlyCastOptions(options: Options) bool {
     };
 }
 
+fn onlyArithmeticOptions(options: Options) bool {
+    return switch (options) {
+        .arithmetic => true,
+        else => false,
+    };
+}
+
 fn firstArgResultType(args: []const Datum, options: Options) KernelError!DataType {
     _ = options;
     if (args.len == 0) return error.InvalidInput;
@@ -1102,6 +1138,67 @@ fn castResultType(args: []const Datum, options: Options) KernelError!DataType {
         .cast => |cast_opts| cast_opts.to_type orelse args[0].dataType(),
         else => error.InvalidOptions,
     };
+}
+
+fn castI64ToI32ResultType(args: []const Datum, options: Options) KernelError!DataType {
+    if (args.len != 1) return error.InvalidArity;
+    if (!args[0].dataType().eql(.{ .int64 = {} })) return error.InvalidCast;
+    return switch (options) {
+        .cast => |cast_opts| blk: {
+            if (cast_opts.to_type) |to_type| {
+                if (!to_type.eql(.{ .int32 = {} })) return error.InvalidCast;
+            }
+            break :blk DataType{ .int32 = {} };
+        },
+        else => error.InvalidOptions,
+    };
+}
+
+fn castI64ToI32Kernel(ctx: *ExecContext, args: []const Datum, options: Options) KernelError!Datum {
+    _ = ctx;
+    if (args.len != 1) return error.InvalidArity;
+    if (!isInt64Scalar(args)) return error.InvalidInput;
+
+    const cast_opts = switch (options) {
+        .cast => |o| o,
+        else => return error.InvalidOptions,
+    };
+    if (cast_opts.to_type) |to_type| {
+        if (!to_type.eql(.{ .int32 = {} })) return error.InvalidCast;
+    }
+
+    const out = try intCastOrInvalidCast(i32, args[0].scalar.value.i64);
+    return Datum.fromScalar(.{
+        .data_type = .{ .int32 = {} },
+        .value = .{ .i32 = out },
+    });
+}
+
+fn divI64ScalarResultType(args: []const Datum, options: Options) KernelError!DataType {
+    if (args.len != 2) return error.InvalidArity;
+    _ = switch (options) {
+        .arithmetic => {},
+        else => return error.InvalidOptions,
+    };
+    if (!isTwoInt64Scalars(args)) return error.InvalidInput;
+    return .{ .int64 = {} };
+}
+
+fn divI64ScalarKernel(ctx: *ExecContext, args: []const Datum, options: Options) KernelError!Datum {
+    _ = ctx;
+    if (args.len != 2) return error.InvalidArity;
+    if (!isTwoInt64Scalars(args)) return error.InvalidInput;
+    const arithmetic_opts = switch (options) {
+        .arithmetic => |o| o,
+        else => return error.InvalidOptions,
+    };
+    const lhs = args[0].scalar.value.i64;
+    const rhs = args[1].scalar.value.i64;
+    const out = try arithmeticDivI64(lhs, rhs, arithmetic_opts);
+    return Datum.fromScalar(.{
+        .data_type = .{ .int64 = {} },
+        .value = .{ .i64 = out },
+    });
 }
 
 fn countAggregateResultType(args: []const Datum, options: Options) KernelError!DataType {
@@ -1127,7 +1224,7 @@ fn countLifecycleUpdate(ctx: *ExecContext, state_ptr: *anyopaque, args: []const 
     if (!unaryArray(args)) return error.InvalidInput;
     const state: *CountAggState = @ptrCast(@alignCast(state_ptr));
     const count = args[0].array.data().length;
-    state.count = std.math.add(usize, state.count, count) catch return error.InvalidInput;
+    state.count = std.math.add(usize, state.count, count) catch return error.Overflow;
 }
 
 fn countLifecycleMerge(ctx: *ExecContext, state_ptr: *anyopaque, other_ptr: *anyopaque, options: Options) KernelError!void {
@@ -1135,7 +1232,7 @@ fn countLifecycleMerge(ctx: *ExecContext, state_ptr: *anyopaque, other_ptr: *any
     _ = options;
     const state: *CountAggState = @ptrCast(@alignCast(state_ptr));
     const other: *CountAggState = @ptrCast(@alignCast(other_ptr));
-    state.count = std.math.add(usize, state.count, other.count) catch return error.InvalidInput;
+    state.count = std.math.add(usize, state.count, other.count) catch return error.Overflow;
 }
 
 fn countLifecycleFinalize(ctx: *ExecContext, state_ptr: *anyopaque, options: Options) KernelError!Datum {
@@ -1818,4 +1915,138 @@ test "compute inferBinaryExecLen rejects non-broadcast length mismatch" {
     }
 
     try std.testing.expectError(error.InvalidInput, inferBinaryExecLen(lhs, rhs));
+}
+
+test "compute KernelError includes strategy-aware variants" {
+    const overflow: KernelError = error.Overflow;
+    const divide_by_zero: KernelError = error.DivideByZero;
+    const invalid_cast: KernelError = error.InvalidCast;
+    const not_implemented: KernelError = error.NotImplemented;
+
+    try std.testing.expect(overflow == error.Overflow);
+    try std.testing.expect(divide_by_zero == error.DivideByZero);
+    try std.testing.expect(invalid_cast == error.InvalidCast);
+    try std.testing.expect(not_implemented == error.NotImplemented);
+}
+
+test "compute arithmetic kernel maps divide-by-zero to DivideByZero" {
+    const allocator = std.testing.allocator;
+    var registry = FunctionRegistry.init(allocator);
+    defer registry.deinit();
+
+    try registry.registerScalarKernel("div_i64", .{
+        .signature = .{
+            .arity = 2,
+            .type_check = isTwoInt64Scalars,
+            .options_check = onlyArithmeticOptions,
+            .result_type_fn = divI64ScalarResultType,
+        },
+        .exec = divI64ScalarKernel,
+    });
+
+    var ctx = ExecContext.init(allocator, &registry);
+    const args = [_]Datum{
+        Datum.fromScalar(.{ .data_type = .{ .int64 = {} }, .value = .{ .i64 = 42 } }),
+        Datum.fromScalar(.{ .data_type = .{ .int64 = {} }, .value = .{ .i64 = 0 } }),
+    };
+
+    try std.testing.expectError(
+        error.DivideByZero,
+        ctx.invokeScalar("div_i64", args[0..], .{ .arithmetic = .{} }),
+    );
+}
+
+test "compute arithmetic kernel non-error divide-by-zero mode stays non-failing" {
+    const allocator = std.testing.allocator;
+    var registry = FunctionRegistry.init(allocator);
+    defer registry.deinit();
+
+    try registry.registerScalarKernel("div_i64_relaxed", .{
+        .signature = .{
+            .arity = 2,
+            .type_check = isTwoInt64Scalars,
+            .options_check = onlyArithmeticOptions,
+            .result_type_fn = divI64ScalarResultType,
+        },
+        .exec = divI64ScalarKernel,
+    });
+
+    var ctx = ExecContext.init(allocator, &registry);
+    const args = [_]Datum{
+        Datum.fromScalar(.{ .data_type = .{ .int64 = {} }, .value = .{ .i64 = 42 } }),
+        Datum.fromScalar(.{ .data_type = .{ .int64 = {} }, .value = .{ .i64 = 0 } }),
+    };
+
+    var out = try ctx.invokeScalar(
+        "div_i64_relaxed",
+        args[0..],
+        .{ .arithmetic = .{ .check_overflow = true, .divide_by_zero_is_error = false } },
+    );
+    defer out.release();
+    try std.testing.expect(out.isScalar());
+    try std.testing.expectEqual(@as(i64, 0), out.scalar.value.i64);
+}
+
+test "compute cast kernel maps invalid conversion to InvalidCast" {
+    const allocator = std.testing.allocator;
+    var registry = FunctionRegistry.init(allocator);
+    defer registry.deinit();
+
+    try registry.registerScalarKernel("cast_i64_to_i32", .{
+        .signature = .{
+            .arity = 1,
+            .type_check = isInt64Scalar,
+            .options_check = onlyCastOptions,
+            .result_type_fn = castI64ToI32ResultType,
+        },
+        .exec = castI64ToI32Kernel,
+    });
+
+    var ctx = ExecContext.init(allocator, &registry);
+    const too_large = Datum.fromScalar(.{
+        .data_type = .{ .int64 = {} },
+        .value = .{ .i64 = std.math.maxInt(i64) },
+    });
+    const args = [_]Datum{too_large};
+
+    try std.testing.expectError(
+        error.InvalidCast,
+        ctx.invokeScalar(
+            "cast_i64_to_i32",
+            args[0..],
+            .{ .cast = .{ .safe = true, .to_type = .{ .int32 = {} } } },
+        ),
+    );
+}
+
+test "compute cast kernel succeeds with valid conversion" {
+    const allocator = std.testing.allocator;
+    var registry = FunctionRegistry.init(allocator);
+    defer registry.deinit();
+
+    try registry.registerScalarKernel("cast_i64_to_i32_ok", .{
+        .signature = .{
+            .arity = 1,
+            .type_check = isInt64Scalar,
+            .options_check = onlyCastOptions,
+            .result_type_fn = castI64ToI32ResultType,
+        },
+        .exec = castI64ToI32Kernel,
+    });
+
+    var ctx = ExecContext.init(allocator, &registry);
+    const value = Datum.fromScalar(.{
+        .data_type = .{ .int64 = {} },
+        .value = .{ .i64 = 123 },
+    });
+    const args = [_]Datum{value};
+
+    var out = try ctx.invokeScalar(
+        "cast_i64_to_i32_ok",
+        args[0..],
+        .{ .cast = .{ .safe = true, .to_type = .{ .int32 = {} } } },
+    );
+    defer out.release();
+    try std.testing.expect(out.isScalar());
+    try std.testing.expectEqual(@as(i32, 123), out.scalar.value.i32);
 }

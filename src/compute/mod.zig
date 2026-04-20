@@ -47,3 +47,5 @@ pub const binarySameNumeric = core.binarySameNumeric;
 pub const unaryNullPropagates = core.unaryNullPropagates;
 pub const binaryNullPropagates = core.binaryNullPropagates;
 pub const inferBinaryExecLen = core.inferBinaryExecLen;
+pub const intCastOrInvalidCast = core.intCastOrInvalidCast;
+pub const arithmeticDivI64 = core.arithmeticDivI64;
