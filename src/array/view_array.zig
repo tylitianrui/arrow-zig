@@ -76,15 +76,17 @@ fn viewValueAt(data: *const ArrayData, i: usize) []const u8 {
 pub const StringViewArray = struct {
     data: *const ArrayData,
 
-    pub fn len(self: StringViewArray) usize {
+    const Self = @This();
+
+    pub fn len(self: Self) usize {
         return self.data.length;
     }
 
-    pub fn isNull(self: StringViewArray, i: usize) bool {
+    pub fn isNull(self: Self, i: usize) bool {
         return self.data.isNull(i);
     }
 
-    pub fn value(self: StringViewArray, i: usize) []const u8 {
+    pub fn value(self: Self, i: usize) []const u8 {
         return viewValueAt(self.data, i);
     }
 };
@@ -92,15 +94,17 @@ pub const StringViewArray = struct {
 pub const BinaryViewArray = struct {
     data: *const ArrayData,
 
-    pub fn len(self: BinaryViewArray) usize {
+    const Self = @This();
+
+    pub fn len(self: Self) usize {
         return self.data.length;
     }
 
-    pub fn isNull(self: BinaryViewArray, i: usize) bool {
+    pub fn isNull(self: Self, i: usize) bool {
         return self.data.isNull(i);
     }
 
-    pub fn value(self: BinaryViewArray, i: usize) []const u8 {
+    pub fn value(self: Self, i: usize) []const u8 {
         return viewValueAt(self.data, i);
     }
 };
@@ -108,23 +112,25 @@ pub const BinaryViewArray = struct {
 pub const ListViewArray = struct {
     data: *const ArrayData,
 
+    const Self = @This();
+
     /// Return the logical length.
-    pub fn len(self: ListViewArray) usize {
+    pub fn len(self: Self) usize {
         return self.data.length;
     }
 
     /// Check whether the element at index is null.
-    pub fn isNull(self: ListViewArray, i: usize) bool {
+    pub fn isNull(self: Self, i: usize) bool {
         return self.data.isNull(i);
     }
 
-    pub fn valuesRef(self: ListViewArray) *const ArrayRef {
+    pub fn valuesRef(self: Self) *const ArrayRef {
         std.debug.assert(self.data.children.len == 1);
         return &self.data.children[0];
     }
 
     /// Return the logical value view at the requested index.
-    pub fn value(self: ListViewArray, i: usize) !ArrayRef {
+    pub fn value(self: Self, i: usize) !ArrayRef {
         std.debug.assert(i < self.data.length);
         std.debug.assert(self.data.buffers.len >= 3);
         std.debug.assert(self.data.children.len == 1);
@@ -141,23 +147,25 @@ pub const ListViewArray = struct {
 pub const LargeListViewArray = struct {
     data: *const ArrayData,
 
+    const Self = @This();
+
     /// Return the logical length.
-    pub fn len(self: LargeListViewArray) usize {
+    pub fn len(self: Self) usize {
         return self.data.length;
     }
 
     /// Check whether the element at index is null.
-    pub fn isNull(self: LargeListViewArray, i: usize) bool {
+    pub fn isNull(self: Self, i: usize) bool {
         return self.data.isNull(i);
     }
 
-    pub fn valuesRef(self: LargeListViewArray) *const ArrayRef {
+    pub fn valuesRef(self: Self) *const ArrayRef {
         std.debug.assert(self.data.children.len == 1);
         return &self.data.children[0];
     }
 
     /// Return the logical value view at the requested index.
-    pub fn value(self: LargeListViewArray, i: usize) !ArrayRef {
+    pub fn value(self: Self, i: usize) !ArrayRef {
         std.debug.assert(i < self.data.length);
         std.debug.assert(self.data.buffers.len >= 3);
         std.debug.assert(self.data.children.len == 1);
