@@ -40,6 +40,7 @@ const SchemaNode = struct {
     allocator: std.mem.Allocator,
     ref_count: std.atomic.Value(u32),
     arena: std.heap.ArenaAllocator,
+    field_index: std.StringHashMapUnmanaged(usize),
     schema: Schema,
 };
 
@@ -56,6 +57,7 @@ pub const SchemaRef = struct {
     pub fn release(self: *SchemaRef) void {
         if (self.node.ref_count.fetchSub(1, .acq_rel) != 1) return;
         const allocator = self.node.allocator;
+        self.node.field_index.deinit(allocator);
         self.node.arena.deinit();
         allocator.destroy(self.node);
     }
@@ -63,6 +65,10 @@ pub const SchemaRef = struct {
     /// Borrow immutable access to the underlying schema.
     pub fn schema(self: SchemaRef) *const Schema {
         return &self.node.schema;
+    }
+
+    pub fn fieldIndex(self: SchemaRef, name: []const u8) ?usize {
+        return self.node.field_index.get(name);
     }
 
     pub fn project(self: SchemaRef, allocator: std.mem.Allocator, indices: []const usize) !SchemaRef {
@@ -89,12 +95,13 @@ pub const SchemaRef = struct {
         errdefer allocator.destroy(node);
         node.allocator = allocator;
         node.ref_count = std.atomic.Value(u32).init(1);
+        node.field_index = .{};
+        errdefer node.field_index.deinit(allocator);
         node.arena = std.heap.ArenaAllocator.init(allocator);
+        errdefer node.arena.deinit();
         const a = node.arena.allocator();
-        node.schema = cloneSchema(a, s) catch |err| {
-            node.arena.deinit();
-            return err;
-        };
+        node.schema = try cloneSchema(a, s);
+        try initFieldIndex(node);
         return SchemaRef{ .node = node };
     }
 
@@ -102,10 +109,15 @@ pub const SchemaRef = struct {
     /// Used by IPC readers that already built the schema inside an arena.
     pub fn fromArena(allocator: std.mem.Allocator, arena: std.heap.ArenaAllocator, s: Schema) !SchemaRef {
         const node = try allocator.create(SchemaNode);
+        errdefer allocator.destroy(node);
         node.allocator = allocator;
         node.ref_count = std.atomic.Value(u32).init(1);
+        node.field_index = .{};
+        errdefer node.field_index.deinit(allocator);
         node.arena = arena;
+        errdefer node.arena.deinit();
         node.schema = s;
+        try initFieldIndex(node);
         return SchemaRef{ .node = node };
     }
 };
@@ -216,6 +228,15 @@ fn cloneMetadata(a: std.mem.Allocator, meta: ?[]const KeyValue) !?[]const KeyVal
     return out;
 }
 
+fn initFieldIndex(node: *SchemaNode) !void {
+    const capacity = std.math.cast(u32, node.schema.fields.len) orelse return error.OutOfMemory;
+    try node.field_index.ensureTotalCapacity(node.allocator, capacity);
+    for (node.schema.fields, 0..) |field, index| {
+        const gop = try node.field_index.getOrPut(node.allocator, field.name);
+        if (!gop.found_existing) gop.value_ptr.* = index;
+    }
+}
+
 fn schemaMetadataEql(lhs: ?[]const KeyValue, rhs: ?[]const KeyValue) bool {
     if (lhs == null or rhs == null) return lhs == null and rhs == null;
     const l = lhs.?;
@@ -315,6 +336,26 @@ test "schema ref fromBorrowed deep clones fields" {
     try std.testing.expect(sc.fields[0].data_type.* == .int32);
     try std.testing.expectEqualStrings("name", sc.fields[1].name);
     try std.testing.expect(sc.fields[1].data_type.* == .string);
+}
+
+test "schema ref fieldIndex provides hashed lookup and keeps first duplicate" {
+    const allocator = std.testing.allocator;
+    const id_type = datatype.DataType{ .int32 = {} };
+    const name_type = datatype.DataType{ .string = {} };
+    const score_type = datatype.DataType{ .double = {} };
+    const fields = [_]Field{
+        .{ .name = "id", .data_type = &id_type, .nullable = false },
+        .{ .name = "name", .data_type = &name_type, .nullable = true },
+        .{ .name = "name", .data_type = &score_type, .nullable = true },
+    };
+    const s = Schema{ .fields = fields[0..] };
+
+    var ref = try SchemaRef.fromBorrowed(allocator, s);
+    defer ref.release();
+
+    try std.testing.expectEqual(@as(?usize, 0), ref.fieldIndex("id"));
+    try std.testing.expectEqual(@as(?usize, 1), ref.fieldIndex("name"));
+    try std.testing.expectEqual(@as(?usize, null), ref.fieldIndex("missing"));
 }
 
 test "schema fieldIndex finds and misses fields" {

@@ -99,10 +99,9 @@ pub const RecordBatch = struct {
     }
 
     pub fn columnByName(self: *const Self, name: []const u8) ?*const ArrayRef {
-        for (self.schema_ref.schema().fields, 0..) |field, i| {
-            if (std.mem.eql(u8, field.name, name)) return &self.columns[i];
-        }
-        return null;
+        const index = self.schema_ref.fieldIndex(name) orelse return null;
+        if (index >= self.columns.len) return null;
+        return &self.columns[index];
     }
 
     /// Create a logical slice view over the current value.

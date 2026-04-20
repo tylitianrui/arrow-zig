@@ -118,6 +118,7 @@ pub const ChunkedArray = struct {
             }
             out_chunks.deinit(allocator);
         }
+        try out_chunks.ensureUnusedCapacity(allocator, self.node.chunks.len);
 
         var global_index: usize = 0;
         var remaining_skip = offset;
