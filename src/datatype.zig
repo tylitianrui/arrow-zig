@@ -312,46 +312,46 @@ pub const DataType = union(TypeId) {
         return dataTypeEql(self, other);
     }
 
-    pub fn isInteger(self: DataType) bool {
+    pub inline fn isInteger(self: DataType) bool {
         return switch (self.physicalType()) {
             .int8, .int16, .int32, .int64, .uint8, .uint16, .uint32, .uint64 => true,
             else => false,
         };
     }
 
-    pub fn isFloating(self: DataType) bool {
+    pub inline fn isFloating(self: DataType) bool {
         return switch (self.physicalType()) {
             .half_float, .float, .double => true,
             else => false,
         };
     }
 
-    pub fn isNumeric(self: DataType) bool {
+    pub inline fn isNumeric(self: DataType) bool {
         return self.isInteger() or self.isFloating() or self.isDecimal();
     }
 
-    pub fn isDecimal(self: DataType) bool {
+    pub inline fn isDecimal(self: DataType) bool {
         return switch (self.physicalType()) {
             .decimal32, .decimal64, .decimal128, .decimal256 => true,
             else => false,
         };
     }
 
-    pub fn isStringLike(self: DataType) bool {
+    pub inline fn isStringLike(self: DataType) bool {
         return switch (self.physicalType()) {
             .string, .binary, .large_string, .large_binary, .string_view, .binary_view, .fixed_size_binary => true,
             else => false,
         };
     }
 
-    pub fn isTemporal(self: DataType) bool {
+    pub inline fn isTemporal(self: DataType) bool {
         return switch (self.physicalType()) {
             .date32, .date64, .time32, .time64, .timestamp, .duration, .interval_months, .interval_day_time, .interval_month_day_nano => true,
             else => false,
         };
     }
 
-    pub fn isNested(self: DataType) bool {
+    pub inline fn isNested(self: DataType) bool {
         return switch (self) {
             .list,
             .large_list,
@@ -370,7 +370,7 @@ pub const DataType = union(TypeId) {
         };
     }
 
-    pub fn bitWidth(self: DataType) ?usize {
+    pub inline fn bitWidth(self: DataType) ?usize {
         return switch (self.physicalType()) {
             .bool => 1,
             .int8, .uint8 => 8,

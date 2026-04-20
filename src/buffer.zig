@@ -7,7 +7,7 @@ const empty_storage: [0]u8 align(ALIGNMENT) = .{};
 
 /// Round `size` up to the next `ALIGNMENT`-byte boundary.
 /// Use this to determine the minimum capacity for a buffer storing `size` bytes.
-pub fn alignedSize(size: usize) usize {
+pub inline fn alignedSize(size: usize) usize {
     return (size + ALIGNMENT - 1) & ~(ALIGNMENT - 1);
 }
 
@@ -89,7 +89,7 @@ pub const SharedBuffer = struct {
     }
 
     /// Return `true` when the logical length is zero.
-    pub fn isEmpty(self: Self) bool {
+    pub inline fn isEmpty(self: Self) bool {
         return self.data.len == 0;
     }
 
@@ -164,7 +164,7 @@ pub const OwnedBuffer = struct {
     }
 
     /// Return `true` when the logical length is zero.
-    pub fn isEmpty(self: Self) bool {
+    pub inline fn isEmpty(self: Self) bool {
         return self.data.len == 0;
     }
 

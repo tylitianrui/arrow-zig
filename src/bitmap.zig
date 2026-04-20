@@ -78,12 +78,12 @@ pub const ValidityBitmap = struct {
         return .{ .data = buf.data, .bit_len = bit_len };
     }
     // Read the validity bit for an index.
-    pub fn isValid(self: ValidityBitmap, i: usize) bool {
+    pub inline fn isValid(self: ValidityBitmap, i: usize) bool {
         std.debug.assert(i < self.bit_len);
         return bitIsSet(self.data, i);
     }
     // Invert the validity bit for convenience.
-    pub fn isNull(self: ValidityBitmap, i: usize) bool {
+    pub inline fn isNull(self: ValidityBitmap, i: usize) bool {
         return !self.isValid(i);
     }
     // Count valid bits in the logical range.
@@ -143,7 +143,7 @@ pub const MutableValidityBitmap = struct {
     }
 
     // Read the indexed validity bit from the mutable bitmap.
-    pub fn isValid(self: MutableValidityBitmap, index: usize) bool {
+    pub inline fn isValid(self: MutableValidityBitmap, index: usize) bool {
         return ValidityBitmap.fromBuffer(self.toBuffer(), self.bit_len).isValid(index);
     }
 
@@ -157,7 +157,7 @@ pub const MutableValidityBitmap = struct {
     }
 
     // Invert the validity bit for convenience.
-    pub fn isNull(self: MutableValidityBitmap, index: usize) bool {
+    pub inline fn isNull(self: MutableValidityBitmap, index: usize) bool {
         return !self.isValid(index);
     }
 

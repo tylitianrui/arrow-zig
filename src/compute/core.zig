@@ -75,15 +75,15 @@ pub const Datum = union(enum) {
         return .{ .scalar = s };
     }
 
-    pub fn isArray(self: Datum) bool {
+    pub inline fn isArray(self: Datum) bool {
         return self == .array;
     }
 
-    pub fn isChunked(self: Datum) bool {
+    pub inline fn isChunked(self: Datum) bool {
         return self == .chunked;
     }
 
-    pub fn isScalar(self: Datum) bool {
+    pub inline fn isScalar(self: Datum) bool {
         return self == .scalar;
     }
 

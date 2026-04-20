@@ -126,7 +126,8 @@ pub const ArrayData = struct {
 
     pub fn nullCount(self: *Self) usize {
         if (self.null_count) |count| return count;
-        if (layoutDataType(self.data_type) == .null) {
+        const dt = layoutDataType(self.data_type);
+        if (dt == .null) {
             self.null_count = self.length;
             return self.length;
         }
@@ -537,9 +538,10 @@ pub const ArrayData = struct {
 
     pub fn validateFull(self: Self) ValidationError!void {
         try self.validateLayout();
+        const dt = layoutDataType(self.data_type);
 
         if (self.null_count) |expected_count| {
-            if (hasTopLevelValidityBitmap(layoutDataType(self.data_type)) and self.buffers.len > 0 and !self.buffers[0].isEmpty()) {
+            if (hasTopLevelValidityBitmap(dt) and self.buffers.len > 0 and !self.buffers[0].isEmpty()) {
                 const total_len = std.math.add(usize, self.offset, self.length) catch return error.InvalidOffsets;
                 const validity_bitmap = ValidityBitmap.fromBuffer(self.buffers[0], total_len);
                 var actual_count: usize = 0;
