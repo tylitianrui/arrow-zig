@@ -124,9 +124,9 @@ Goal: Build a production-usable Zig implementation of Apache Arrow core memory m
 
 ### C4. Project Governance
 
-- [ ] C4.1 Add CONTRIBUTING.md.
-- [ ] C4.2 Add API stability policy (experimental vs stable sections).
-- [ ] C4.3 Define release checklist and semver rules.
+- [x] C4.1 Add CONTRIBUTING.md.
+- [x] C4.2 Add API stability policy (experimental vs stable sections).
+- [x] C4.3 Define release checklist and semver rules.
 
 ## Immediate Next Sprint (Recommended)
 
@@ -134,9 +134,9 @@ Goal: Build a production-usable Zig implementation of Apache Arrow core memory m
 - [x] S2. Complete A2.1-A2.7 (FixedSizeBinary/FixedSizeList full path).
 - [x] S3. Start B1.1-B1.3 (Schema/Field metadata serialization scaffold).
 
-## Definition of Done (Per Task)
+## Definition of Done (Per Task Template)
 
-- [ ] T1. Code merged with unit tests.
-- [ ] T2. Public exports updated in src/root.zig.
-- [ ] T3. zig build test passes.
-- [ ] T4. If perf-sensitive, benchmark-smoke run attached.
+- T1. Code merged with unit tests.
+- T2. Public exports updated in src/root.zig.
+- T3. zig build test passes.
+- T4. If perf-sensitive, benchmark-smoke run attached.

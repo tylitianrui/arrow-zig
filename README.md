@@ -95,3 +95,9 @@ For splitting `zarrow-compute`, `zarrow-flight`, and `zarrow-parquet` into separ
 
 - [docs/multi-repo-split-zh.md](docs/multi-repo-split-zh.md)
 - Scaffold script: `tools/scaffold_downstream_repo.sh`
+
+## Contributing
+
+- [CONTRIBUTING.md](CONTRIBUTING.md)
+- [API Stability Policy](docs/api-stability.md)
+- [Release Checklist](docs/release-checklist.md)

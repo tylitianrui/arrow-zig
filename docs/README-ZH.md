@@ -95,3 +95,9 @@ len=3, v0=10, isNull1=true, v2=30
 
 - [分库方案与依赖规范](multi-repo-split-zh.md)
 - 脚手架：`tools/scaffold_downstream_repo.sh`
+
+## 贡献与发布
+
+- [贡献指南](../CONTRIBUTING.md)
+- [API 稳定性策略](api-stability.md)
+- [发布检查清单](release-checklist.md)
