@@ -23,6 +23,8 @@ pub fn PrimitiveArray(comptime T: type) type {
 
         const Self = @This();
 
+        pub const Error = error{ InvalidBufferCount, IndexOutOfBounds } || SharedBuffer.Error;
+
         /// Return the logical length.
         pub fn len(self: Self) usize {
             return self.data.length;
@@ -33,17 +35,21 @@ pub fn PrimitiveArray(comptime T: type) type {
             return self.data.isNull(i);
         }
 
-        pub fn values(self: Self) []const T {
+        pub fn values(self: Self) Error![]const T {
             // Primitive arrays require [validity] and [values] buffers.
-            std.debug.assert(self.data.buffers.len >= 2);
-            const raw = self.data.buffers[1].typedSlice(T) catch unreachable;
-            return raw[self.data.offset .. self.data.offset + self.data.length];
+            if (self.data.buffers.len < 2) return error.InvalidBufferCount;
+
+            const raw = try self.data.buffers[1].typedSlice(T);
+            const start = self.data.offset;
+            const end = std.math.add(usize, start, self.data.length) catch return error.SliceOutOfBounds;
+            if (end > raw.len) return error.SliceOutOfBounds;
+            return raw[start..end];
         }
 
         /// Return the logical value view at the requested index.
-        pub fn value(self: Self, i: usize) T {
-            std.debug.assert(i < self.data.length);
-            return self.values()[i];
+        pub fn value(self: Self, i: usize) Error!T {
+            if (i >= self.data.length) return error.IndexOutOfBounds;
+            return (try self.values())[i];
         }
     };
 }
@@ -62,7 +68,7 @@ pub fn PrimitiveBuilder(comptime T: type, comptime dtype: DataType) type {
 
         const Self = @This();
 
-        const BuilderError = error{ AlreadyFinished, NotFinished };
+        const Error = error{ AlreadyFinished, NotFinished };
 
         const TYPE: DataType = dtype;
 
@@ -81,16 +87,16 @@ pub fn PrimitiveBuilder(comptime T: type, comptime dtype: DataType) type {
         }
 
         /// Reset state while retaining reusable capacity when possible.
-        pub fn reset(self: *Self) BuilderError!void {
-            if (self.state != .finished) return BuilderError.NotFinished;
+        pub fn reset(self: *Self) Error!void {
+            if (self.state != .finished) return Error.NotFinished;
             self.len = 0;
             self.null_count = 0;
             self.state = .ready;
         }
 
         /// Clear state and release reusable buffers when required.
-        pub fn clear(self: *Self) BuilderError!void {
-            if (self.state != .finished) return BuilderError.NotFinished;
+        pub fn clear(self: *Self) Error!void {
+            if (self.state != .finished) return Error.NotFinished;
             self.values.deinit();
             if (self.validity) |*valid| valid.deinit();
             self.validity = null;
@@ -107,7 +113,7 @@ pub fn PrimitiveBuilder(comptime T: type, comptime dtype: DataType) type {
 
         /// Append one logical value into the builder.
         pub fn append(self: *Self, value: T) !void {
-            if (self.state == .finished) return BuilderError.AlreadyFinished;
+            if (self.state == .finished) return Error.AlreadyFinished;
             const next_len = self.len + 1;
             try self.ensureValuesCapacity(next_len);
             const slice = std.mem.bytesAsSlice(T, self.values.data);
@@ -118,7 +124,7 @@ pub fn PrimitiveBuilder(comptime T: type, comptime dtype: DataType) type {
 
         /// Append a null entry into the builder.
         pub fn appendNull(self: *Self) !void {
-            if (self.state == .finished) return BuilderError.AlreadyFinished;
+            if (self.state == .finished) return Error.AlreadyFinished;
             const next_len = self.len + 1;
             try self.ensureValuesCapacity(next_len);
             try array_utils.ensureValidityForNull(self.allocator, &self.validity, &self.null_count, next_len);
@@ -127,7 +133,7 @@ pub fn PrimitiveBuilder(comptime T: type, comptime dtype: DataType) type {
 
         /// Finalize builder state and return an immutable array reference.
         pub fn finish(self: *Self) !ArrayRef {
-            if (self.state == .finished) return BuilderError.AlreadyFinished;
+            if (self.state == .finished) return Error.AlreadyFinished;
             const validity_buf = if (self.validity) |*buf| try buf.toShared(bitmap.byteLength(self.len)) else SharedBuffer.empty;
             self.buffers[0] = validity_buf;
             self.buffers[1] = try self.values.toShared(self.len * @sizeOf(T));
@@ -169,5 +175,17 @@ test "primitive builder appends values and nulls" {
     const built = PrimitiveArray(i32){ .data = array_handle.data() };
     try std.testing.expectEqual(@as(usize, 3), built.len());
     try std.testing.expect(built.isNull(1));
-    try std.testing.expectEqual(@as(i32, 30), built.value(2));
+    try std.testing.expectEqual(@as(i32, 30), try built.value(2));
+}
+
+test "primitive array values returns error for missing value buffer" {
+    const buffers = [_]SharedBuffer{SharedBuffer.empty};
+    const data = ArrayData{
+        .data_type = DataType{ .int32 = {} },
+        .length = 1,
+        .null_count = 0,
+        .buffers = &buffers,
+    };
+    const view = PrimitiveArray(i32){ .data = &data };
+    try std.testing.expectError(error.InvalidBufferCount, view.values());
 }
