@@ -868,3 +868,78 @@ jobs:
       - name: Validate Arrow C++ fixture with zarrow (smoke)
         run: |
           zig build interop-fixture-check -- .interop-fixtures/arrow_cpp.arrow canonical stream
+
+  interop-c-abi-cpp-smoke:
+    name: C ABI Smoke (zarrow_c <-> Arrow C++)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: "0.15.2"
+
+      - name: Set up Conda (arrow-cpp)
+        uses: conda-incubator/setup-miniconda@v3
+        with:
+          auto-activate-base: false
+          activate-environment: arrow-cpp-env
+          channels: conda-forge
+          python-version: "3.11"
+
+      - name: Install Arrow C++ toolchain
+        shell: bash -l {0}
+        run: |
+          conda activate arrow-cpp-env
+          conda install -y arrow-cpp=23.0.1 pkg-config cxx-compiler
+
+      - name: Build zarrow C ABI shared library
+        run: |
+          zig build c-api-lib
+
+      - name: Build C ABI smoke tool
+        shell: bash -l {0}
+        run: |
+          conda activate arrow-cpp-env
+          mkdir -p .interop-bin
+          c++ -std=c++17 tools/interop/cpp/c_abi_smoke.cpp \
+            -Iinclude \
+            -Lzig-out/lib \
+            -Wl,-rpath,"$PWD/zig-out/lib" \
+            -lzarrow_c \
+            -o .interop-bin/c_abi_smoke \
+            $(pkg-config --cflags --libs arrow)
+
+      - name: Run C ABI smoke
+        shell: bash -l {0}
+        run: |
+          conda activate arrow-cpp-env
+          export LD_LIBRARY_PATH="$PWD/zig-out/lib:${LD_LIBRARY_PATH:-}"
+          ./.interop-bin/c_abi_smoke
+
+  interop-c-abi-rs-smoke:
+    name: C ABI Smoke (zarrow_c <-> arrow-rs)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: "0.15.2"
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build zarrow C ABI shared library
+        run: |
+          zig build c-api-lib
+
+      - name: Run Rust C ABI smoke
+        run: |
+          export LD_LIBRARY_PATH="$PWD/zig-out/lib:${LD_LIBRARY_PATH:-}"
+          export RUSTFLAGS="-L native=$PWD/zig-out/lib"
+          cargo run --manifest-path tools/interop/arrow-rs/Cargo.toml --bin c_abi_smoke

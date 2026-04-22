@@ -240,6 +240,7 @@ test {
     _ = @import("ipc/file_reader.zig");
     _ = @import("ffi/c_data.zig");
     _ = @import("ffi/c_stream.zig");
+    _ = @import("c_api.zig");
     _ = @import("compute/core.zig");
     _ = @import("array/array.zig");
     _ = @import("array/array_data.zig");

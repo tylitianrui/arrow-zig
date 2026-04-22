@@ -48,6 +48,22 @@ pub fn build(b: *std.Build) !void {
         .optimize = optimize,
     });
 
+    // C ABI shared library exposing Arrow C Data/C Stream helpers for downstream C/C++/Rust.
+    const zarrow_c_lib = b.addLibrary(.{
+        .linkage = .dynamic,
+        .name = "zarrow_c",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/c_api.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    zarrow_c_lib.linkLibC();
+    zarrow_c_lib.installHeader(b.path("include/zarrow_c_api.h"), "zarrow_c_api.h");
+    b.installArtifact(zarrow_c_lib);
+    const c_api_lib_step = b.step("c-api-lib", "Build and install zarrow C ABI shared library");
+    c_api_lib_step.dependOn(b.getInstallStep());
+
     const fbz_module = b.createModule(.{
         .root_source_file = b.path("src/fbs_runtime/lib.zig"),
     });
