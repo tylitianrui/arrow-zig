@@ -27,5 +27,7 @@ pub fn main() !void {
     var first = try list.value(0);
     defer first.release();
     const first_values = zarrow.Int32Array{ .data = first.data() };
-    std.debug.print("first list len={d}, v0={d}, v1={d}\n", .{ first_values.len(), first_values.value(0), first_values.value(1) });
+    const v0 = try first_values.value(0);
+    const v1 = try first_values.value(1);
+    std.debug.print("first list len={d}, v0={d}, v1={d}\n", .{ first_values.len(), v0, v1 });
 }

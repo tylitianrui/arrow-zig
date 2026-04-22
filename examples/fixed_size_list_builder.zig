@@ -50,8 +50,11 @@ pub fn main() !void {
             var row_ref = try arr.value(i);
             defer row_ref.release();
             const row = zarrow.Int32Array{ .data = row_ref.data() };
+            const v0 = try row.value(0);
+            const v1 = try row.value(1);
+            const v2 = try row.value(2);
             std.debug.print("  [{d}] [{d}, {d}, {d}]\n", .{
-                i, row.value(0), row.value(1), row.value(2),
+                i, v0, v1, v2,
             });
         }
     }

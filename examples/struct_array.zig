@@ -34,6 +34,6 @@ pub fn main() !void {
 
     std.debug.print("examples/struct_array.zig | length={d}, field0_value0={d}\n", .{
         struct_array.len(),
-        child_array.value(0),
+        try child_array.value(0),
     });
 }

@@ -23,6 +23,6 @@ pub fn main() !void {
 
     std.debug.print(
         "examples/interval_month_day_nano_builder.zig | length={d}, v0={d}, isNull1={any}, v2={d}\n",
-        .{ arr.len(), arr.value(0), arr.isNull(1), arr.value(2) },
+        .{ arr.len(), try arr.value(0), arr.isNull(1), try arr.value(2) },
     );
 }

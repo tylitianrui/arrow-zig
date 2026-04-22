@@ -54,12 +54,12 @@ pub fn main() !void {
             var v = try sparse.value(i);
             defer v.release();
             const a = zarrow.Int32Array{ .data = v.data() };
-            std.debug.print("  [{d}] i32({d})\n", .{ i, a.value(0) });
+            std.debug.print("  [{d}] i32({d})\n", .{ i, try a.value(0) });
         } else {
             var v = try sparse.value(i);
             defer v.release();
             const a = zarrow.Float32Array{ .data = v.data() };
-            std.debug.print("  [{d}] f32({d:.2})\n", .{ i, a.value(0) });
+            std.debug.print("  [{d}] f32({d:.2})\n", .{ i, try a.value(0) });
         }
     }
 
@@ -103,12 +103,12 @@ pub fn main() !void {
             var v = try dense.value(i);
             defer v.release();
             const a = zarrow.Int32Array{ .data = v.data() };
-            std.debug.print("  [{d}] i32({d})\n", .{ i, a.value(0) });
+            std.debug.print("  [{d}] i32({d})\n", .{ i, try a.value(0) });
         } else {
             var v = try dense.value(i);
             defer v.release();
             const a = zarrow.Float32Array{ .data = v.data() };
-            std.debug.print("  [{d}] f32({d:.2})\n", .{ i, a.value(0) });
+            std.debug.print("  [{d}] f32({d:.2})\n", .{ i, try a.value(0) });
         }
     }
 }

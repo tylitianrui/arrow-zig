@@ -48,7 +48,7 @@ pub fn main() !void {
         const values = zarrow.Int32Array{ .data = read_batch.columns[0].data() };
         std.debug.print("rows={d}\n", .{read_batch.numRows()});
         for (0..read_batch.numRows()) |i| {
-            std.debug.print("  value={d}\n", .{values.value(i)});
+            std.debug.print("  value={d}\n", .{try values.value(i)});
         }
     }
 }

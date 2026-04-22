@@ -28,5 +28,8 @@ pub fn main() !void {
     var second = try list.value(1);
     defer second.release();
     const second_values = zarrow.Int32Array{ .data = second.data() };
-    std.debug.print("second list len={d}, v0={d}, v1={d}, v2={d}\n", .{ second_values.len(), second_values.value(0), second_values.value(1), second_values.value(2) });
+    const v0 = try second_values.value(0);
+    const v1 = try second_values.value(1);
+    const v2 = try second_values.value(2);
+    std.debug.print("second list len={d}, v0={d}, v1={d}, v2={d}\n", .{ second_values.len(), v0, v1, v2 });
 }

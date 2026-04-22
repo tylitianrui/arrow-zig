@@ -22,10 +22,10 @@ pub fn main() !void {
         "examples/half_float_builder.zig | length={d}, v0={d:.2}, v1={d:.2}, isNull2={any}, v3={d:.2}\n",
         .{
             arr.len(),
-            @as(f32, arr.value(0)),
-            @as(f32, arr.value(1)),
+            @as(f32, try arr.value(0)),
+            @as(f32, try arr.value(1)),
             arr.isNull(2),
-            @as(f32, arr.value(3)),
+            @as(f32, try arr.value(3)),
         },
     );
 }

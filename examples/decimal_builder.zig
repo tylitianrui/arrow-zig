@@ -60,6 +60,6 @@ pub fn main() !void {
 
     std.debug.print(
         "examples/decimal_builder.zig | d32={d} d64={d} d128={d} d256={d} v32={d} v64={d}\n",
-        .{ d32.len(), d64.len(), d128.len(), d256.len(), d32.value(0), d64.value(0) },
+        .{ d32.len(), d64.len(), d128.len(), d256.len(), try d32.value(0), try d64.value(0) },
     );
 }

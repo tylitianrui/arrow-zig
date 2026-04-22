@@ -84,7 +84,7 @@ pub fn main() !void {
             var value = try out_union.value(i);
             defer value.release();
             const arr = zarrow.Int32Array{ .data = value.data() };
-            std.debug.print("  row[{d}] type_id={d} int32={d}\n", .{ i, type_id, arr.value(0) });
+            std.debug.print("  row[{d}] type_id={d} int32={d}\n", .{ i, type_id, try arr.value(0) });
         } else {
             var value = try out_union.value(i);
             defer value.release();

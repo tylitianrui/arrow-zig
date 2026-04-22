@@ -63,10 +63,11 @@ pub fn main() !void {
         const ids = zarrow.Int32Array{ .data = out_batch.columns[0].data() };
         const names = zarrow.StringArray{ .data = out_batch.columns[1].data() };
         for (0..out_batch.numRows()) |i| {
+            const id = try ids.value(i);
             if (names.isNull(i)) {
-                std.debug.print("  id={d} name=null\n", .{ids.value(i)});
+                std.debug.print("  id={d} name=null\n", .{id});
             } else {
-                std.debug.print("  id={d} name={s}\n", .{ ids.value(i), names.value(i) });
+                std.debug.print("  id={d} name={s}\n", .{ id, names.value(i) });
             }
         }
     }

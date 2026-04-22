@@ -64,7 +64,8 @@ pub fn main() !void {
         const row_vals = zarrow.Int32Array{ .data = row_ref.data().children[1].data() };
         std.debug.print("  [{d}]", .{i});
         for (0..n) |j| {
-            std.debug.print(" {s}:{d}", .{ row_keys.value(j), row_vals.value(j) });
+            const value = try row_vals.value(j);
+            std.debug.print(" {s}:{d}", .{ row_keys.value(j), value });
         }
         std.debug.print("\n", .{});
     }

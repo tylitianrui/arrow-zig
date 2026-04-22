@@ -21,14 +21,17 @@ pub fn main() !void {
     const array2 = zarrow.Int32Array{ .data = array_ref2.data() };
 
     std.debug.assert(array2.len() == 2);
-    std.debug.assert(array2.value(0) == 7);
-    std.debug.assert(array2.value(1) == 8);
+    std.debug.assert((try array2.value(0)) == 7);
+    std.debug.assert((try array2.value(1)) == 8);
+
+    const value0 = try array.value(0);
+    const value2 = try array.value(2);
 
     std.debug.print("examples/primitive_builder.zig | type=Int32Builder | length={d}, value0={d}, isNull1={any}, value2={d}, length2={d}\n", .{
         array.len(),
-        array.value(0),
+        value0,
         array.isNull(1),
-        array.value(2),
+        value2,
         array2.len(),
     });
 }
