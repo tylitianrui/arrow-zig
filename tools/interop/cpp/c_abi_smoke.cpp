@@ -6,7 +6,6 @@
 
 #include <iostream>
 #include <memory>
-#include <optional>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -51,9 +50,19 @@ std::shared_ptr<arrow::Schema> CanonicalSchema() {
 
 arrow::Result<std::shared_ptr<arrow::RecordBatch>> MakeCanonicalBatch() {
   auto schema = CanonicalSchema();
-  auto ids = std::make_shared<arrow::Int32Array>(std::vector<int32_t>{1, 2, 3});
-  auto names =
-      std::make_shared<arrow::StringArray>(std::vector<std::optional<std::string>>{"alice", std::nullopt, "bob"});
+
+  arrow::Int32Builder id_builder;
+  ARROW_RETURN_NOT_OK(id_builder.AppendValues({1, 2, 3}));
+  std::shared_ptr<arrow::Array> ids;
+  ARROW_RETURN_NOT_OK(id_builder.Finish(&ids));
+
+  arrow::StringBuilder name_builder;
+  ARROW_RETURN_NOT_OK(name_builder.Append("alice"));
+  ARROW_RETURN_NOT_OK(name_builder.AppendNull());
+  ARROW_RETURN_NOT_OK(name_builder.Append("bob"));
+  std::shared_ptr<arrow::Array> names;
+  ARROW_RETURN_NOT_OK(name_builder.Finish(&names));
+
   return arrow::RecordBatch::Make(schema, 3, {ids, names});
 }
 
