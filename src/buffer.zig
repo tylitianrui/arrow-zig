@@ -7,6 +7,12 @@ const empty_storage: [0]u8 align(ALIGNMENT) = .{};
 
 /// Round `size` up to the next `ALIGNMENT`-byte boundary.
 /// Use this to determine the minimum capacity for a buffer storing `size` bytes.
+///
+/// Demo (`ALIGNMENT = 64`):
+/// - `alignedSize(0) == (0 + 64 - 1) & ~(64 - 1) == 63 & ~63 == 0`
+/// - `alignedSize(1) == (1 + 64 - 1) & ~(64 - 1) == 64 & ~63 == 64`
+/// - `alignedSize(64) == (64 + 64 - 1) & ~(64 - 1) == 127 & ~63 == 64`
+/// - `alignedSize(65) == (65 + 64 - 1) & ~(64 - 1) == 128 & ~63 == 128`
 pub inline fn alignedSize(size: usize) usize {
     return (size + ALIGNMENT - 1) & ~(ALIGNMENT - 1);
 }
@@ -96,7 +102,7 @@ pub const SharedBuffer = struct {
     /// Create a logical slice view over the current value.
     pub fn slice(self: Self, start: usize, end: usize) Error!Self {
         if (start > end or end > self.data.len) {
-            return error.SliceOutOfBounds;
+            return Error.SliceOutOfBounds;
         }
         const out = Self{ .storage = self.storage, .data = self.data[start..end] };
 
@@ -113,10 +119,10 @@ pub const SharedBuffer = struct {
             if (@sizeOf(T) == 0) @compileError("typedSlice does not support zero-sized types");
         }
         if (!std.mem.isAligned(@intFromPtr(self.data.ptr), @alignOf(T))) {
-            return error.MisalignedPointer;
+            return Error.MisalignedPointer;
         }
         if (self.data.len % @sizeOf(T) != 0) {
-            return error.LengthNotMultipleOfTypeSize;
+            return Error.LengthNotMultipleOfTypeSize;
         }
         const aligned: []align(@alignOf(T)) const u8 = @alignCast(self.data);
         return std.mem.bytesAsSlice(T, aligned);
@@ -147,6 +153,7 @@ pub const OwnedBuffer = struct {
         const actualCapacity = alignedSize(if (capacity == 0) ALIGNMENT else capacity);
 
         const data = try allocator.alignedAlloc(u8, std.mem.Alignment.fromByteUnits(ALIGNMENT), actualCapacity);
+        // Zero-initialise the buffer so that uninitialised bytes are always valid to read.
         @memset(data, 0);
         return .{ .data = data, .allocator = allocator };
     }
@@ -319,4 +326,11 @@ test "shared buffer typedSlice returns error on invalid byte length" {
     defer shared.release();
 
     try std.testing.expectError(SharedBuffer.Error.LengthNotMultipleOfTypeSize, shared.typedSlice(u16));
+}
+
+test "alignedSize demo values" {
+    try std.testing.expectEqual(@as(usize, 0), alignedSize(0));
+    try std.testing.expectEqual(@as(usize, 64), alignedSize(1));
+    try std.testing.expectEqual(@as(usize, 64), alignedSize(64));
+    try std.testing.expectEqual(@as(usize, 128), alignedSize(65));
 }
