@@ -27,7 +27,7 @@ zig build fuzz-corpus
 zig build benchmark-smoke
 ```
 
-6. Verify interop checks are not regressed (PyArrow/arrow-rs/Arrow C++ lanes in CI).
+6. Verify interop checks are not regressed (PyArrow/arrow-rs/Arrow Go/Arrow C++ lanes in CI).
 7. Confirm docs for user-facing changes are updated.
 
 ## Release Notes Minimum

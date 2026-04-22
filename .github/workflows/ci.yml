@@ -30,6 +30,11 @@ jobs:
       - name: Set up Rust (interop lint)
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Set up Go (interop lint)
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.24.x"
+
       - name: Check Zig formatting
         run: |
           files="$(git ls-files '*.zig')"
@@ -44,6 +49,11 @@ jobs:
 
       - name: Check Rust interop tool builds
         run: cargo check --manifest-path tools/interop/arrow-rs/Cargo.toml
+
+      - name: Check Go interop tool builds
+        run: |
+          cd tools/interop/arrow-go
+          go build ./...
 
   fuzz-corpus:
     name: Fuzz Corpus Replay
@@ -572,6 +582,130 @@ jobs:
           cargo run --manifest-path tools/interop/arrow-rs/Cargo.toml -- generate .interop-fixtures/arrow_rs.arrow canonical stream
           zig build interop-fixture-check -- .interop-fixtures/arrow_rs.arrow canonical stream
           cargo run --manifest-path tools/interop/arrow-rs/Cargo.toml -- validate .interop-fixtures/zarrow.arrow canonical stream
+
+  interop-arrow-go:
+    name: IPC Interop (zarrow <-> Arrow Go)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: "0.15.2"
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.24.x"
+
+      - name: Generate zarrow fixtures
+        run: |
+          mkdir -p .interop-fixtures
+          zig build interop-fixture-writer -- .interop-fixtures/zarrow.arrow canonical stream
+          zig build interop-fixture-writer -- .interop-fixtures/zarrow_dict_delta.arrow dict-delta stream
+          zig build interop-fixture-writer -- .interop-fixtures/zarrow_ree.arrow ree stream
+          zig build interop-fixture-writer -- .interop-fixtures/zarrow_ree_int16.arrow ree-int16 stream
+          zig build interop-fixture-writer -- .interop-fixtures/zarrow_ree_int64.arrow ree-int64 stream
+          zig build interop-fixture-writer -- .interop-fixtures/zarrow_complex.arrow complex stream
+          zig build interop-fixture-writer -- .interop-fixtures/zarrow_extension.arrow extension stream
+          zig build interop-fixture-writer -- .interop-fixtures/zarrow_view.arrow view stream
+          zig build interop-fixture-writer -- .interop-fixtures/zarrow_file.arrow canonical file
+          zig build interop-fixture-writer -- .interop-fixtures/zarrow_ree_file.arrow ree file
+          zig build interop-fixture-writer -- .interop-fixtures/zarrow_ree_int16_file.arrow ree-int16 file
+          zig build interop-fixture-writer -- .interop-fixtures/zarrow_ree_int64_file.arrow ree-int64 file
+          zig build interop-fixture-writer -- .interop-fixtures/zarrow_complex_file.arrow complex file
+          zig build interop-fixture-writer -- .interop-fixtures/zarrow_extension_file.arrow extension file
+          zig build interop-fixture-writer -- .interop-fixtures/zarrow_view_file.arrow view file
+
+      - name: Arrow Go roundtrip checks
+        working-directory: tools/interop/arrow-go
+        run: |
+          go run . generate ../../../.interop-fixtures/arrow_go.arrow canonical stream
+          go run . generate ../../../.interop-fixtures/arrow_go_dict_delta.arrow dict-delta stream
+          go run . generate ../../../.interop-fixtures/arrow_go_ree.arrow ree stream
+          go run . generate ../../../.interop-fixtures/arrow_go_ree_int16.arrow ree-int16 stream
+          go run . generate ../../../.interop-fixtures/arrow_go_ree_int64.arrow ree-int64 stream
+          go run . generate ../../../.interop-fixtures/arrow_go_complex.arrow complex stream
+          go run . generate ../../../.interop-fixtures/arrow_go_extension.arrow extension stream
+          go run . generate ../../../.interop-fixtures/arrow_go_view.arrow view stream
+          go run . generate ../../../.interop-fixtures/arrow_go_file.arrow canonical file
+          go run . generate ../../../.interop-fixtures/arrow_go_ree_file.arrow ree file
+          go run . generate ../../../.interop-fixtures/arrow_go_ree_int16_file.arrow ree-int16 file
+          go run . generate ../../../.interop-fixtures/arrow_go_ree_int64_file.arrow ree-int64 file
+          go run . generate ../../../.interop-fixtures/arrow_go_complex_file.arrow complex file
+          go run . generate ../../../.interop-fixtures/arrow_go_extension_file.arrow extension file
+          go run . generate ../../../.interop-fixtures/arrow_go_view_file.arrow view file
+          go run . validate ../../../.interop-fixtures/zarrow.arrow canonical stream
+          go run . validate ../../../.interop-fixtures/zarrow_dict_delta.arrow dict-delta stream
+          go run . validate ../../../.interop-fixtures/zarrow_ree.arrow ree stream
+          go run . validate ../../../.interop-fixtures/zarrow_ree_int16.arrow ree-int16 stream
+          go run . validate ../../../.interop-fixtures/zarrow_ree_int64.arrow ree-int64 stream
+          go run . validate ../../../.interop-fixtures/zarrow_complex.arrow complex stream
+          go run . validate ../../../.interop-fixtures/zarrow_extension.arrow extension stream
+          go run . validate ../../../.interop-fixtures/zarrow_view.arrow view stream
+          go run . validate ../../../.interop-fixtures/zarrow_file.arrow canonical file
+          go run . validate ../../../.interop-fixtures/zarrow_ree_file.arrow ree file
+          go run . validate ../../../.interop-fixtures/zarrow_ree_int16_file.arrow ree-int16 file
+          go run . validate ../../../.interop-fixtures/zarrow_ree_int64_file.arrow ree-int64 file
+          go run . validate ../../../.interop-fixtures/zarrow_complex_file.arrow complex file
+          go run . validate ../../../.interop-fixtures/zarrow_extension_file.arrow extension file
+          go run . validate ../../../.interop-fixtures/zarrow_view_file.arrow view file
+
+      - name: Validate Arrow Go fixtures with zarrow
+        run: |
+          zig build interop-fixture-check -- .interop-fixtures/arrow_go.arrow canonical stream
+          zig build interop-fixture-check -- .interop-fixtures/arrow_go_dict_delta.arrow dict-delta stream
+          zig build interop-fixture-check -- .interop-fixtures/arrow_go_ree.arrow ree stream
+          zig build interop-fixture-check -- .interop-fixtures/arrow_go_ree_int16.arrow ree-int16 stream
+          zig build interop-fixture-check -- .interop-fixtures/arrow_go_ree_int64.arrow ree-int64 stream
+          zig build interop-fixture-check -- .interop-fixtures/arrow_go_complex.arrow complex stream
+          zig build interop-fixture-check -- .interop-fixtures/arrow_go_extension.arrow extension stream
+          zig build interop-fixture-check -- .interop-fixtures/arrow_go_view.arrow view stream
+          zig build interop-fixture-check -- .interop-fixtures/arrow_go_file.arrow canonical file
+          zig build interop-fixture-check -- .interop-fixtures/arrow_go_ree_file.arrow ree file
+          zig build interop-fixture-check -- .interop-fixtures/arrow_go_ree_int16_file.arrow ree-int16 file
+          zig build interop-fixture-check -- .interop-fixtures/arrow_go_ree_int64_file.arrow ree-int64 file
+          zig build interop-fixture-check -- .interop-fixtures/arrow_go_complex_file.arrow complex file
+          zig build interop-fixture-check -- .interop-fixtures/arrow_go_extension_file.arrow extension file
+          zig build interop-fixture-check -- .interop-fixtures/arrow_go_view_file.arrow view file
+
+  interop-arrow-go-version-smoke:
+    name: IPC Interop Smoke (arrow-go, Go ${{ matrix.go_version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        go_version: ["1.23.x", "1.24.x"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: "0.15.2"
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "${{ matrix.go_version }}"
+
+      - name: Generate zarrow fixture (smoke)
+        run: |
+          mkdir -p .interop-fixtures
+          zig build interop-fixture-writer -- .interop-fixtures/zarrow.arrow canonical stream
+
+      - name: Arrow Go smoke generate + validate
+        working-directory: tools/interop/arrow-go
+        run: |
+          go run . generate ../../../.interop-fixtures/arrow_go.arrow canonical stream
+          go run . validate ../../../.interop-fixtures/zarrow.arrow canonical stream
+
+      - name: Validate Arrow Go fixture with zarrow (smoke)
+        run: |
+          zig build interop-fixture-check -- .interop-fixtures/arrow_go.arrow canonical stream
 
   interop-arrow-cpp:
     name: IPC Interop (zarrow <-> Arrow C++)
