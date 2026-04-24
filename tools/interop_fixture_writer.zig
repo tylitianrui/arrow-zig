@@ -2,15 +2,15 @@ const std = @import("std");
 const zarrow = @import("zarrow");
 
 const WriterAdapter = struct {
-    inner: *std.Io.Writer,
+    file: std.fs.File,
     pub const Error = anyerror;
 
     pub fn writeAll(self: @This(), bytes: []const u8) Error!void {
-        try self.inner.writeAll(bytes);
+        try self.file.writeAll(bytes);
     }
 
     pub fn flush(self: @This()) Error!void {
-        try self.inner.flush();
+        _ = self;
     }
 };
 
@@ -75,9 +75,7 @@ pub fn main() !void {
 
     const file = try std.fs.cwd().createFile(out_path, .{ .truncate = true });
     defer file.close();
-    var io_buf: [4096]u8 = undefined;
-    const fw = file.writer(&io_buf);
-    var writer_adapter = WriterAdapter{ .inner = @constCast(&fw.interface) };
+    var writer_adapter = WriterAdapter{ .file = file };
     switch (container_mode) {
         .stream => {
             var writer = zarrow.IpcStreamWriter(WriterAdapter).init(allocator, writer_adapter);
