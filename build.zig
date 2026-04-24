@@ -104,8 +104,8 @@ pub fn build(b: *std.Build) !void {
     configureIpcCompression(b, tests, &run_compression_deps_check.step);
 
     // Discover example files in the `examples` directory and wire them into the build.
-    const examples_dir = b.pathFromRoot("examples");
-    var dir = std.fs.openDirAbsolute(examples_dir, .{ .iterate = true }) catch |err| {
+    const examples_dir = b.path("examples");
+    var dir = std.fs.cwd().openDir(examples_dir.getPath(b), .{ .iterate = true }) catch |err| {
         std.debug.print("warning: failed to open examples directory: {s}\n", .{@errorName(err)});
         return;
     };
@@ -271,7 +271,7 @@ pub fn build(b: *std.Build) !void {
 
     // Discover benchmark files in `benchmarks` and wire dedicated run steps.
     const benches_dir = b.path("benchmarks");
-    var benches = std.fs.openDirAbsolute(benches_dir.getPath(b), .{ .iterate = true }) catch |err| {
+    var benches = std.fs.cwd().openDir(benches_dir.getPath(b), .{ .iterate = true }) catch |err| {
         std.debug.print("warning: failed to open benchmarks directory: {s}\n", .{@errorName(err)});
         return;
     };
