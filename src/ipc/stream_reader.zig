@@ -1733,7 +1733,14 @@ fn mergeDictionaryValues(
     ) catch |err| switch (err) {
         error.InvalidInput => return StreamError.InvalidMetadata,
         error.UnsupportedType => return StreamError.UnsupportedType,
-        else => return err,
+        error.OutOfMemory => return error.OutOfMemory,
+        error.InvalidBufferCount => return error.InvalidBufferCount,
+        error.BufferTooSmall => return error.BufferTooSmall,
+        error.InvalidOffsetBuffer => return error.InvalidOffsetBuffer,
+        error.InvalidOffsets => return error.InvalidOffsets,
+        error.InvalidNullCount => return error.InvalidNullCount,
+        error.MissingDictionary => return error.MissingDictionary,
+        error.InvalidChildren => return error.InvalidChildren,
     };
 }
 
