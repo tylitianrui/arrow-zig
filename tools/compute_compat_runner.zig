@@ -533,9 +533,8 @@ pub fn main() !void {
         }
     }
 
-    var out_buf: [4096]u8 = undefined;
-    var out_writer = std.fs.File.stdout().writer(&out_buf);
-    try std.json.Stringify.value(Output{ .results = results.items }, .{}, @constCast(&out_writer.interface));
-    try out_writer.interface.writeByte('\n');
-    try out_writer.interface.flush();
+    const stdout_file = std.io.getStdOut();
+    const out_writer = stdout_file.writer();
+    try std.json.stringify(Output{ .results = results.items }, .{}, out_writer);
+    try stdout_file.writeAll("\n");
 }
