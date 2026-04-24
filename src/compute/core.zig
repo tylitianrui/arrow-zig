@@ -359,7 +359,12 @@ pub const KernelSignature = struct {
         return true;
     }
 
+    pub fn isValidArityModel(self: KernelSignature) bool {
+        return self.hasValidArityModel();
+    }
+
     pub fn matchesArity(self: KernelSignature, arg_count: usize) bool {
+        std.debug.assert(self.hasValidArityModel());
         if (!self.hasValidArityModel()) return false;
         return switch (self.arityModel()) {
             .exact => arg_count == self.arity,
@@ -521,6 +526,7 @@ pub const FunctionRegistry = struct {
         kind: FunctionKind,
         kernel: Kernel,
     ) KernelError!void {
+        if (!kernel.signature.isValidArityModel()) return error.InvalidInput;
         if (self.findFunctionIndex(name, kind)) |idx| {
             try self.functions.items[idx].kernels.append(self.allocator, kernel);
             return;
@@ -626,7 +632,22 @@ pub const FunctionRegistry = struct {
         var saw_matching_type = false;
         var best_specificity: u8 = 0;
         var saw_matching_kernel = false;
+        var has_exact = false;
+        var has_range = false;
+        var has_at_least = false;
+        var any_min_gt_arg = false;
+        var any_range_excludes_arg = false;
         for (function.kernels.items) |*kernel| {
+            switch (kernel.signature.arityModel()) {
+                .exact => has_exact = true,
+                .range => has_range = true,
+                .at_least => has_at_least = true,
+            }
+            if (args.len < kernel.signature.arity) any_min_gt_arg = true;
+            if (kernel.signature.arityModel() == .range and !kernel.signature.matchesArity(args.len)) {
+                any_range_excludes_arg = true;
+            }
+
             if (!kernel.signature.matchesArity(args.len)) continue;
             saw_matching_arity = true;
             if (!kernel.signature.matches(args)) continue;
@@ -640,18 +661,10 @@ pub const FunctionRegistry = struct {
         }
         if (saw_matching_kernel) return "kernel resolution should succeed";
         if (!saw_matching_arity) {
-            var has_range = false;
-            var has_at_least = false;
-            for (function.kernels.items) |*kernel| {
-                switch (kernel.signature.arityModel()) {
-                    .exact => {},
-                    .range => has_range = true,
-                    .at_least => has_at_least = true,
-                }
-            }
-            if (has_range) return "no kernel matched arity range";
-            if (has_at_least) return "no kernel matched minimum arity";
-            return "no kernel matched exact arity";
+            if (has_at_least and any_min_gt_arg) return "no kernel matched minimum arity";
+            if (has_range and any_range_excludes_arg) return "no kernel matched arity range";
+            if (has_exact) return "no kernel matched exact arity";
+            return "no kernel matched arity";
         }
         if (saw_matching_type) return "kernel matched args but options were invalid";
         return "no kernel matched argument types";
@@ -1937,6 +1950,73 @@ test "compute kernel resolution keeps InvalidArity InvalidOptions NoMatchingKern
     );
     const range_reason = registry.explainResolveKernelFailure("priority_range", .scalar, four_i32[0..], Options.noneValue());
     try std.testing.expect(std.mem.eql(u8, range_reason, "no kernel matched arity range"));
+}
+
+test "compute explainResolveKernelFailure prefers minimum arity diagnostic in mixed models" {
+    const allocator = std.testing.allocator;
+    var registry = FunctionRegistry.init(allocator);
+    defer registry.deinit();
+
+    try registry.registerScalarKernel("mixed_arity", .{
+        .signature = .{
+            .arity = 3,
+            .variadic = true,
+            .type_check = allInt32Datums,
+        },
+        .exec = atLeastArityMarkerKernel,
+    });
+    try registry.registerScalarKernel("mixed_arity", .{
+        .signature = .{
+            .arity = 5,
+            .variadic = true,
+            .max_arity = 7,
+            .type_check = allInt32Datums,
+        },
+        .exec = rangeArityMarkerKernel,
+    });
+
+    const two_i32 = [_]Datum{
+        Datum.fromScalar(.{ .data_type = .{ .int32 = {} }, .value = .{ .i32 = 1 } }),
+        Datum.fromScalar(.{ .data_type = .{ .int32 = {} }, .value = .{ .i32 = 2 } }),
+    };
+    try std.testing.expectError(
+        error.InvalidArity,
+        registry.resolveKernel("mixed_arity", .scalar, two_i32[0..], Options.noneValue()),
+    );
+    const reason = registry.explainResolveKernelFailure("mixed_arity", .scalar, two_i32[0..], Options.noneValue());
+    try std.testing.expect(std.mem.eql(u8, reason, "no kernel matched minimum arity"));
+}
+
+test "compute registerKernel rejects invalid arity model combinations" {
+    const allocator = std.testing.allocator;
+    var registry = FunctionRegistry.init(allocator);
+    defer registry.deinit();
+
+    try std.testing.expectError(
+        error.InvalidInput,
+        registry.registerScalarKernel("invalid_sig_non_variadic_max", .{
+            .signature = .{
+                .arity = 2,
+                .variadic = false,
+                .max_arity = 3,
+                .type_check = allInt32Datums,
+            },
+            .exec = exactArityMarkerKernel,
+        }),
+    );
+
+    try std.testing.expectError(
+        error.InvalidInput,
+        registry.registerScalarKernel("invalid_sig_reversed_range", .{
+            .signature = .{
+                .arity = 4,
+                .variadic = true,
+                .max_arity = 3,
+                .type_check = allInt32Datums,
+            },
+            .exec = rangeArityMarkerKernel,
+        }),
+    );
 }
 
 test "compute kernel signature result type inference and typed options" {

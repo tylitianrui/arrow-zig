@@ -10,6 +10,7 @@ Built for people who want Arrow in a systems language with explicit control, pre
 
 ## Highlights
 
+
 - Core Apache Arrow memory model in Zig
 - Builders for constructing Arrow arrays
 - Layout validation for safer data handling
