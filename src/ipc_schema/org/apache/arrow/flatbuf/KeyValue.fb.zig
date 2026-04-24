@@ -31,7 +31,7 @@ pub const KeyValueT = struct {
 
     pub fn Pack(rcv: KeyValueT, __builder: *Builder, __pack_opts: fb.common.PackOptions) fb.common.PackError!u32 {
         _ = .{__pack_opts};
-        var __tmp_offsets = std.ArrayList(u32){};
+        var __tmp_offsets = std.ArrayListUnmanaged(u32){};
         defer if (__pack_opts.allocator) |alloc| __tmp_offsets.deinit(alloc);
         const key_off = if (rcv.key.len != 0) try __builder.createString(rcv.key) else 0;
 

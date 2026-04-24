@@ -112,7 +112,7 @@ pub fn importRecordBatchStreamOwned(allocator: std.mem.Allocator, c_stream: *Arr
 
     const top_level_type = DataType{ .struct_ = .{ .fields = schema_owned.schema.fields } };
 
-    var out_batches = std.ArrayList(RecordBatch){};
+    var out_batches = std.ArrayListUnmanaged(RecordBatch){};
     errdefer {
         for (out_batches.items) |*batch| {
             batch.deinit();

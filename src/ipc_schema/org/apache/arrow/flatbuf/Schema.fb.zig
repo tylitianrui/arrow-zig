@@ -37,14 +37,14 @@ pub const SchemaT = struct {
     /// it is Little Endian by default
     /// if endianness doesn't match the underlying system then the vectors need to be converted
     endianness: org.apache.arrow.flatbuf.Endianness = @as(org.apache.arrow.flatbuf.Endianness, @enumFromInt(0)),
-    fields: std.ArrayList(org.apache.arrow.flatbuf.FieldT) = .{},
-    custom_metadata: std.ArrayList(org.apache.arrow.flatbuf.KeyValueT) = .{},
+    fields: std.ArrayListUnmanaged(org.apache.arrow.flatbuf.FieldT) = .{},
+    custom_metadata: std.ArrayListUnmanaged(org.apache.arrow.flatbuf.KeyValueT) = .{},
     /// Features used in the stream/file.
-    features: std.ArrayList(i64) = .{},
+    features: std.ArrayListUnmanaged(i64) = .{},
 
     pub fn Pack(rcv: SchemaT, __builder: *Builder, __pack_opts: fb.common.PackOptions) fb.common.PackError!u32 {
         _ = .{__pack_opts};
-        var __tmp_offsets = std.ArrayList(u32){};
+        var __tmp_offsets = std.ArrayListUnmanaged(u32){};
         defer if (__pack_opts.allocator) |alloc| __tmp_offsets.deinit(alloc);
         var fields_off: u32 = 0;
         if (rcv.fields.items.len != 0) {
@@ -108,7 +108,7 @@ pub const SchemaT = struct {
         t.endianness = rcv.Endianness();
 
         const fields_len = rcv.FieldsLen();
-        t.fields = try std.ArrayList(org.apache.arrow.flatbuf.FieldT).initCapacity(__pack_opts.allocator.?, @as(u32, @bitCast(fields_len)));
+        t.fields = try std.ArrayListUnmanaged(org.apache.arrow.flatbuf.FieldT).initCapacity(__pack_opts.allocator.?, @as(u32, @bitCast(fields_len)));
         t.fields.expandToCapacity();
         {
             var j: u32 = 0;
@@ -119,7 +119,7 @@ pub const SchemaT = struct {
         }
 
         const custom_metadata_len = rcv.CustomMetadataLen();
-        t.custom_metadata = try std.ArrayList(org.apache.arrow.flatbuf.KeyValueT).initCapacity(__pack_opts.allocator.?, @as(u32, @bitCast(custom_metadata_len)));
+        t.custom_metadata = try std.ArrayListUnmanaged(org.apache.arrow.flatbuf.KeyValueT).initCapacity(__pack_opts.allocator.?, @as(u32, @bitCast(custom_metadata_len)));
         t.custom_metadata.expandToCapacity();
         {
             var j: u32 = 0;
@@ -130,7 +130,7 @@ pub const SchemaT = struct {
         }
 
         const features_len = rcv.FeaturesLen();
-        t.features = try std.ArrayList(i64).initCapacity(__pack_opts.allocator.?, @as(u32, @bitCast(features_len)));
+        t.features = try std.ArrayListUnmanaged(i64).initCapacity(__pack_opts.allocator.?, @as(u32, @bitCast(features_len)));
         t.features.expandToCapacity();
         {
             var j: u32 = 0;

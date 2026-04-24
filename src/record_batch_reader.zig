@@ -35,7 +35,7 @@ pub const RecordBatchReader = struct {
     /// Drain the stream and return all record batches.
     /// Caller owns each batch in the returned slice and must call `deinit`.
     pub fn readAll(self: Self, allocator: std.mem.Allocator) anyerror![]RecordBatch {
-        var out: std.ArrayList(RecordBatch) = .{};
+        var out: std.ArrayListUnmanaged(RecordBatch) = .{};
         defer out.deinit(allocator);
         errdefer {
             for (out.items) |*batch| {

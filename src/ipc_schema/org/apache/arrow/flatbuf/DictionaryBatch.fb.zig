@@ -40,7 +40,7 @@ pub const DictionaryBatchT = struct {
 
     pub fn Pack(rcv: DictionaryBatchT, __builder: *Builder, __pack_opts: fb.common.PackOptions) fb.common.PackError!u32 {
         _ = .{__pack_opts};
-        var __tmp_offsets = std.ArrayList(u32){};
+        var __tmp_offsets = std.ArrayListUnmanaged(u32){};
         defer if (__pack_opts.allocator) |alloc| __tmp_offsets.deinit(alloc);
         const data_off = if (rcv.data) |x| try x.Pack(__builder, __pack_opts) else 0;
 

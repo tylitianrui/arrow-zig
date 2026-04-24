@@ -29,11 +29,11 @@ const org = struct {
 /// for each child `typeIds[offset]` is the id used in the type vector
 pub const UnionT = struct {
     mode: org.apache.arrow.flatbuf.UnionMode = @as(org.apache.arrow.flatbuf.UnionMode, @enumFromInt(0)),
-    typeIds: std.ArrayList(i32) = .{},
+    typeIds: std.ArrayListUnmanaged(i32) = .{},
 
     pub fn Pack(rcv: UnionT, __builder: *Builder, __pack_opts: fb.common.PackOptions) fb.common.PackError!u32 {
         _ = .{__pack_opts};
-        var __tmp_offsets = std.ArrayList(u32){};
+        var __tmp_offsets = std.ArrayListUnmanaged(u32){};
         defer if (__pack_opts.allocator) |alloc| __tmp_offsets.deinit(alloc);
         var typeIds_off: u32 = 0;
         if (rcv.typeIds.items.len != 0) {
@@ -59,7 +59,7 @@ pub const UnionT = struct {
         t.mode = rcv.Mode();
 
         const typeIds_len = rcv.TypeIdsLen();
-        t.typeIds = try std.ArrayList(i32).initCapacity(__pack_opts.allocator.?, @as(u32, @bitCast(typeIds_len)));
+        t.typeIds = try std.ArrayListUnmanaged(i32).initCapacity(__pack_opts.allocator.?, @as(u32, @bitCast(typeIds_len)));
         t.typeIds.expandToCapacity();
         {
             var j: u32 = 0;

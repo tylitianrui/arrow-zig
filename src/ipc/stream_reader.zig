@@ -1590,14 +1590,15 @@ fn decompressZstdPayload(
     payload: []const u8,
     expected_len: usize,
 ) (StreamError || error{OutOfMemory})!array_data.SharedBuffer {
-    var out: std.Io.Writer.Allocating = .init(allocator);
-    defer out.deinit();
+    const window_buffer = try allocator.alloc(u8, 1 << 23);
+    defer allocator.free(window_buffer);
 
-    var in: std.Io.Reader = .fixed(payload);
-    var zstd_stream: std.compress.zstd.Decompress = .init(&in, &.{}, .{});
-    _ = zstd_stream.reader.streamRemaining(&out.writer) catch return StreamError.InvalidBody;
-
-    const decoded = try out.toOwnedSlice();
+    var in_stream = std.io.fixedBufferStream(payload);
+    var zstd_stream = std.compress.zstd.decompressor(in_stream.reader(), .{ .window_buffer = window_buffer });
+    const decoded = zstd_stream.reader().readAllAlloc(allocator, expected_len) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return StreamError.InvalidBody,
+    };
     defer allocator.free(decoded);
     if (decoded.len != expected_len) return StreamError.InvalidBody;
 
@@ -2472,7 +2473,7 @@ test "ipc schema decodes extension metadata into extension datatype" {
     const int_t = try allocator.create(fbs.IntT);
     int_t.* = .{ .bitWidth = 32, .is_signed = true };
 
-    var custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 3);
+    var custom_metadata = try std.ArrayListUnmanaged(fbs.KeyValueT).initCapacity(allocator, 3);
     try custom_metadata.append(allocator, .{ .key = extension_name_key, .value = "com.example.int32_ext" });
     try custom_metadata.append(allocator, .{ .key = extension_metadata_key, .value = "v1" });
     try custom_metadata.append(allocator, .{ .key = "owner", .value = "core" });
@@ -2482,7 +2483,7 @@ test "ipc schema decodes extension metadata into extension datatype" {
         .nullable = true,
         .type = .{ .Int = int_t },
         .dictionary = null,
-        .children = try std.ArrayList(fbs.FieldT).initCapacity(allocator, 0),
+        .children = try std.ArrayListUnmanaged(fbs.FieldT).initCapacity(allocator, 0),
         .custom_metadata = custom_metadata,
     };
     defer field.deinit(allocator);
@@ -2505,7 +2506,7 @@ test "ipc schema rejects extension metadata without extension name" {
     const int_t = try allocator.create(fbs.IntT);
     int_t.* = .{ .bitWidth = 32, .is_signed = true };
 
-    var custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 1);
+    var custom_metadata = try std.ArrayListUnmanaged(fbs.KeyValueT).initCapacity(allocator, 1);
     try custom_metadata.append(allocator, .{ .key = extension_metadata_key, .value = "v1" });
 
     var field = fbs.FieldT{
@@ -2513,7 +2514,7 @@ test "ipc schema rejects extension metadata without extension name" {
         .nullable = true,
         .type = .{ .Int = int_t },
         .dictionary = null,
-        .children = try std.ArrayList(fbs.FieldT).initCapacity(allocator, 0),
+        .children = try std.ArrayListUnmanaged(fbs.FieldT).initCapacity(allocator, 0),
         .custom_metadata = custom_metadata,
     };
     defer field.deinit(allocator);
@@ -2532,8 +2533,8 @@ test "ipc schema rejects fixed-size-binary metadata with non-positive width" {
         .nullable = true,
         .type = .{ .FixedSizeBinary = fsb_t },
         .dictionary = null,
-        .children = try std.ArrayList(fbs.FieldT).initCapacity(allocator, 0),
-        .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0),
+        .children = try std.ArrayListUnmanaged(fbs.FieldT).initCapacity(allocator, 0),
+        .custom_metadata = try std.ArrayListUnmanaged(fbs.KeyValueT).initCapacity(allocator, 0),
     };
     defer field.deinit(allocator);
 
@@ -2561,8 +2562,8 @@ test "ipc schema rejects dictionary index metadata with invalid bit width" {
         .nullable = true,
         .type = .{ .Int = int_t },
         .dictionary = dict_t,
-        .children = try std.ArrayList(fbs.FieldT).initCapacity(allocator, 0),
-        .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0),
+        .children = try std.ArrayListUnmanaged(fbs.FieldT).initCapacity(allocator, 0),
+        .custom_metadata = try std.ArrayListUnmanaged(fbs.KeyValueT).initCapacity(allocator, 0),
     };
     defer field.deinit(allocator);
 
@@ -2590,8 +2591,8 @@ test "ipc schema rejects dictionary index metadata with unsigned index type" {
         .nullable = true,
         .type = .{ .Int = int_t },
         .dictionary = dict_t,
-        .children = try std.ArrayList(fbs.FieldT).initCapacity(allocator, 0),
-        .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0),
+        .children = try std.ArrayListUnmanaged(fbs.FieldT).initCapacity(allocator, 0),
+        .custom_metadata = try std.ArrayListUnmanaged(fbs.KeyValueT).initCapacity(allocator, 0),
     };
     defer field.deinit(allocator);
 
@@ -2625,8 +2626,8 @@ test "ipc schema rejects decimal metadata precision outside allowed range" {
             .nullable = true,
             .type = .{ .Decimal = dec_t },
             .dictionary = null,
-            .children = try std.ArrayList(fbs.FieldT).initCapacity(allocator, 0),
-            .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0),
+            .children = try std.ArrayListUnmanaged(fbs.FieldT).initCapacity(allocator, 0),
+            .custom_metadata = try std.ArrayListUnmanaged(fbs.KeyValueT).initCapacity(allocator, 0),
         };
         defer field.deinit(allocator);
 
@@ -2659,8 +2660,8 @@ test "ipc schema rejects time metadata with invalid unit for bit width" {
             .nullable = true,
             .type = .{ .Time = time_t },
             .dictionary = null,
-            .children = try std.ArrayList(fbs.FieldT).initCapacity(allocator, 0),
-            .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0),
+            .children = try std.ArrayListUnmanaged(fbs.FieldT).initCapacity(allocator, 0),
+            .custom_metadata = try std.ArrayListUnmanaged(fbs.KeyValueT).initCapacity(allocator, 0),
         };
         defer field.deinit(allocator);
 
@@ -2678,8 +2679,8 @@ test "ipc schema rejects run-end-encoded metadata with unsigned run-end type" {
         .nullable = false,
         .type = .{ .Int = run_end_int },
         .dictionary = null,
-        .children = try std.ArrayList(fbs.FieldT).initCapacity(allocator, 0),
-        .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0),
+        .children = try std.ArrayListUnmanaged(fbs.FieldT).initCapacity(allocator, 0),
+        .custom_metadata = try std.ArrayListUnmanaged(fbs.KeyValueT).initCapacity(allocator, 0),
     };
 
     const value_int = try allocator.create(fbs.IntT);
@@ -2689,14 +2690,14 @@ test "ipc schema rejects run-end-encoded metadata with unsigned run-end type" {
         .nullable = true,
         .type = .{ .Int = value_int },
         .dictionary = null,
-        .children = try std.ArrayList(fbs.FieldT).initCapacity(allocator, 0),
-        .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0),
+        .children = try std.ArrayListUnmanaged(fbs.FieldT).initCapacity(allocator, 0),
+        .custom_metadata = try std.ArrayListUnmanaged(fbs.KeyValueT).initCapacity(allocator, 0),
     };
 
     const ree_t = try allocator.create(fbs.RunEndEncodedT);
     ree_t.* = .{};
 
-    var children = try std.ArrayList(fbs.FieldT).initCapacity(allocator, 2);
+    var children = try std.ArrayListUnmanaged(fbs.FieldT).initCapacity(allocator, 2);
     try children.append(allocator, run_end_field);
     try children.append(allocator, value_field);
 
@@ -2706,7 +2707,7 @@ test "ipc schema rejects run-end-encoded metadata with unsigned run-end type" {
         .type = .{ .RunEndEncoded = ree_t },
         .dictionary = null,
         .children = children,
-        .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0),
+        .custom_metadata = try std.ArrayListUnmanaged(fbs.KeyValueT).initCapacity(allocator, 0),
     };
     defer field.deinit(allocator);
 
@@ -2723,8 +2724,8 @@ test "ipc schema rejects map metadata with nullable entries field" {
         .nullable = false,
         .type = .{ .Int = int_t },
         .dictionary = null,
-        .children = try std.ArrayList(fbs.FieldT).initCapacity(allocator, 0),
-        .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0),
+        .children = try std.ArrayListUnmanaged(fbs.FieldT).initCapacity(allocator, 0),
+        .custom_metadata = try std.ArrayListUnmanaged(fbs.KeyValueT).initCapacity(allocator, 0),
     };
 
     const val_t = try allocator.create(fbs.IntT);
@@ -2734,13 +2735,13 @@ test "ipc schema rejects map metadata with nullable entries field" {
         .nullable = true,
         .type = .{ .Int = val_t },
         .dictionary = null,
-        .children = try std.ArrayList(fbs.FieldT).initCapacity(allocator, 0),
-        .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0),
+        .children = try std.ArrayListUnmanaged(fbs.FieldT).initCapacity(allocator, 0),
+        .custom_metadata = try std.ArrayListUnmanaged(fbs.KeyValueT).initCapacity(allocator, 0),
     };
 
     const struct_t = try allocator.create(fbs.Struct_T);
     struct_t.* = .{};
-    var entries_children = try std.ArrayList(fbs.FieldT).initCapacity(allocator, 2);
+    var entries_children = try std.ArrayListUnmanaged(fbs.FieldT).initCapacity(allocator, 2);
     try entries_children.append(allocator, key_field);
     try entries_children.append(allocator, value_field);
     const entries_field = fbs.FieldT{
@@ -2749,12 +2750,12 @@ test "ipc schema rejects map metadata with nullable entries field" {
         .type = .{ .Struct_ = struct_t },
         .dictionary = null,
         .children = entries_children,
-        .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0),
+        .custom_metadata = try std.ArrayListUnmanaged(fbs.KeyValueT).initCapacity(allocator, 0),
     };
 
     const map_t = try allocator.create(fbs.MapT);
     map_t.* = .{ .keysSorted = false };
-    var map_children = try std.ArrayList(fbs.FieldT).initCapacity(allocator, 1);
+    var map_children = try std.ArrayListUnmanaged(fbs.FieldT).initCapacity(allocator, 1);
     try map_children.append(allocator, entries_field);
     var map_field = fbs.FieldT{
         .name = "map_col",
@@ -2762,7 +2763,7 @@ test "ipc schema rejects map metadata with nullable entries field" {
         .type = .{ .Map = map_t },
         .dictionary = null,
         .children = map_children,
-        .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0),
+        .custom_metadata = try std.ArrayListUnmanaged(fbs.KeyValueT).initCapacity(allocator, 0),
     };
     defer map_field.deinit(allocator);
 
@@ -2779,14 +2780,14 @@ test "ipc schema rejects fixed-size-list metadata with negative list size" {
         .nullable = true,
         .type = .{ .Int = child_int },
         .dictionary = null,
-        .children = try std.ArrayList(fbs.FieldT).initCapacity(allocator, 0),
-        .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0),
+        .children = try std.ArrayListUnmanaged(fbs.FieldT).initCapacity(allocator, 0),
+        .custom_metadata = try std.ArrayListUnmanaged(fbs.KeyValueT).initCapacity(allocator, 0),
     };
 
     const fsl_t = try allocator.create(fbs.FixedSizeListT);
     fsl_t.* = .{ .listSize = -1 };
 
-    var children = try std.ArrayList(fbs.FieldT).initCapacity(allocator, 1);
+    var children = try std.ArrayListUnmanaged(fbs.FieldT).initCapacity(allocator, 1);
     try children.append(allocator, child_field);
     var field = fbs.FieldT{
         .name = "bad_fsl",
@@ -2794,7 +2795,7 @@ test "ipc schema rejects fixed-size-list metadata with negative list size" {
         .type = .{ .FixedSizeList = fsl_t },
         .dictionary = null,
         .children = children,
-        .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0),
+        .custom_metadata = try std.ArrayListUnmanaged(fbs.KeyValueT).initCapacity(allocator, 0),
     };
     defer field.deinit(allocator);
 
@@ -2811,14 +2812,14 @@ test "ipc schema accepts list-view metadata with one child" {
         .nullable = true,
         .type = .{ .Int = child_int },
         .dictionary = null,
-        .children = try std.ArrayList(fbs.FieldT).initCapacity(allocator, 0),
-        .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0),
+        .children = try std.ArrayListUnmanaged(fbs.FieldT).initCapacity(allocator, 0),
+        .custom_metadata = try std.ArrayListUnmanaged(fbs.KeyValueT).initCapacity(allocator, 0),
     };
 
     const lv_t = try allocator.create(fbs.ListViewT);
     lv_t.* = .{};
 
-    var children = try std.ArrayList(fbs.FieldT).initCapacity(allocator, 1);
+    var children = try std.ArrayListUnmanaged(fbs.FieldT).initCapacity(allocator, 1);
     try children.append(allocator, child_field);
     var field = fbs.FieldT{
         .name = "lv",
@@ -2826,7 +2827,7 @@ test "ipc schema accepts list-view metadata with one child" {
         .type = .{ .ListView = lv_t },
         .dictionary = null,
         .children = children,
-        .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0),
+        .custom_metadata = try std.ArrayListUnmanaged(fbs.KeyValueT).initCapacity(allocator, 0),
     };
     defer field.deinit(allocator);
 
@@ -2869,7 +2870,7 @@ test "ipc stream roundtrip schema and batch" {
     var batch = try RecordBatch.initBorrowed(allocator, schema, &[_]ArrayRef{ int_ref, str_ref });
     defer batch.deinit();
 
-    var out_buf = std.array_list.Managed(u8).init(allocator);
+    var out_buf = std.ArrayList(u8).init(allocator);
     defer out_buf.deinit();
 
     var writer = @import("stream_writer.zig").StreamWriter(@TypeOf(out_buf.writer())).init(allocator, out_buf.writer());
@@ -2925,7 +2926,7 @@ test "ipc stream roundtrip large string and binary" {
     var batch = try RecordBatch.initBorrowed(allocator, schema, &[_]ArrayRef{ ls_ref, lb_ref });
     defer batch.deinit();
 
-    var out_buf = std.array_list.Managed(u8).init(allocator);
+    var out_buf = std.ArrayList(u8).init(allocator);
     defer out_buf.deinit();
 
     var writer = @import("stream_writer.zig").StreamWriter(@TypeOf(out_buf.writer())).init(allocator, out_buf.writer());
@@ -2989,7 +2990,7 @@ test "ipc stream roundtrip temporal and decimal primitives" {
     var batch = try RecordBatch.initBorrowed(allocator, schema, &[_]ArrayRef{ date_ref, ts_ref, dec_ref });
     defer batch.deinit();
 
-    var out_buf = std.array_list.Managed(u8).init(allocator);
+    var out_buf = std.ArrayList(u8).init(allocator);
     defer out_buf.deinit();
 
     var writer = @import("stream_writer.zig").StreamWriter(@TypeOf(out_buf.writer())).init(allocator, out_buf.writer());
@@ -3064,7 +3065,7 @@ test "ipc stream roundtrip dictionary encoded string column" {
     var batch = try RecordBatch.initBorrowed(allocator, schema, &[_]ArrayRef{dict_col});
     defer batch.deinit();
 
-    var out_buf = std.array_list.Managed(u8).init(allocator);
+    var out_buf = std.ArrayList(u8).init(allocator);
     defer out_buf.deinit();
 
     var writer = @import("stream_writer.zig").StreamWriter(@TypeOf(out_buf.writer())).init(allocator, out_buf.writer());
@@ -3114,16 +3115,16 @@ test "ipc reader merges dictionary delta batches" {
     };
     const schema = Schema{ .fields = fields[0..] };
 
-    var out = std.array_list.Managed(u8).init(allocator);
+    var out = std.ArrayList(u8).init(allocator);
     defer out.deinit();
 
     var writer = @import("stream_writer.zig").StreamWriter(@TypeOf(out.writer())).init(allocator, out.writer());
     defer writer.deinit();
     try writer.writeSchema(schema);
 
-    var dict1_nodes = try std.ArrayList(fbs.FieldNodeT).initCapacity(allocator, 0);
+    var dict1_nodes = try std.ArrayListUnmanaged(fbs.FieldNodeT).initCapacity(allocator, 0);
     try dict1_nodes.append(allocator, .{ .length = 2, .null_count = 0 });
-    var dict1_buffers = try std.ArrayList(fbs.BufferT).initCapacity(allocator, 0);
+    var dict1_buffers = try std.ArrayListUnmanaged(fbs.BufferT).initCapacity(allocator, 0);
     try dict1_buffers.append(allocator, .{ .offset = 0, .length = 0 });
     try dict1_buffers.append(allocator, .{ .offset = 0, .length = 12 });
     try dict1_buffers.append(allocator, .{ .offset = 12, .length = 7 });
@@ -3132,7 +3133,7 @@ test "ipc reader merges dictionary delta batches" {
         .length = 2,
         .nodes = dict1_nodes,
         .buffers = dict1_buffers,
-        .variadicBufferCounts = try std.ArrayList(i64).initCapacity(allocator, 0),
+        .variadicBufferCounts = try std.ArrayListUnmanaged(i64).initCapacity(allocator, 0),
     };
     const dict1_batch = try allocator.create(fbs.DictionaryBatchT);
     dict1_batch.* = .{
@@ -3144,7 +3145,7 @@ test "ipc reader merges dictionary delta batches" {
         .version = .V5,
         .header = .{ .DictionaryBatch = dict1_batch },
         .bodyLength = 19,
-        .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0),
+        .custom_metadata = try std.ArrayListUnmanaged(fbs.KeyValueT).initCapacity(allocator, 0),
     };
     defer msg_dict1.deinit(allocator);
     const dict1_body = [_]u8{
@@ -3156,9 +3157,9 @@ test "ipc reader merges dictionary delta batches" {
     };
     try appendEncodedMessage(allocator, out.writer(), msg_dict1, &dict1_body);
 
-    var dict2_nodes = try std.ArrayList(fbs.FieldNodeT).initCapacity(allocator, 0);
+    var dict2_nodes = try std.ArrayListUnmanaged(fbs.FieldNodeT).initCapacity(allocator, 0);
     try dict2_nodes.append(allocator, .{ .length = 1, .null_count = 0 });
-    var dict2_buffers = try std.ArrayList(fbs.BufferT).initCapacity(allocator, 0);
+    var dict2_buffers = try std.ArrayListUnmanaged(fbs.BufferT).initCapacity(allocator, 0);
     try dict2_buffers.append(allocator, .{ .offset = 0, .length = 0 });
     try dict2_buffers.append(allocator, .{ .offset = 0, .length = 8 });
     try dict2_buffers.append(allocator, .{ .offset = 8, .length = 5 });
@@ -3167,7 +3168,7 @@ test "ipc reader merges dictionary delta batches" {
         .length = 1,
         .nodes = dict2_nodes,
         .buffers = dict2_buffers,
-        .variadicBufferCounts = try std.ArrayList(i64).initCapacity(allocator, 0),
+        .variadicBufferCounts = try std.ArrayListUnmanaged(i64).initCapacity(allocator, 0),
     };
     const dict2_batch = try allocator.create(fbs.DictionaryBatchT);
     dict2_batch.* = .{
@@ -3179,7 +3180,7 @@ test "ipc reader merges dictionary delta batches" {
         .version = .V5,
         .header = .{ .DictionaryBatch = dict2_batch },
         .bodyLength = 13,
-        .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0),
+        .custom_metadata = try std.ArrayListUnmanaged(fbs.KeyValueT).initCapacity(allocator, 0),
     };
     defer msg_dict2.deinit(allocator);
     const dict2_body = [_]u8{
@@ -3190,9 +3191,9 @@ test "ipc reader merges dictionary delta batches" {
     };
     try appendEncodedMessage(allocator, out.writer(), msg_dict2, &dict2_body);
 
-    var rb_nodes = try std.ArrayList(fbs.FieldNodeT).initCapacity(allocator, 0);
+    var rb_nodes = try std.ArrayListUnmanaged(fbs.FieldNodeT).initCapacity(allocator, 0);
     try rb_nodes.append(allocator, .{ .length = 2, .null_count = 0 });
-    var rb_buffers = try std.ArrayList(fbs.BufferT).initCapacity(allocator, 0);
+    var rb_buffers = try std.ArrayListUnmanaged(fbs.BufferT).initCapacity(allocator, 0);
     try rb_buffers.append(allocator, .{ .offset = 0, .length = 0 });
     try rb_buffers.append(allocator, .{ .offset = 0, .length = 8 });
     const rb_ptr = try allocator.create(fbs.RecordBatchT);
@@ -3200,13 +3201,13 @@ test "ipc reader merges dictionary delta batches" {
         .length = 2,
         .nodes = rb_nodes,
         .buffers = rb_buffers,
-        .variadicBufferCounts = try std.ArrayList(i64).initCapacity(allocator, 0),
+        .variadicBufferCounts = try std.ArrayListUnmanaged(i64).initCapacity(allocator, 0),
     };
     var msg_rb = fbs.MessageT{
         .version = .V5,
         .header = .{ .RecordBatch = rb_ptr },
         .bodyLength = 8,
-        .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0),
+        .custom_metadata = try std.ArrayListUnmanaged(fbs.KeyValueT).initCapacity(allocator, 0),
     };
     defer msg_rb.deinit(allocator);
     const rb_body = [_]u8{
@@ -3416,7 +3417,7 @@ test "ipc stream roundtrip map int32 to int32" {
     var batch = try RecordBatch.initBorrowed(allocator, schema, &[_]ArrayRef{map_ref});
     defer batch.deinit();
 
-    var out_buf = std.array_list.Managed(u8).init(allocator);
+    var out_buf = std.ArrayList(u8).init(allocator);
     defer out_buf.deinit();
 
     var writer = @import("stream_writer.zig").StreamWriter(@TypeOf(out_buf.writer())).init(allocator, out_buf.writer());
@@ -3506,7 +3507,7 @@ test "ipc stream roundtrip sparse union int32/bool" {
     var batch = try RecordBatch.initBorrowed(allocator, schema, &[_]ArrayRef{union_ref});
     defer batch.deinit();
 
-    var out_buf = std.array_list.Managed(u8).init(allocator);
+    var out_buf = std.ArrayList(u8).init(allocator);
     defer out_buf.deinit();
 
     var writer = @import("stream_writer.zig").StreamWriter(@TypeOf(out_buf.writer())).init(allocator, out_buf.writer());
@@ -3592,7 +3593,7 @@ test "ipc stream roundtrip sparse union int32/bool with metadata version V4" {
     var batch = try RecordBatch.initBorrowed(allocator, schema, &[_]ArrayRef{union_ref});
     defer batch.deinit();
 
-    var out_buf = std.array_list.Managed(u8).init(allocator);
+    var out_buf = std.ArrayList(u8).init(allocator);
     defer out_buf.deinit();
 
     var writer = @import("stream_writer.zig").StreamWriter(@TypeOf(out_buf.writer())).initWithOptions(
@@ -3679,7 +3680,7 @@ test "ipc stream roundtrip dense union int32/bool" {
     var batch = try RecordBatch.initBorrowed(allocator, schema, &[_]ArrayRef{union_ref});
     defer batch.deinit();
 
-    var out_buf = std.array_list.Managed(u8).init(allocator);
+    var out_buf = std.ArrayList(u8).init(allocator);
     defer out_buf.deinit();
 
     var writer = @import("stream_writer.zig").StreamWriter(@TypeOf(out_buf.writer())).init(allocator, out_buf.writer());
@@ -3765,7 +3766,7 @@ test "ipc stream roundtrip dense union int32/bool with metadata version V4" {
     var batch = try RecordBatch.initBorrowed(allocator, schema, &[_]ArrayRef{union_ref});
     defer batch.deinit();
 
-    var out_buf = std.array_list.Managed(u8).init(allocator);
+    var out_buf = std.ArrayList(u8).init(allocator);
     defer out_buf.deinit();
 
     var writer = @import("stream_writer.zig").StreamWriter(@TypeOf(out_buf.writer())).initWithOptions(
@@ -3847,7 +3848,7 @@ test "ipc stream roundtrip run-end encoded int32 values" {
     var batch = try RecordBatch.initBorrowed(allocator, schema, &[_]ArrayRef{ree_ref});
     defer batch.deinit();
 
-    var out_buf = std.array_list.Managed(u8).init(allocator);
+    var out_buf = std.ArrayList(u8).init(allocator);
     defer out_buf.deinit();
 
     var writer = @import("stream_writer.zig").StreamWriter(@TypeOf(out_buf.writer())).init(allocator, out_buf.writer());
@@ -3907,7 +3908,7 @@ test "ipc reader handles body compression framing for zstd and lz4 codecs" {
         var batch = try RecordBatch.initBorrowed(allocator, schema, &[_]ArrayRef{col});
         defer batch.deinit();
 
-        var out = std.array_list.Managed(u8).init(allocator);
+        var out = std.ArrayList(u8).init(allocator);
         defer out.deinit();
         var writer = @import("stream_writer.zig").StreamWriter(@TypeOf(out.writer())).initWithBodyCompression(allocator, out.writer(), codec);
         defer writer.deinit();
@@ -3955,9 +3956,9 @@ test "ipc reader decodes real lz4 frame payload for compressed record batch body
         rb.deinit(allocator);
         allocator.destroy(rb);
     }
-    var nodes = try std.ArrayList(fbs.FieldNodeT).initCapacity(allocator, 1);
+    var nodes = try std.ArrayListUnmanaged(fbs.FieldNodeT).initCapacity(allocator, 1);
     try nodes.append(allocator, .{ .length = 2, .null_count = 0 });
-    var buffers = try std.ArrayList(fbs.BufferT).initCapacity(allocator, 2);
+    var buffers = try std.ArrayListUnmanaged(fbs.BufferT).initCapacity(allocator, 2);
     try buffers.append(allocator, .{ .offset = 0, .length = 0 });
     try buffers.append(allocator, .{ .offset = 0, .length = @intCast(compressed_len) });
     const compression = try allocator.create(fbs.BodyCompressionT);
@@ -3967,7 +3968,7 @@ test "ipc reader decodes real lz4 frame payload for compressed record batch body
         .nodes = nodes,
         .buffers = buffers,
         .compression = compression,
-        .variadicBufferCounts = try std.ArrayList(i64).initCapacity(allocator, 0),
+        .variadicBufferCounts = try std.ArrayListUnmanaged(i64).initCapacity(allocator, 0),
     };
 
     var decoded = try decodeRecordBatchBody(allocator, rb, body);
@@ -3980,7 +3981,7 @@ test "ipc reader decodes real lz4 frame payload for compressed record batch body
 test "ipc reader decodes tensor message via tensor-like API" {
     const allocator = std.testing.allocator;
 
-    var bytes = std.ArrayList(u8){};
+    var bytes = std.ArrayListUnmanaged(u8){};
     defer bytes.deinit(allocator);
 
     try appendTensorMessageForTest(allocator, bytes.writer(allocator));
@@ -4017,7 +4018,7 @@ test "ipc reader decodes tensor message via tensor-like API" {
 test "ipc reader decodes sparse tensor message via tensor-like API" {
     const allocator = std.testing.allocator;
 
-    var bytes = std.ArrayList(u8){};
+    var bytes = std.ArrayListUnmanaged(u8){};
     defer bytes.deinit(allocator);
 
     try appendSparseTensorMessageForTest(allocator, bytes.writer(allocator));
@@ -4087,7 +4088,7 @@ test "ipc schema roundtrip preserves field and schema metadata" {
         .metadata = schema_md[0..],
     };
 
-    var out_buf = std.array_list.Managed(u8).init(allocator);
+    var out_buf = std.ArrayList(u8).init(allocator);
     defer out_buf.deinit();
     var writer = @import("stream_writer.zig").StreamWriter(@TypeOf(out_buf.writer())).init(allocator, out_buf.writer());
     defer writer.deinit();
@@ -4136,9 +4137,9 @@ test "ipc schema metadata serialization is stable for identical input" {
     };
     const schema = Schema{ .fields = fields[0..], .metadata = schema_md[0..] };
 
-    var out_a = std.array_list.Managed(u8).init(allocator);
+    var out_a = std.ArrayList(u8).init(allocator);
     defer out_a.deinit();
-    var out_b = std.array_list.Managed(u8).init(allocator);
+    var out_b = std.ArrayList(u8).init(allocator);
     defer out_b.deinit();
 
     var writer_a = @import("stream_writer.zig").StreamWriter(@TypeOf(out_a.writer())).init(allocator, out_a.writer());
@@ -4182,9 +4183,9 @@ test "ipc schema metadata serialization preserves insertion order" {
     const schema_a = Schema{ .fields = fields_a[0..], .metadata = schema_md_a[0..] };
     const schema_b = Schema{ .fields = fields_b[0..], .metadata = schema_md_b[0..] };
 
-    var out_a = std.array_list.Managed(u8).init(allocator);
+    var out_a = std.ArrayList(u8).init(allocator);
     defer out_a.deinit();
-    var out_b = std.array_list.Managed(u8).init(allocator);
+    var out_b = std.ArrayList(u8).init(allocator);
     defer out_b.deinit();
 
     var writer_a = @import("stream_writer.zig").StreamWriter(@TypeOf(out_a.writer())).init(allocator, out_a.writer());
@@ -4301,7 +4302,7 @@ test "ipc reader handles non-8-aligned body and still reads next real writer mes
     const schema = Schema{ .fields = fields[0..] };
 
     // 1) Real writer output: schema message.
-    var real_stream = std.array_list.Managed(u8).init(allocator);
+    var real_stream = std.ArrayList(u8).init(allocator);
     defer real_stream.deinit();
     var real_writer = @import("stream_writer.zig").StreamWriter(@TypeOf(real_stream.writer())).init(allocator, real_stream.writer());
     defer real_writer.deinit();
@@ -4310,7 +4311,7 @@ test "ipc reader handles non-8-aligned body and still reads next real writer mes
 
     // 2) Build a stream where a valid flatbuffer message with body_len=1 is inserted
     // before the real writer schema message.
-    var combined = std.array_list.Managed(u8).init(allocator);
+    var combined = std.ArrayList(u8).init(allocator);
     defer combined.deinit();
     try appendValidTestMessageWithBody(allocator, combined.writer(), 1, 0xAB);
     // Explicitly place Arrow IPC body padding (8-byte alignment) before next message.
@@ -4357,7 +4358,7 @@ test "ipc reader reuses body storage for aligned buffers" {
     var batch = try RecordBatch.initBorrowed(allocator, schema, &[_]ArrayRef{values});
     defer batch.deinit();
 
-    var out = std.array_list.Managed(u8).init(allocator);
+    var out = std.ArrayList(u8).init(allocator);
     defer out.deinit();
     var writer = @import("stream_writer.zig").StreamWriter(@TypeOf(out.writer())).init(allocator, out.writer());
     defer writer.deinit();
@@ -4386,7 +4387,7 @@ test "ipc reader reuses body storage for aligned buffers" {
 test "ipc reader returns EndOfStream for truncated metadata payload" {
     const allocator = std.testing.allocator;
 
-    var bytes = std.array_list.Managed(u8).init(allocator);
+    var bytes = std.ArrayList(u8).init(allocator);
     defer bytes.deinit();
 
     // Declare metadata length as 16 bytes but provide only 4 bytes.
@@ -4403,7 +4404,7 @@ test "ipc reader returns EndOfStream for truncated metadata payload" {
 test "ipc reader returns EndOfStream for truncated continuation marker length prefix" {
     const allocator = std.testing.allocator;
 
-    var bytes = std.array_list.Managed(u8).init(allocator);
+    var bytes = std.ArrayList(u8).init(allocator);
     defer bytes.deinit();
 
     // Continuation marker is present, but the required 4-byte message length is missing.
@@ -4419,24 +4420,24 @@ test "ipc reader returns EndOfStream for truncated continuation marker length pr
 test "ipc reader rejects non-schema first message" {
     const allocator = std.testing.allocator;
 
-    var out = std.array_list.Managed(u8).init(allocator);
+    var out = std.ArrayList(u8).init(allocator);
     defer out.deinit();
 
-    const nodes = try std.ArrayList(fbs.FieldNodeT).initCapacity(allocator, 0);
-    const buffers = try std.ArrayList(fbs.BufferT).initCapacity(allocator, 0);
+    const nodes = try std.ArrayListUnmanaged(fbs.FieldNodeT).initCapacity(allocator, 0);
+    const buffers = try std.ArrayListUnmanaged(fbs.BufferT).initCapacity(allocator, 0);
     const batch_ptr = try allocator.create(fbs.RecordBatchT);
     batch_ptr.* = .{
         .length = 0,
         .nodes = nodes,
         .buffers = buffers,
-        .variadicBufferCounts = try std.ArrayList(i64).initCapacity(allocator, 0),
+        .variadicBufferCounts = try std.ArrayListUnmanaged(i64).initCapacity(allocator, 0),
     };
 
     var msg = fbs.MessageT{
         .version = .V5,
         .header = .{ .RecordBatch = batch_ptr },
         .bodyLength = 0,
-        .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0),
+        .custom_metadata = try std.ArrayListUnmanaged(fbs.KeyValueT).initCapacity(allocator, 0),
     };
     defer msg.deinit(allocator);
 
@@ -4459,17 +4460,17 @@ test "ipc reader rejects record batch buffer offset beyond body" {
     };
     const schema = Schema{ .fields = fields[0..] };
 
-    var out = std.array_list.Managed(u8).init(allocator);
+    var out = std.ArrayList(u8).init(allocator);
     defer out.deinit();
 
     var writer = @import("stream_writer.zig").StreamWriter(@TypeOf(out.writer())).init(allocator, out.writer());
     defer writer.deinit();
     try writer.writeSchema(schema);
 
-    var nodes = try std.ArrayList(fbs.FieldNodeT).initCapacity(allocator, 0);
+    var nodes = try std.ArrayListUnmanaged(fbs.FieldNodeT).initCapacity(allocator, 0);
     try nodes.append(allocator, .{ .length = 1, .null_count = 0 });
 
-    var buffers = try std.ArrayList(fbs.BufferT).initCapacity(allocator, 0);
+    var buffers = try std.ArrayListUnmanaged(fbs.BufferT).initCapacity(allocator, 0);
     try buffers.append(allocator, .{ .offset = 0, .length = 0 });
     // int32 values buffer claims bytes far beyond the provided body (len=1).
     try buffers.append(allocator, .{ .offset = 8, .length = 4 });
@@ -4479,14 +4480,14 @@ test "ipc reader rejects record batch buffer offset beyond body" {
         .length = 1,
         .nodes = nodes,
         .buffers = buffers,
-        .variadicBufferCounts = try std.ArrayList(i64).initCapacity(allocator, 0),
+        .variadicBufferCounts = try std.ArrayListUnmanaged(i64).initCapacity(allocator, 0),
     };
 
     var malformed_msg = fbs.MessageT{
         .version = .V5,
         .header = .{ .RecordBatch = batch_ptr },
         .bodyLength = 1,
-        .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0),
+        .custom_metadata = try std.ArrayListUnmanaged(fbs.KeyValueT).initCapacity(allocator, 0),
     };
     defer malformed_msg.deinit(allocator);
 
@@ -4510,17 +4511,17 @@ test "ipc reader rejects record batch buffer with negative offset" {
     };
     const schema = Schema{ .fields = fields[0..] };
 
-    var out = std.array_list.Managed(u8).init(allocator);
+    var out = std.ArrayList(u8).init(allocator);
     defer out.deinit();
 
     var writer = @import("stream_writer.zig").StreamWriter(@TypeOf(out.writer())).init(allocator, out.writer());
     defer writer.deinit();
     try writer.writeSchema(schema);
 
-    var nodes = try std.ArrayList(fbs.FieldNodeT).initCapacity(allocator, 0);
+    var nodes = try std.ArrayListUnmanaged(fbs.FieldNodeT).initCapacity(allocator, 0);
     try nodes.append(allocator, .{ .length = 1, .null_count = 0 });
 
-    var buffers = try std.ArrayList(fbs.BufferT).initCapacity(allocator, 0);
+    var buffers = try std.ArrayListUnmanaged(fbs.BufferT).initCapacity(allocator, 0);
     try buffers.append(allocator, .{ .offset = 0, .length = 0 });
     try buffers.append(allocator, .{ .offset = -1, .length = 4 });
 
@@ -4529,14 +4530,14 @@ test "ipc reader rejects record batch buffer with negative offset" {
         .length = 1,
         .nodes = nodes,
         .buffers = buffers,
-        .variadicBufferCounts = try std.ArrayList(i64).initCapacity(allocator, 0),
+        .variadicBufferCounts = try std.ArrayListUnmanaged(i64).initCapacity(allocator, 0),
     };
 
     var malformed_msg = fbs.MessageT{
         .version = .V5,
         .header = .{ .RecordBatch = batch_ptr },
         .bodyLength = 4,
-        .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0),
+        .custom_metadata = try std.ArrayListUnmanaged(fbs.KeyValueT).initCapacity(allocator, 0),
     };
     defer malformed_msg.deinit(allocator);
 
@@ -4560,17 +4561,17 @@ test "ipc reader rejects record batch buffer with negative length" {
     };
     const schema = Schema{ .fields = fields[0..] };
 
-    var out = std.array_list.Managed(u8).init(allocator);
+    var out = std.ArrayList(u8).init(allocator);
     defer out.deinit();
 
     var writer = @import("stream_writer.zig").StreamWriter(@TypeOf(out.writer())).init(allocator, out.writer());
     defer writer.deinit();
     try writer.writeSchema(schema);
 
-    var nodes = try std.ArrayList(fbs.FieldNodeT).initCapacity(allocator, 0);
+    var nodes = try std.ArrayListUnmanaged(fbs.FieldNodeT).initCapacity(allocator, 0);
     try nodes.append(allocator, .{ .length = 1, .null_count = 0 });
 
-    var buffers = try std.ArrayList(fbs.BufferT).initCapacity(allocator, 0);
+    var buffers = try std.ArrayListUnmanaged(fbs.BufferT).initCapacity(allocator, 0);
     try buffers.append(allocator, .{ .offset = 0, .length = 0 });
     try buffers.append(allocator, .{ .offset = 0, .length = -1 });
 
@@ -4579,14 +4580,14 @@ test "ipc reader rejects record batch buffer with negative length" {
         .length = 1,
         .nodes = nodes,
         .buffers = buffers,
-        .variadicBufferCounts = try std.ArrayList(i64).initCapacity(allocator, 0),
+        .variadicBufferCounts = try std.ArrayListUnmanaged(i64).initCapacity(allocator, 0),
     };
 
     var malformed_msg = fbs.MessageT{
         .version = .V5,
         .header = .{ .RecordBatch = batch_ptr },
         .bodyLength = 4,
-        .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0),
+        .custom_metadata = try std.ArrayListUnmanaged(fbs.KeyValueT).initCapacity(allocator, 0),
     };
     defer malformed_msg.deinit(allocator);
 
@@ -4610,19 +4611,19 @@ test "ipc reader rejects record batch with trailing metadata entries" {
     };
     const schema = Schema{ .fields = fields[0..] };
 
-    var out = std.array_list.Managed(u8).init(allocator);
+    var out = std.ArrayList(u8).init(allocator);
     defer out.deinit();
 
     var writer = @import("stream_writer.zig").StreamWriter(@TypeOf(out.writer())).init(allocator, out.writer());
     defer writer.deinit();
     try writer.writeSchema(schema);
 
-    var nodes = try std.ArrayList(fbs.FieldNodeT).initCapacity(allocator, 0);
+    var nodes = try std.ArrayListUnmanaged(fbs.FieldNodeT).initCapacity(allocator, 0);
     try nodes.append(allocator, .{ .length = 1, .null_count = 0 });
     // Unused trailing node should be rejected.
     try nodes.append(allocator, .{ .length = 999, .null_count = 0 });
 
-    var buffers = try std.ArrayList(fbs.BufferT).initCapacity(allocator, 0);
+    var buffers = try std.ArrayListUnmanaged(fbs.BufferT).initCapacity(allocator, 0);
     try buffers.append(allocator, .{ .offset = 0, .length = 0 });
     try buffers.append(allocator, .{ .offset = 0, .length = 4 });
     // Unused trailing buffer should be rejected.
@@ -4633,14 +4634,14 @@ test "ipc reader rejects record batch with trailing metadata entries" {
         .length = 1,
         .nodes = nodes,
         .buffers = buffers,
-        .variadicBufferCounts = try std.ArrayList(i64).initCapacity(allocator, 0),
+        .variadicBufferCounts = try std.ArrayListUnmanaged(i64).initCapacity(allocator, 0),
     };
 
     var malformed_msg = fbs.MessageT{
         .version = .V5,
         .header = .{ .RecordBatch = batch_ptr },
         .bodyLength = 4,
-        .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0),
+        .custom_metadata = try std.ArrayListUnmanaged(fbs.KeyValueT).initCapacity(allocator, 0),
     };
     defer malformed_msg.deinit(allocator);
 
@@ -4661,7 +4662,7 @@ test "ipc reader maps parse failures to deterministic errors" {
 
     // Case 1: malformed length prefix maps to EndOfStream.
     {
-        var bytes = std.array_list.Managed(u8).init(allocator);
+        var bytes = std.ArrayList(u8).init(allocator);
         defer bytes.deinit();
         try format.writeInt(bytes.writer(), u32, format.ContinuationMarker);
 
@@ -4673,7 +4674,7 @@ test "ipc reader maps parse failures to deterministic errors" {
 
     // Case 2: legacy metadata version remains supported.
     {
-        var bytes = std.array_list.Managed(u8).init(allocator);
+        var bytes = std.ArrayList(u8).init(allocator);
         defer bytes.deinit();
         try appendSchemaMessageWithBody(allocator, bytes.writer(), .V1, 0, null);
 
@@ -4686,7 +4687,7 @@ test "ipc reader maps parse failures to deterministic errors" {
 
     // Case 3: negative body length maps to InvalidBody.
     {
-        var bytes = std.array_list.Managed(u8).init(allocator);
+        var bytes = std.ArrayList(u8).init(allocator);
         defer bytes.deinit();
         try appendSchemaMessageWithBody(allocator, bytes.writer(), .V5, -1, null);
 
@@ -4698,24 +4699,24 @@ test "ipc reader maps parse failures to deterministic errors" {
 
     // Case 4: first non-schema message maps to InvalidMessage.
     {
-        var bytes = std.array_list.Managed(u8).init(allocator);
+        var bytes = std.ArrayList(u8).init(allocator);
         defer bytes.deinit();
 
-        const nodes = try std.ArrayList(fbs.FieldNodeT).initCapacity(allocator, 0);
-        const buffers = try std.ArrayList(fbs.BufferT).initCapacity(allocator, 0);
+        const nodes = try std.ArrayListUnmanaged(fbs.FieldNodeT).initCapacity(allocator, 0);
+        const buffers = try std.ArrayListUnmanaged(fbs.BufferT).initCapacity(allocator, 0);
         const batch_ptr = try allocator.create(fbs.RecordBatchT);
         batch_ptr.* = .{
             .length = 0,
             .nodes = nodes,
             .buffers = buffers,
-            .variadicBufferCounts = try std.ArrayList(i64).initCapacity(allocator, 0),
+            .variadicBufferCounts = try std.ArrayListUnmanaged(i64).initCapacity(allocator, 0),
         };
 
         var msg = fbs.MessageT{
             .version = .V5,
             .header = .{ .RecordBatch = batch_ptr },
             .bodyLength = 0,
-            .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0),
+            .custom_metadata = try std.ArrayListUnmanaged(fbs.KeyValueT).initCapacity(allocator, 0),
         };
         defer msg.deinit(allocator);
 
@@ -4730,7 +4731,7 @@ test "ipc reader maps parse failures to deterministic errors" {
 test "ipc reader supports optional big-endian schema normalization" {
     const allocator = std.testing.allocator;
 
-    var bytes = std.array_list.Managed(u8).init(allocator);
+    var bytes = std.ArrayList(u8).init(allocator);
     defer bytes.deinit();
     try appendSchemaMessageWithBodyAndEndianness(
         allocator,
@@ -4768,21 +4769,21 @@ test "ipc reader rejects unexpected variadic buffer counts" {
     };
     const schema = Schema{ .fields = fields[0..] };
 
-    var out = std.array_list.Managed(u8).init(allocator);
+    var out = std.ArrayList(u8).init(allocator);
     defer out.deinit();
 
     var writer = @import("stream_writer.zig").StreamWriter(@TypeOf(out.writer())).init(allocator, out.writer());
     defer writer.deinit();
     try writer.writeSchema(schema);
 
-    var nodes = try std.ArrayList(fbs.FieldNodeT).initCapacity(allocator, 0);
+    var nodes = try std.ArrayListUnmanaged(fbs.FieldNodeT).initCapacity(allocator, 0);
     try nodes.append(allocator, .{ .length = 1, .null_count = 0 });
 
-    var buffers = try std.ArrayList(fbs.BufferT).initCapacity(allocator, 0);
+    var buffers = try std.ArrayListUnmanaged(fbs.BufferT).initCapacity(allocator, 0);
     try buffers.append(allocator, .{ .offset = 0, .length = 0 });
     try buffers.append(allocator, .{ .offset = 0, .length = 4 });
 
-    var variadic_counts = try std.ArrayList(i64).initCapacity(allocator, 1);
+    var variadic_counts = try std.ArrayListUnmanaged(i64).initCapacity(allocator, 1);
     try variadic_counts.append(allocator, 1);
 
     const batch_ptr = try allocator.create(fbs.RecordBatchT);
@@ -4797,7 +4798,7 @@ test "ipc reader rejects unexpected variadic buffer counts" {
         .version = .V5,
         .header = .{ .RecordBatch = batch_ptr },
         .bodyLength = 4,
-        .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0),
+        .custom_metadata = try std.ArrayListUnmanaged(fbs.KeyValueT).initCapacity(allocator, 0),
     };
     defer malformed_msg.deinit(allocator);
 
@@ -4828,11 +4829,11 @@ fn appendTensorMessageForTest(allocator: std.mem.Allocator, writer: anytype) !vo
     const int_ptr = try allocator.create(fbs.IntT);
     int_ptr.* = .{ .bitWidth = 32, .is_signed = true };
 
-    var shape = try std.ArrayList(fbs.TensorDimT).initCapacity(allocator, 2);
+    var shape = try std.ArrayListUnmanaged(fbs.TensorDimT).initCapacity(allocator, 2);
     try shape.append(allocator, .{ .size = 2, .name = "rows" });
     try shape.append(allocator, .{ .size = 3, .name = "cols" });
 
-    var strides = try std.ArrayList(i64).initCapacity(allocator, 2);
+    var strides = try std.ArrayListUnmanaged(i64).initCapacity(allocator, 2);
     try strides.append(allocator, 12);
     try strides.append(allocator, 4);
 
@@ -4851,7 +4852,7 @@ fn appendTensorMessageForTest(allocator: std.mem.Allocator, writer: anytype) !vo
         .version = .V5,
         .header = .{ .Tensor = tensor_ptr },
         .bodyLength = 24,
-        .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0),
+        .custom_metadata = try std.ArrayListUnmanaged(fbs.KeyValueT).initCapacity(allocator, 0),
     };
     defer msg.deinit(allocator);
 
@@ -4869,14 +4870,14 @@ fn appendSparseTensorMessageForTest(allocator: std.mem.Allocator, writer: anytyp
     const value_type_ptr = try allocator.create(fbs.IntT);
     value_type_ptr.* = .{ .bitWidth = 32, .is_signed = true };
 
-    var shape = try std.ArrayList(fbs.TensorDimT).initCapacity(allocator, 2);
+    var shape = try std.ArrayListUnmanaged(fbs.TensorDimT).initCapacity(allocator, 2);
     try shape.append(allocator, .{ .size = 2, .name = "rows" });
     try shape.append(allocator, .{ .size = 3, .name = "cols" });
 
     const indices_type_ptr = try allocator.create(fbs.IntT);
     indices_type_ptr.* = .{ .bitWidth = 64, .is_signed = true };
 
-    var indices_strides = try std.ArrayList(i64).initCapacity(allocator, 2);
+    var indices_strides = try std.ArrayListUnmanaged(i64).initCapacity(allocator, 2);
     try indices_strides.append(allocator, 16);
     try indices_strides.append(allocator, 8);
 
@@ -4907,7 +4908,7 @@ fn appendSparseTensorMessageForTest(allocator: std.mem.Allocator, writer: anytyp
         .version = .V5,
         .header = .{ .SparseTensor = sparse_ptr },
         .bodyLength = 40,
-        .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0),
+        .custom_metadata = try std.ArrayListUnmanaged(fbs.KeyValueT).initCapacity(allocator, 0),
     };
     defer msg.deinit(allocator);
 
@@ -4971,16 +4972,16 @@ fn appendSchemaMessageWithBodyAndEndianness(
     errdefer allocator.destroy(schema_ptr);
     schema_ptr.* = .{
         .endianness = endianness,
-        .fields = try std.ArrayList(fbs.FieldT).initCapacity(allocator, 0),
-        .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0),
-        .features = try std.ArrayList(i64).initCapacity(allocator, 0),
+        .fields = try std.ArrayListUnmanaged(fbs.FieldT).initCapacity(allocator, 0),
+        .custom_metadata = try std.ArrayListUnmanaged(fbs.KeyValueT).initCapacity(allocator, 0),
+        .features = try std.ArrayListUnmanaged(i64).initCapacity(allocator, 0),
     };
 
     var msg = fbs.MessageT{
         .version = version,
         .header = .{ .Schema = schema_ptr },
         .bodyLength = body_length,
-        .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0),
+        .custom_metadata = try std.ArrayListUnmanaged(fbs.KeyValueT).initCapacity(allocator, 0),
     };
     defer msg.deinit(allocator);
 

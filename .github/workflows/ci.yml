@@ -20,7 +20,7 @@ jobs:
       - name: Set up Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: "0.15.2"
+          version: "0.14.1"
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -65,7 +65,7 @@ jobs:
       - name: Set up Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: "0.15.2"
+          version: "0.14.1"
 
       - name: Replay fuzz corpus seeds
         run: zig build fuzz-corpus
@@ -99,7 +99,7 @@ jobs:
       fail-fast: false
       matrix:
         os: ["ubuntu-latest", "macos-latest", "windows-latest"]
-        zig: ["0.15.1", "0.15.2"]
+        zig: ["0.14.1"]
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -110,11 +110,11 @@ jobs:
           version: "${{ matrix.zig }}"
 
       - name: Run tests (all matrix targets except Linux examples lane)
-        if: ${{ !(runner.os == 'Linux' && matrix.zig == '0.15.1') }}
+        if: ${{ !(runner.os == 'Linux' && matrix.zig == '0.14.1') }}
         run: zig build test
 
-      - name: Run tests then examples serially (Linux Zig 0.15.1)
-        if: ${{ runner.os == 'Linux' && matrix.zig == '0.15.1' }}
+      - name: Run tests then examples serially (Linux Zig 0.14.1)
+        if: ${{ runner.os == 'Linux' && matrix.zig == '0.14.1' }}
         run: |
           zig build test
           zig build examples
@@ -184,7 +184,7 @@ jobs:
       - name: Set up Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: "0.15.2"
+          version: "0.14.1"
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -249,7 +249,7 @@ jobs:
       - name: Set up Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: "0.15.2"
+          version: "0.14.1"
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -278,7 +278,7 @@ jobs:
       - name: Set up Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: "0.15.2"
+          version: "0.14.1"
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -315,7 +315,7 @@ jobs:
       - name: Set up Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: "0.15.2"
+          version: "0.14.1"
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -410,7 +410,7 @@ jobs:
       - name: Set up Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: "0.15.2"
+          version: "0.14.1"
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -448,7 +448,7 @@ jobs:
       - name: Set up Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: "0.15.2"
+          version: "0.14.1"
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
@@ -534,7 +534,7 @@ jobs:
       - name: Set up Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: "0.15.2"
+          version: "0.14.1"
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
@@ -563,7 +563,7 @@ jobs:
       - name: Set up Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: "0.15.2"
+          version: "0.14.1"
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
@@ -593,7 +593,7 @@ jobs:
       - name: Set up Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: "0.15.2"
+          version: "0.14.1"
 
       - name: Set up Go
         uses: actions/setup-go@v6
@@ -685,7 +685,7 @@ jobs:
       - name: Set up Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: "0.15.2"
+          version: "0.14.1"
 
       - name: Set up Go
         uses: actions/setup-go@v6
@@ -717,7 +717,7 @@ jobs:
       - name: Set up Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: "0.15.2"
+          version: "0.14.1"
 
       - name: Set up Conda (arrow-cpp)
         uses: conda-incubator/setup-miniconda@v3
@@ -831,7 +831,7 @@ jobs:
       - name: Set up Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: "0.15.2"
+          version: "0.14.1"
 
       - name: Set up Conda (arrow-cpp)
         uses: conda-incubator/setup-miniconda@v3
@@ -879,7 +879,7 @@ jobs:
       - name: Set up Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: "0.15.2"
+          version: "0.14.1"
 
       - name: Set up Conda (arrow-cpp)
         uses: conda-incubator/setup-miniconda@v3
@@ -929,7 +929,7 @@ jobs:
       - name: Set up Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: "0.15.2"
+          version: "0.14.1"
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable

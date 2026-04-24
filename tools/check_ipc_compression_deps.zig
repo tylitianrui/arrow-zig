@@ -36,7 +36,8 @@ fn digestHex(data: []const u8) [64]u8 {
 }
 
 fn normalizedLfAlloc(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
-    var out = try std.ArrayList(u8).initCapacity(allocator, data.len);
+    var out: std.ArrayListUnmanaged(u8) = .{};
+    try out.ensureTotalCapacity(allocator, data.len);
     errdefer out.deinit(allocator);
 
     var i: usize = 0;
@@ -71,9 +72,9 @@ fn hashMatchesExpected(allocator: std.mem.Allocator, path: []const u8, expected_
 pub fn main() !void {
     const allocator = std.heap.page_allocator;
 
-    var missing = std.ArrayList([]const u8).empty;
+    var missing: std.ArrayListUnmanaged([]const u8) = .{};
     defer missing.deinit(allocator);
-    var mismatched = std.ArrayList([]const u8).empty;
+    var mismatched: std.ArrayListUnmanaged([]const u8) = .{};
     defer {
         for (mismatched.items) |line| allocator.free(line);
         mismatched.deinit(allocator);

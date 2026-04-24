@@ -28,7 +28,7 @@ const org = struct {
 pub const Struct_T = struct {
     pub fn Pack(rcv: Struct_T, __builder: *Builder, __pack_opts: fb.common.PackOptions) fb.common.PackError!u32 {
         _ = .{__pack_opts};
-        var __tmp_offsets = std.ArrayList(u32){};
+        var __tmp_offsets = std.ArrayListUnmanaged(u32){};
         defer if (__pack_opts.allocator) |alloc| __tmp_offsets.deinit(alloc);
         _ = rcv;
         try Struct_.Start(__builder);

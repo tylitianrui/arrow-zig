@@ -1,5 +1,5 @@
 # Zig build cache and generated outputs
-/.zig-cache/
+/.zig-*
 /src/format/.zig-cache/
 /zig-out/
 /.venv*/

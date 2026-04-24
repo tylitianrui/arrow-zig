@@ -34,11 +34,11 @@ pub const MessageT = struct {
     version: org.apache.arrow.flatbuf.MetadataVersion = @as(org.apache.arrow.flatbuf.MetadataVersion, @enumFromInt(0)),
     header: org.apache.arrow.flatbuf.MessageHeaderT = @as(org.apache.arrow.flatbuf.MessageHeader.Tag, @enumFromInt(0)),
     bodyLength: i64 = 0,
-    custom_metadata: std.ArrayList(org.apache.arrow.flatbuf.KeyValueT) = .{},
+    custom_metadata: std.ArrayListUnmanaged(org.apache.arrow.flatbuf.KeyValueT) = .{},
 
     pub fn Pack(rcv: MessageT, __builder: *Builder, __pack_opts: fb.common.PackOptions) fb.common.PackError!u32 {
         _ = .{__pack_opts};
-        var __tmp_offsets = std.ArrayList(u32){};
+        var __tmp_offsets = std.ArrayListUnmanaged(u32){};
         defer if (__pack_opts.allocator) |alloc| __tmp_offsets.deinit(alloc);
         const header_off = try rcv.header.Pack(__builder, __pack_opts);
 
@@ -80,7 +80,7 @@ pub const MessageT = struct {
         t.bodyLength = rcv.BodyLength();
 
         const custom_metadata_len = rcv.CustomMetadataLen();
-        t.custom_metadata = try std.ArrayList(org.apache.arrow.flatbuf.KeyValueT).initCapacity(__pack_opts.allocator.?, @as(u32, @bitCast(custom_metadata_len)));
+        t.custom_metadata = try std.ArrayListUnmanaged(org.apache.arrow.flatbuf.KeyValueT).initCapacity(__pack_opts.allocator.?, @as(u32, @bitCast(custom_metadata_len)));
         t.custom_metadata.expandToCapacity();
         {
             var j: u32 = 0;

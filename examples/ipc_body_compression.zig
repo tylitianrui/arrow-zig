@@ -19,7 +19,7 @@ pub fn main() !void {
     var batch = try zarrow.RecordBatch.initBorrowed(allocator, schema, &[_]zarrow.ArrayRef{col});
     defer batch.deinit();
 
-    var out = std.array_list.Managed(u8).init(allocator);
+    var out = std.ArrayList(u8).init(allocator);
     defer out.deinit();
 
     var writer = zarrow.IpcStreamWriter(@TypeOf(out.writer())).initWithBodyCompression(

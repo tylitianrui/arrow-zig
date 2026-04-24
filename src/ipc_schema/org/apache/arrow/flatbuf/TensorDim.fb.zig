@@ -33,7 +33,7 @@ pub const TensorDimT = struct {
 
     pub fn Pack(rcv: TensorDimT, __builder: *Builder, __pack_opts: fb.common.PackOptions) fb.common.PackError!u32 {
         _ = .{__pack_opts};
-        var __tmp_offsets = std.ArrayList(u32){};
+        var __tmp_offsets = std.ArrayListUnmanaged(u32){};
         defer if (__pack_opts.allocator) |alloc| __tmp_offsets.deinit(alloc);
         const name_off = if (rcv.name.len != 0) try __builder.createString(rcv.name) else 0;
 

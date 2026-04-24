@@ -144,7 +144,7 @@ pub const TimestampT = struct {
 
     pub fn Pack(rcv: TimestampT, __builder: *Builder, __pack_opts: fb.common.PackOptions) fb.common.PackError!u32 {
         _ = .{__pack_opts};
-        var __tmp_offsets = std.ArrayList(u32){};
+        var __tmp_offsets = std.ArrayListUnmanaged(u32){};
         defer if (__pack_opts.allocator) |alloc| __tmp_offsets.deinit(alloc);
         const timezone_off = if (rcv.timezone.len != 0) try __builder.createString(rcv.timezone) else 0;
 

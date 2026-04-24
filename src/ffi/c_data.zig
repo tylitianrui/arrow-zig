@@ -1178,13 +1178,13 @@ fn intTypeFromDataType(dt: DataType) ?IntType {
     return IntType.fromTypeId(dt.id());
 }
 
-fn appendI32Le(list: *std.array_list.Managed(u8), value: i32) Error!void {
+fn appendI32Le(list: *std.ArrayList(u8), value: i32) Error!void {
     var bytes: [4]u8 = undefined;
     std.mem.writeInt(i32, bytes[0..4], value, .little);
     try list.appendSlice(bytes[0..4]);
 }
 
-fn appendMetadataEntry(list: *std.array_list.Managed(u8), key: []const u8, value: []const u8) Error!void {
+fn appendMetadataEntry(list: *std.ArrayList(u8), key: []const u8, value: []const u8) Error!void {
     const key_len = std.math.cast(i32, key.len) orelse return error.InvalidFormat;
     const value_len = std.math.cast(i32, value.len) orelse return error.InvalidFormat;
     try appendI32Le(list, key_len);
@@ -1197,7 +1197,7 @@ fn encodeMetadataBlob(allocator: std.mem.Allocator, metadata: ?[]const datatype.
     const md = metadata orelse return null;
     if (md.len == 0) return null;
 
-    var out = std.array_list.Managed(u8).init(allocator);
+    var out = std.ArrayList(u8).init(allocator);
     defer out.deinit();
 
     const count = std.math.cast(i32, md.len) orelse return error.InvalidFormat;
@@ -1218,7 +1218,7 @@ fn encodeFieldMetadataBlob(
     const total = base_len + ext_len;
     if (total == 0) return null;
 
-    var out = std.array_list.Managed(u8).init(allocator);
+    var out = std.ArrayList(u8).init(allocator);
     defer out.deinit();
 
     const count = std.math.cast(i32, total) orelse return error.InvalidFormat;
@@ -1457,7 +1457,7 @@ fn parseUnionTypeIds(allocator: std.mem.Allocator, payload: []const u8) Error![]
 
 fn formatUnion(allocator: std.mem.Allocator, sparse: bool, ids: []const i8) Error![:0]u8 {
     if (ids.len == 0) return error.InvalidFormat;
-    var list = std.array_list.Managed(u8).init(allocator);
+    var list = std.ArrayList(u8).init(allocator);
     defer list.deinit();
 
     try list.appendSlice(if (sparse) "+us:" else "+ud:");

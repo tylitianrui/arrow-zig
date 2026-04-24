@@ -285,7 +285,7 @@ fn buildDatum(allocator: std.mem.Allocator, input: DatumInput) compute.KernelErr
         .chunked => blk: {
             const values = input.values orelse return error.InvalidInput;
             const chunk_sizes = input.chunks orelse return error.InvalidInput;
-            var refs: std.ArrayList(zcore.ArrayRef) = .{};
+            var refs: std.ArrayListUnmanaged(zcore.ArrayRef) = .{};
             defer refs.deinit(allocator);
             errdefer {
                 for (refs.items) |*chunk| {
@@ -506,7 +506,7 @@ pub fn main() !void {
     try registerCompatKernels(&registry);
     var ctx = compute.ExecContext.init(allocator, &registry);
 
-    var results: std.ArrayList(CaseOutput) = .{};
+    var results: std.ArrayListUnmanaged(CaseOutput) = .{};
     defer {
         for (results.items) |item| {
             if (item.values) |vals| allocator.free(vals);

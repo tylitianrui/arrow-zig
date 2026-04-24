@@ -36,13 +36,13 @@ pub const __file_ext = "";
 pub const FooterT = struct {
     version: org.apache.arrow.flatbuf.MetadataVersion = @as(org.apache.arrow.flatbuf.MetadataVersion, @enumFromInt(0)),
     schema: ?*org.apache.arrow.flatbuf.SchemaT = null,
-    dictionaries: std.ArrayList(org.apache.arrow.flatbuf.BlockT) = .{},
-    recordBatches: std.ArrayList(org.apache.arrow.flatbuf.BlockT) = .{},
-    custom_metadata: std.ArrayList(org.apache.arrow.flatbuf.KeyValueT) = .{},
+    dictionaries: std.ArrayListUnmanaged(org.apache.arrow.flatbuf.BlockT) = .{},
+    recordBatches: std.ArrayListUnmanaged(org.apache.arrow.flatbuf.BlockT) = .{},
+    custom_metadata: std.ArrayListUnmanaged(org.apache.arrow.flatbuf.KeyValueT) = .{},
 
     pub fn Pack(rcv: FooterT, __builder: *Builder, __pack_opts: fb.common.PackOptions) fb.common.PackError!u32 {
         _ = .{__pack_opts};
-        var __tmp_offsets = std.ArrayList(u32){};
+        var __tmp_offsets = std.ArrayListUnmanaged(u32){};
         defer if (__pack_opts.allocator) |alloc| __tmp_offsets.deinit(alloc);
         const schema_off = if (rcv.schema) |x| try x.Pack(__builder, __pack_opts) else 0;
 
@@ -112,7 +112,7 @@ pub const FooterT = struct {
         }
 
         const dictionaries_len = rcv.DictionariesLen();
-        t.dictionaries = try std.ArrayList(org.apache.arrow.flatbuf.BlockT).initCapacity(__pack_opts.allocator.?, @as(u32, @bitCast(dictionaries_len)));
+        t.dictionaries = try std.ArrayListUnmanaged(org.apache.arrow.flatbuf.BlockT).initCapacity(__pack_opts.allocator.?, @as(u32, @bitCast(dictionaries_len)));
         t.dictionaries.expandToCapacity();
         {
             var j: u32 = 0;
@@ -123,7 +123,7 @@ pub const FooterT = struct {
         }
 
         const recordBatches_len = rcv.RecordBatchesLen();
-        t.recordBatches = try std.ArrayList(org.apache.arrow.flatbuf.BlockT).initCapacity(__pack_opts.allocator.?, @as(u32, @bitCast(recordBatches_len)));
+        t.recordBatches = try std.ArrayListUnmanaged(org.apache.arrow.flatbuf.BlockT).initCapacity(__pack_opts.allocator.?, @as(u32, @bitCast(recordBatches_len)));
         t.recordBatches.expandToCapacity();
         {
             var j: u32 = 0;
@@ -134,7 +134,7 @@ pub const FooterT = struct {
         }
 
         const custom_metadata_len = rcv.CustomMetadataLen();
-        t.custom_metadata = try std.ArrayList(org.apache.arrow.flatbuf.KeyValueT).initCapacity(__pack_opts.allocator.?, @as(u32, @bitCast(custom_metadata_len)));
+        t.custom_metadata = try std.ArrayListUnmanaged(org.apache.arrow.flatbuf.KeyValueT).initCapacity(__pack_opts.allocator.?, @as(u32, @bitCast(custom_metadata_len)));
         t.custom_metadata.expandToCapacity();
         {
             var j: u32 = 0;

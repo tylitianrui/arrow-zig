@@ -94,7 +94,7 @@ pub fn main() !void {
     };
 
     // Stream: write schema + tensor + sparse tensor, then read them back.
-    var out = std.array_list.Managed(u8).init(allocator);
+    var out = std.ArrayList(u8).init(allocator);
     defer out.deinit();
 
     var stream_writer = zarrow.IpcStreamWriter(@TypeOf(out.writer())).initWithOptions(
@@ -140,7 +140,7 @@ pub fn main() !void {
     std.debug.print("stream tensor-like message count={d}\n", .{tensor_like_count});
 
     // File: write same schema/tensor messages, verify file reader can load schema.
-    var file_out = std.array_list.Managed(u8).init(allocator);
+    var file_out = std.ArrayList(u8).init(allocator);
     defer file_out.deinit();
 
     var file_writer = try zarrow.IpcFileWriter(@TypeOf(file_out.writer())).initWithOptions(

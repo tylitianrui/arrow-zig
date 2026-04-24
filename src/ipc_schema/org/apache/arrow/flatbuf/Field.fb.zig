@@ -42,13 +42,13 @@ pub const FieldT = struct {
     dictionary: ?*org.apache.arrow.flatbuf.DictionaryEncodingT = null,
     /// children apply only to nested data types like Struct, List and Union. For
     /// primitive types children will have length 0.
-    children: std.ArrayList(org.apache.arrow.flatbuf.FieldT) = .{},
+    children: std.ArrayListUnmanaged(org.apache.arrow.flatbuf.FieldT) = .{},
     /// User-defined metadata
-    custom_metadata: std.ArrayList(org.apache.arrow.flatbuf.KeyValueT) = .{},
+    custom_metadata: std.ArrayListUnmanaged(org.apache.arrow.flatbuf.KeyValueT) = .{},
 
     pub fn Pack(rcv: FieldT, __builder: *Builder, __pack_opts: fb.common.PackOptions) fb.common.PackError!u32 {
         _ = .{__pack_opts};
-        var __tmp_offsets = std.ArrayList(u32){};
+        var __tmp_offsets = std.ArrayListUnmanaged(u32){};
         defer if (__pack_opts.allocator) |alloc| __tmp_offsets.deinit(alloc);
         const name_off = if (rcv.name.len != 0) try __builder.createString(rcv.name) else 0;
 
@@ -122,7 +122,7 @@ pub const FieldT = struct {
         }
 
         const children_len = rcv.ChildrenLen();
-        t.children = try std.ArrayList(org.apache.arrow.flatbuf.FieldT).initCapacity(__pack_opts.allocator.?, @as(u32, @bitCast(children_len)));
+        t.children = try std.ArrayListUnmanaged(org.apache.arrow.flatbuf.FieldT).initCapacity(__pack_opts.allocator.?, @as(u32, @bitCast(children_len)));
         t.children.expandToCapacity();
         {
             var j: u32 = 0;
@@ -133,7 +133,7 @@ pub const FieldT = struct {
         }
 
         const custom_metadata_len = rcv.CustomMetadataLen();
-        t.custom_metadata = try std.ArrayList(org.apache.arrow.flatbuf.KeyValueT).initCapacity(__pack_opts.allocator.?, @as(u32, @bitCast(custom_metadata_len)));
+        t.custom_metadata = try std.ArrayListUnmanaged(org.apache.arrow.flatbuf.KeyValueT).initCapacity(__pack_opts.allocator.?, @as(u32, @bitCast(custom_metadata_len)));
         t.custom_metadata.expandToCapacity();
         {
             var j: u32 = 0;

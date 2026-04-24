@@ -34,7 +34,7 @@ pub fn main() !void {
     defer batch.deinit();
 
     // ── Write IPC stream to an in-memory buffer ───────────────────────────────
-    var buf = std.array_list.Managed(u8).init(allocator);
+    var buf = std.ArrayList(u8).init(allocator);
     defer buf.deinit();
 
     var writer = zarrow.IpcStreamWriter(@TypeOf(buf.writer())).init(allocator, buf.writer());

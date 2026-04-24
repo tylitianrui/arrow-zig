@@ -409,7 +409,7 @@ pub fn FileReader(comptime ReaderType: type) type {
             expected_header: MessageHeaderKind,
             meta_key: []const u8,
         ) (FileError || ReaderIoError)![]IndexedBlock {
-            var blocks = std.ArrayList(IndexedBlock){};
+            var blocks = std.ArrayListUnmanaged(IndexedBlock){};
             errdefer blocks.deinit(self.allocator);
 
             for (footer_t.custom_metadata.items) |kv| {
@@ -443,9 +443,9 @@ pub fn FileReader(comptime ReaderType: type) type {
             footer_t: fbs.FooterT,
             header_len: usize,
             footer_start: usize,
-        ) (FileError || ReaderIoError)!std.ArrayList(IndexedBlock) {
+        ) (FileError || ReaderIoError)!std.ArrayListUnmanaged(IndexedBlock) {
             const total_blocks = std.math.add(usize, footer_t.dictionaries.items.len, footer_t.recordBatches.items.len) catch return error.InvalidFile;
-            var blocks = try std.ArrayList(IndexedBlock).initCapacity(self.allocator, total_blocks);
+            var blocks = try std.ArrayListUnmanaged(IndexedBlock).initCapacity(self.allocator, total_blocks);
             errdefer blocks.deinit(self.allocator);
 
             for (footer_t.dictionaries.items) |block| {
@@ -475,7 +475,7 @@ pub fn FileReader(comptime ReaderType: type) type {
 
         fn appendCheckedBlock(
             self: *Self,
-            blocks: *std.ArrayList(IndexedBlock),
+            blocks: *std.ArrayListUnmanaged(IndexedBlock),
             block: fbs.BlockT,
             expected_header: MessageHeaderKind,
             header_len: usize,
@@ -630,11 +630,11 @@ test "ipc file reader roundtrips batches via stream reader" {
     var batch = try RecordBatch.initBorrowed(allocator, schema, &[_]zarray.ArrayRef{ ids, names });
     defer batch.deinit();
 
-    var file_bytes = std.ArrayList(u8){};
+    var file_bytes = std.ArrayListUnmanaged(u8){};
     defer file_bytes.deinit(allocator);
     const Sink = struct {
         allocator: std.mem.Allocator,
-        out: *std.ArrayList(u8),
+        out: *std.ArrayListUnmanaged(u8),
         pub const Error = error{OutOfMemory};
         pub fn writeAll(self: @This(), bytes: []const u8) Error!void {
             try self.out.appendSlice(self.allocator, bytes);
@@ -706,11 +706,11 @@ test "ipc file reader supports indexed record batch access" {
     var batch2 = try RecordBatch.initBorrowed(allocator, schema, &[_]zarray.ArrayRef{b2_ids});
     defer batch2.deinit();
 
-    var file_bytes = std.ArrayList(u8){};
+    var file_bytes = std.ArrayListUnmanaged(u8){};
     defer file_bytes.deinit(allocator);
     const Sink = struct {
         allocator: std.mem.Allocator,
-        out: *std.ArrayList(u8),
+        out: *std.ArrayListUnmanaged(u8),
         pub const Error = error{OutOfMemory};
         pub fn writeAll(self: @This(), bytes: []const u8) Error!void {
             try self.out.appendSlice(self.allocator, bytes);
@@ -810,11 +810,11 @@ test "ipc file reader rebuilds dictionary state for indexed reads" {
     var batch_2 = try RecordBatch.initBorrowed(allocator, schema, &[_]zarray.ArrayRef{dict_col_2});
     defer batch_2.deinit();
 
-    var file_bytes = std.ArrayList(u8){};
+    var file_bytes = std.ArrayListUnmanaged(u8){};
     defer file_bytes.deinit(allocator);
     const Sink = struct {
         allocator: std.mem.Allocator,
-        out: *std.ArrayList(u8),
+        out: *std.ArrayListUnmanaged(u8),
         pub const Error = error{OutOfMemory};
         pub fn writeAll(self: @This(), bytes: []const u8) Error!void {
             try self.out.appendSlice(self.allocator, bytes);
@@ -875,11 +875,11 @@ test "ipc file reader rejects footer with out-of-bounds block offset" {
     var batch = try record_batch.RecordBatch.initBorrowed(allocator, schema, &[_]@import("../array/array_ref.zig").ArrayRef{ids});
     defer batch.deinit();
 
-    var file_bytes = std.ArrayList(u8){};
+    var file_bytes = std.ArrayListUnmanaged(u8){};
     defer file_bytes.deinit(allocator);
     const Sink = struct {
         allocator: std.mem.Allocator,
-        out: *std.ArrayList(u8),
+        out: *std.ArrayListUnmanaged(u8),
         pub const Error = error{OutOfMemory};
         pub fn writeAll(self: @This(), bytes: []const u8) Error!void {
             try self.out.appendSlice(self.allocator, bytes);
@@ -911,7 +911,7 @@ test "ipc file reader rejects footer with out-of-bounds block offset" {
     defer allocator.free(new_footer_bytes);
 
     // Rebuild file bytes with the corrupted footer.
-    var corrupted = std.ArrayList(u8){};
+    var corrupted = std.ArrayListUnmanaged(u8){};
     defer corrupted.deinit(allocator);
     try corrupted.appendSlice(allocator, file_bytes.items[0..footer_start]);
     try corrupted.appendSlice(allocator, new_footer_bytes);
@@ -951,11 +951,11 @@ test "ipc file reader decodes using footer block index without stream reconstruc
     var batch = try RecordBatch.initBorrowed(allocator, schema, &[_]zarray.ArrayRef{ids});
     defer batch.deinit();
 
-    var file_bytes = std.ArrayList(u8){};
+    var file_bytes = std.ArrayListUnmanaged(u8){};
     defer file_bytes.deinit(allocator);
     const Sink = struct {
         allocator: std.mem.Allocator,
-        out: *std.ArrayList(u8),
+        out: *std.ArrayListUnmanaged(u8),
         pub const Error = error{OutOfMemory};
         pub fn writeAll(self: @This(), data: []const u8) Error!void {
             try self.out.appendSlice(self.allocator, data);
@@ -990,7 +990,7 @@ test "ipc file reader decodes using footer block index without stream reconstruc
         if (blk.offset >= @as(i64, @intCast(insert_pos))) blk.offset += junk.len;
     }
 
-    var shifted_prefix = std.ArrayList(u8){};
+    var shifted_prefix = std.ArrayListUnmanaged(u8){};
     defer shifted_prefix.deinit(allocator);
     try shifted_prefix.appendSlice(allocator, file_bytes.items[0..insert_pos]);
     try shifted_prefix.appendSlice(allocator, junk[0..]);
@@ -999,7 +999,7 @@ test "ipc file reader decodes using footer block index without stream reconstruc
     const footer_bytes_new = try fbs_lite_builder.packFooterBytes(allocator, footer_t);
     defer allocator.free(footer_bytes_new);
 
-    var rewritten = std.ArrayList(u8){};
+    var rewritten = std.ArrayListUnmanaged(u8){};
     defer rewritten.deinit(allocator);
     try rewritten.appendSlice(allocator, shifted_prefix.items);
     try rewritten.appendSlice(allocator, footer_bytes_new);
@@ -1049,11 +1049,11 @@ test "ipc file reader accepts file with leading padding before schema message" {
     var batch = try RecordBatch.initBorrowed(allocator, schema, &[_]zarray.ArrayRef{ids});
     defer batch.deinit();
 
-    var file_bytes = std.ArrayList(u8){};
+    var file_bytes = std.ArrayListUnmanaged(u8){};
     defer file_bytes.deinit(allocator);
     const Sink = struct {
         allocator: std.mem.Allocator,
-        out: *std.ArrayList(u8),
+        out: *std.ArrayListUnmanaged(u8),
         pub const Error = error{OutOfMemory};
         pub fn writeAll(self: @This(), data: []const u8) Error!void {
             try self.out.appendSlice(self.allocator, data);
@@ -1083,7 +1083,7 @@ test "ipc file reader accepts file with leading padding before schema message" {
     const footer_bytes_new = try fbs_lite_builder.packFooterBytes(allocator, footer_t);
     defer allocator.free(footer_bytes_new);
 
-    var rewritten = std.ArrayList(u8){};
+    var rewritten = std.ArrayListUnmanaged(u8){};
     defer rewritten.deinit(allocator);
     try rewritten.appendSlice(allocator, file_bytes.items[0..header_len]);
     try rewritten.appendNTimes(allocator, 0, @intCast(lead_pad_len));
@@ -1165,11 +1165,11 @@ test "ipc file roundtrips tensor and sparse tensor messages" {
     const schema_val = Schema{ .fields = fields[0..] };
 
     // Write file.
-    var file_bytes = std.ArrayList(u8){};
+    var file_bytes = std.ArrayListUnmanaged(u8){};
     defer file_bytes.deinit(allocator);
     const Sink = struct {
         allocator: std.mem.Allocator,
-        out: *std.ArrayList(u8),
+        out: *std.ArrayListUnmanaged(u8),
         pub const Error = error{OutOfMemory};
         pub fn writeAll(self: @This(), bytes: []const u8) Error!void {
             try self.out.appendSlice(self.allocator, bytes);

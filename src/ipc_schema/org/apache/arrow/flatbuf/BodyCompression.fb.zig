@@ -36,7 +36,7 @@ pub const BodyCompressionT = struct {
 
     pub fn Pack(rcv: BodyCompressionT, __builder: *Builder, __pack_opts: fb.common.PackOptions) fb.common.PackError!u32 {
         _ = .{__pack_opts};
-        var __tmp_offsets = std.ArrayList(u32){};
+        var __tmp_offsets = std.ArrayListUnmanaged(u32){};
         defer if (__pack_opts.allocator) |alloc| __tmp_offsets.deinit(alloc);
         try BodyCompression.Start(__builder);
         try BodyCompression.AddCodec(__builder, rcv.codec);

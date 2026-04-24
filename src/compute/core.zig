@@ -481,7 +481,7 @@ pub const Function = struct {
     allocator: std.mem.Allocator,
     name: []u8,
     kind: FunctionKind,
-    kernels: std.ArrayList(Kernel),
+    kernels: std.ArrayListUnmanaged(Kernel),
 
     pub fn kernelCount(self: *const Function) usize {
         return self.kernels.items.len;
@@ -499,7 +499,7 @@ pub const Function = struct {
 
 pub const FunctionRegistry = struct {
     allocator: std.mem.Allocator,
-    functions: std.ArrayList(Function),
+    functions: std.ArrayListUnmanaged(Function),
     function_index_by_kind: [function_kind_count]FunctionIndexMap,
 
     pub fn init(allocator: std.mem.Allocator) FunctionRegistry {

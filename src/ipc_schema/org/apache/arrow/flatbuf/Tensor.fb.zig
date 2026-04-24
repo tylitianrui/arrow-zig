@@ -36,16 +36,16 @@ pub const TensorT = struct {
     /// value types are supported, no strings or nested types
     type: org.apache.arrow.flatbuf.TypeT = @as(org.apache.arrow.flatbuf.Type.Tag, @enumFromInt(0)),
     /// The dimensions of the tensor, optionally named
-    shape: std.ArrayList(org.apache.arrow.flatbuf.TensorDimT) = .{},
+    shape: std.ArrayListUnmanaged(org.apache.arrow.flatbuf.TensorDimT) = .{},
     /// Non-negative byte offsets to advance one value cell along each dimension
     /// If omitted, default to row-major order (C-like).
-    strides: std.ArrayList(i64) = .{},
+    strides: std.ArrayListUnmanaged(i64) = .{},
     /// The location and size of the tensor's data
     data: ?*org.apache.arrow.flatbuf.BufferT = null,
 
     pub fn Pack(rcv: TensorT, __builder: *Builder, __pack_opts: fb.common.PackOptions) fb.common.PackError!u32 {
         _ = .{__pack_opts};
-        var __tmp_offsets = std.ArrayList(u32){};
+        var __tmp_offsets = std.ArrayListUnmanaged(u32){};
         defer if (__pack_opts.allocator) |alloc| __tmp_offsets.deinit(alloc);
         const type_off = try rcv.type.Pack(__builder, __pack_opts);
 
@@ -97,7 +97,7 @@ pub const TensorT = struct {
         }
 
         const shape_len = rcv.ShapeLen();
-        t.shape = try std.ArrayList(org.apache.arrow.flatbuf.TensorDimT).initCapacity(__pack_opts.allocator.?, @as(u32, @bitCast(shape_len)));
+        t.shape = try std.ArrayListUnmanaged(org.apache.arrow.flatbuf.TensorDimT).initCapacity(__pack_opts.allocator.?, @as(u32, @bitCast(shape_len)));
         t.shape.expandToCapacity();
         {
             var j: u32 = 0;
@@ -108,7 +108,7 @@ pub const TensorT = struct {
         }
 
         const strides_len = rcv.StridesLen();
-        t.strides = try std.ArrayList(i64).initCapacity(__pack_opts.allocator.?, @as(u32, @bitCast(strides_len)));
+        t.strides = try std.ArrayListUnmanaged(i64).initCapacity(__pack_opts.allocator.?, @as(u32, @bitCast(strides_len)));
         t.strides.expandToCapacity();
         {
             var j: u32 = 0;

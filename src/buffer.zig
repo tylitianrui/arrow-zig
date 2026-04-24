@@ -2,6 +2,7 @@ const std = @import("std");
 
 /// Default byte alignment for Arrow-compatible buffer allocations (64-byte SIMD-friendly).
 pub const ALIGNMENT: usize = 64;
+const ALIGNMENT_BYTES: ?u29 = @intCast(ALIGNMENT);
 
 const empty_storage: [0]u8 align(ALIGNMENT) = .{};
 
@@ -152,7 +153,7 @@ pub const OwnedBuffer = struct {
         // Ensure a minimum of ALIGNMENT bytes so the pointer is never null.
         const actualCapacity = alignedSize(if (capacity == 0) ALIGNMENT else capacity);
 
-        const data = try allocator.alignedAlloc(u8, std.mem.Alignment.fromByteUnits(ALIGNMENT), actualCapacity);
+        const data = try allocator.alignedAlloc(u8, ALIGNMENT_BYTES, actualCapacity);
         // Zero-initialise the buffer so that uninitialised bytes are always valid to read.
         @memset(data, 0);
         return .{ .data = data, .allocator = allocator };
@@ -211,7 +212,7 @@ pub const OwnedBuffer = struct {
     ///   allocating, so `self.data.len` may exceed `newSize` after the call.
     pub fn resize(self: *Self, newSize: usize) !void {
         const actualSize = alignedSize(newSize);
-        const newData = try self.allocator.alignedAlloc(u8, std.mem.Alignment.fromByteUnits(ALIGNMENT), actualSize);
+        const newData = try self.allocator.alignedAlloc(u8, ALIGNMENT_BYTES, actualSize);
         const copySize = @min(self.data.len, actualSize);
         @memcpy(newData[0..copySize], self.data[0..copySize]);
         if (actualSize > copySize) @memset(newData[copySize..], 0);

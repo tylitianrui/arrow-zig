@@ -74,7 +74,7 @@ pub const SparseTensorIndexCSFT = struct {
     ///                       [0, 2, 4, 5, 8]
     ///                     ].
     /// ```
-    indptrBuffers: std.ArrayList(org.apache.arrow.flatbuf.BufferT) = .{},
+    indptrBuffers: std.ArrayListUnmanaged(org.apache.arrow.flatbuf.BufferT) = .{},
     /// The type of values in indicesBuffers
     indicesType: ?*org.apache.arrow.flatbuf.IntT = null,
     /// indicesBuffers stores values of nodes.
@@ -88,18 +88,18 @@ pub const SparseTensorIndexCSFT = struct {
     ///                        [1, 2, 0, 2, 0, 0, 1, 2]
     ///                      ].
     /// ```
-    indicesBuffers: std.ArrayList(org.apache.arrow.flatbuf.BufferT) = .{},
+    indicesBuffers: std.ArrayListUnmanaged(org.apache.arrow.flatbuf.BufferT) = .{},
     /// axisOrder stores the sequence in which dimensions were traversed to
     /// produce the prefix tree.
     /// For example, the axisOrder for the above X is:
     /// ```text
     ///   axisOrder(X) = [0, 1, 2, 3].
     /// ```
-    axisOrder: std.ArrayList(i32) = .{},
+    axisOrder: std.ArrayListUnmanaged(i32) = .{},
 
     pub fn Pack(rcv: SparseTensorIndexCSFT, __builder: *Builder, __pack_opts: fb.common.PackOptions) fb.common.PackError!u32 {
         _ = .{__pack_opts};
-        var __tmp_offsets = std.ArrayList(u32){};
+        var __tmp_offsets = std.ArrayListUnmanaged(u32){};
         defer if (__pack_opts.allocator) |alloc| __tmp_offsets.deinit(alloc);
         const indptrType_off = if (rcv.indptrType) |x| try x.Pack(__builder, __pack_opts) else 0;
 
@@ -164,7 +164,7 @@ pub const SparseTensorIndexCSFT = struct {
         }
 
         const indptrBuffers_len = rcv.IndptrBuffersLen();
-        t.indptrBuffers = try std.ArrayList(org.apache.arrow.flatbuf.BufferT).initCapacity(__pack_opts.allocator.?, @as(u32, @bitCast(indptrBuffers_len)));
+        t.indptrBuffers = try std.ArrayListUnmanaged(org.apache.arrow.flatbuf.BufferT).initCapacity(__pack_opts.allocator.?, @as(u32, @bitCast(indptrBuffers_len)));
         t.indptrBuffers.expandToCapacity();
         {
             var j: u32 = 0;
@@ -183,7 +183,7 @@ pub const SparseTensorIndexCSFT = struct {
         }
 
         const indicesBuffers_len = rcv.IndicesBuffersLen();
-        t.indicesBuffers = try std.ArrayList(org.apache.arrow.flatbuf.BufferT).initCapacity(__pack_opts.allocator.?, @as(u32, @bitCast(indicesBuffers_len)));
+        t.indicesBuffers = try std.ArrayListUnmanaged(org.apache.arrow.flatbuf.BufferT).initCapacity(__pack_opts.allocator.?, @as(u32, @bitCast(indicesBuffers_len)));
         t.indicesBuffers.expandToCapacity();
         {
             var j: u32 = 0;
@@ -194,7 +194,7 @@ pub const SparseTensorIndexCSFT = struct {
         }
 
         const axisOrder_len = rcv.AxisOrderLen();
-        t.axisOrder = try std.ArrayList(i32).initCapacity(__pack_opts.allocator.?, @as(u32, @bitCast(axisOrder_len)));
+        t.axisOrder = try std.ArrayListUnmanaged(i32).initCapacity(__pack_opts.allocator.?, @as(u32, @bitCast(axisOrder_len)));
         t.axisOrder.expandToCapacity();
         {
             var j: u32 = 0;

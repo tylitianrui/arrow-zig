@@ -201,7 +201,7 @@ pub fn StreamWriter(comptime WriterType: type) type {
                 .version = toFbsMetadataVersion(self.metadata_version),
                 .header = .{ .Schema = schema_ptr },
                 .bodyLength = 0,
-                .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(self.allocator, 0),
+                .custom_metadata = try std.ArrayListUnmanaged(fbs.KeyValueT).initCapacity(self.allocator, 0),
             };
             defer msg.deinit(self.allocator);
 
@@ -215,14 +215,14 @@ pub fn StreamWriter(comptime WriterType: type) type {
         }
 
         pub fn writeRecordBatch(self: *Self, batch: RecordBatch) (WriterError || @TypeOf(self.writer).Error)!void {
-            var dictionary_ids = try std.ArrayList(i64).initCapacity(self.allocator, 0);
+            var dictionary_ids = try std.ArrayListUnmanaged(i64).initCapacity(self.allocator, 0);
             defer dictionary_ids.deinit(self.allocator);
             var next_dictionary_id: i64 = 0;
             for (batch.schema().fields) |field| {
                 try collectDictionaryIdsFromField(self.allocator, field, &next_dictionary_id, &dictionary_ids);
             }
 
-            var dictionary_arrays = try std.ArrayList(ArrayRef).initCapacity(self.allocator, 0);
+            var dictionary_arrays = try std.ArrayListUnmanaged(ArrayRef).initCapacity(self.allocator, 0);
             defer {
                 for (dictionary_arrays.items) |dict_ref| {
                     var owned = dict_ref;
@@ -259,10 +259,10 @@ pub fn StreamWriter(comptime WriterType: type) type {
                 }
             }
 
-            var nodes = try std.ArrayList(fbs.FieldNodeT).initCapacity(self.allocator, 0);
-            var buffers = try std.ArrayList(fbs.BufferT).initCapacity(self.allocator, 0);
-            var variadic_buffer_counts = try std.ArrayList(i64).initCapacity(self.allocator, 0);
-            var body_buffers = try std.ArrayList(array_data.SharedBuffer).initCapacity(self.allocator, 0);
+            var nodes = try std.ArrayListUnmanaged(fbs.FieldNodeT).initCapacity(self.allocator, 0);
+            var buffers = try std.ArrayListUnmanaged(fbs.BufferT).initCapacity(self.allocator, 0);
+            var variadic_buffer_counts = try std.ArrayListUnmanaged(i64).initCapacity(self.allocator, 0);
+            var body_buffers = try std.ArrayListUnmanaged(array_data.SharedBuffer).initCapacity(self.allocator, 0);
             var owns_body_buffers = false;
             defer body_buffers.deinit(self.allocator);
             defer if (owns_body_buffers) {
@@ -312,7 +312,7 @@ pub fn StreamWriter(comptime WriterType: type) type {
                 .version = toFbsMetadataVersion(self.metadata_version),
                 .header = .{ .RecordBatch = record_batch_ptr },
                 .bodyLength = try castI64Metadata(body_offset),
-                .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(self.allocator, 0),
+                .custom_metadata = try std.ArrayListUnmanaged(fbs.KeyValueT).initCapacity(self.allocator, 0),
             };
             defer msg.deinit(self.allocator);
 
@@ -415,7 +415,7 @@ fn buildTensorLikeMessage(
         .tensor => |tensor| blk: {
             const type_t = try buildTensorTypeT(allocator, tensor.value_type);
 
-            var shape = try std.ArrayList(fbs.TensorDimT).initCapacity(allocator, tensor.shape.len);
+            var shape = try std.ArrayListUnmanaged(fbs.TensorDimT).initCapacity(allocator, tensor.shape.len);
             for (tensor.shape) |dim| {
                 try shape.append(allocator, .{
                     .size = dim.size,
@@ -424,9 +424,9 @@ fn buildTensorLikeMessage(
             }
 
             var strides = if (tensor.strides) |vals|
-                try std.ArrayList(i64).initCapacity(allocator, vals.len)
+                try std.ArrayListUnmanaged(i64).initCapacity(allocator, vals.len)
             else
-                try std.ArrayList(i64).initCapacity(allocator, 0);
+                try std.ArrayListUnmanaged(i64).initCapacity(allocator, 0);
             if (tensor.strides) |vals| {
                 for (vals) |v| try strides.append(allocator, v);
             }
@@ -444,13 +444,13 @@ fn buildTensorLikeMessage(
                 .version = toFbsMetadataVersion(metadata_version),
                 .header = .{ .Tensor = tensor_ptr },
                 .bodyLength = try castI64Metadata(body.len),
-                .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0),
+                .custom_metadata = try std.ArrayListUnmanaged(fbs.KeyValueT).initCapacity(allocator, 0),
             };
         },
         .sparse_tensor => |sparse| blk: {
             const type_t = try buildTensorTypeT(allocator, sparse.value_type);
 
-            var shape = try std.ArrayList(fbs.TensorDimT).initCapacity(allocator, sparse.shape.len);
+            var shape = try std.ArrayListUnmanaged(fbs.TensorDimT).initCapacity(allocator, sparse.shape.len);
             for (sparse.shape) |dim| {
                 try shape.append(allocator, .{
                     .size = dim.size,
@@ -462,9 +462,9 @@ fn buildTensorLikeMessage(
                 .coo => |coo| idx_blk: {
                     const indices_type = try buildFbsIntTypeFromIntType(allocator, coo.indices_type);
                     var indices_strides = if (coo.indices_strides) |vals|
-                        try std.ArrayList(i64).initCapacity(allocator, vals.len)
+                        try std.ArrayListUnmanaged(i64).initCapacity(allocator, vals.len)
                     else
-                        try std.ArrayList(i64).initCapacity(allocator, 0);
+                        try std.ArrayListUnmanaged(i64).initCapacity(allocator, 0);
                     if (coo.indices_strides) |vals| {
                         for (vals) |v| try indices_strides.append(allocator, v);
                     }
@@ -499,7 +499,7 @@ fn buildTensorLikeMessage(
                     const indptr_type = try buildFbsIntTypeFromIntType(allocator, csf.indptr_type);
                     const indices_type = try buildFbsIntTypeFromIntType(allocator, csf.indices_type);
 
-                    var indptr_buffers = try std.ArrayList(fbs.BufferT).initCapacity(allocator, csf.indptr_buffers.len);
+                    var indptr_buffers = try std.ArrayListUnmanaged(fbs.BufferT).initCapacity(allocator, csf.indptr_buffers.len);
                     for (csf.indptr_buffers) |buf_region| {
                         try validateBufferRegionWithinBody(buf_region, body.len);
                         try indptr_buffers.append(allocator, .{
@@ -508,7 +508,7 @@ fn buildTensorLikeMessage(
                         });
                     }
 
-                    var indices_buffers = try std.ArrayList(fbs.BufferT).initCapacity(allocator, csf.indices_buffers.len);
+                    var indices_buffers = try std.ArrayListUnmanaged(fbs.BufferT).initCapacity(allocator, csf.indices_buffers.len);
                     for (csf.indices_buffers) |buf_region| {
                         try validateBufferRegionWithinBody(buf_region, body.len);
                         try indices_buffers.append(allocator, .{
@@ -517,7 +517,7 @@ fn buildTensorLikeMessage(
                         });
                     }
 
-                    var axis_order = try std.ArrayList(i32).initCapacity(allocator, csf.axis_order.len);
+                    var axis_order = try std.ArrayListUnmanaged(i32).initCapacity(allocator, csf.axis_order.len);
                     for (csf.axis_order) |axis| try axis_order.append(allocator, axis);
 
                     const csf_ptr = try allocT(allocator, fbs.SparseTensorIndexCSFT, .{
@@ -544,7 +544,7 @@ fn buildTensorLikeMessage(
                 .version = toFbsMetadataVersion(metadata_version),
                 .header = .{ .SparseTensor = sparse_ptr },
                 .bodyLength = try castI64Metadata(body.len),
-                .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0),
+                .custom_metadata = try std.ArrayListUnmanaged(fbs.KeyValueT).initCapacity(allocator, 0),
             };
         },
     };
@@ -562,7 +562,7 @@ fn buildSchemaT(
         return StreamError.UnsupportedType;
     }
 
-    var fields = try std.ArrayList(fbs.FieldT).initCapacity(allocator, 0);
+    var fields = try std.ArrayListUnmanaged(fbs.FieldT).initCapacity(allocator, 0);
     for (schema.fields) |field| {
         try fields.append(allocator, try buildFieldT(allocator, field, next_dictionary_id));
     }
@@ -571,12 +571,12 @@ fn buildSchemaT(
         .endianness = .Little,
         .fields = fields,
         .custom_metadata = try buildCustomMetadataT(allocator, schema.metadata),
-        .features = try std.ArrayList(i64).initCapacity(allocator, 0),
+        .features = try std.ArrayListUnmanaged(i64).initCapacity(allocator, 0),
     };
 }
 
 fn buildFieldT(allocator: std.mem.Allocator, field: Field, next_dictionary_id: *i64) WriterError!fbs.FieldT {
-    var children = try std.ArrayList(fbs.FieldT).initCapacity(allocator, 0);
+    var children = try std.ArrayListUnmanaged(fbs.FieldT).initCapacity(allocator, 0);
     const logical_type = switch (field.data_type.*) {
         .dictionary => |dict| dict.value_type.*,
         else => field.data_type.*,
@@ -608,7 +608,7 @@ fn buildFieldT(allocator: std.mem.Allocator, field: Field, next_dictionary_id: *
             for (st.fields) |child| try children.append(allocator, try buildFieldT(allocator, child, next_dictionary_id));
         },
         .map => |map_t| {
-            var entry_children = try std.ArrayList(fbs.FieldT).initCapacity(allocator, 0);
+            var entry_children = try std.ArrayListUnmanaged(fbs.FieldT).initCapacity(allocator, 0);
             try entry_children.append(allocator, try buildFieldT(allocator, map_t.key_field, next_dictionary_id));
             try entry_children.append(allocator, try buildFieldT(allocator, map_t.item_field, next_dictionary_id));
             try children.append(allocator, .{
@@ -617,7 +617,7 @@ fn buildFieldT(allocator: std.mem.Allocator, field: Field, next_dictionary_id: *
                 .type = .{ .Struct_ = try allocT(allocator, fbs.Struct_T, .{}) },
                 .dictionary = null,
                 .children = entry_children,
-                .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0),
+                .custom_metadata = try std.ArrayListUnmanaged(fbs.KeyValueT).initCapacity(allocator, 0),
             });
         },
         .sparse_union, .dense_union => |uni| {
@@ -674,9 +674,9 @@ fn buildFieldT(allocator: std.mem.Allocator, field: Field, next_dictionary_id: *
     };
 }
 
-fn buildCustomMetadataT(allocator: std.mem.Allocator, metadata: ?[]const datatype.KeyValue) WriterError!std.ArrayList(fbs.KeyValueT) {
-    const kvs = metadata orelse return std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0);
-    var out = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, kvs.len);
+fn buildCustomMetadataT(allocator: std.mem.Allocator, metadata: ?[]const datatype.KeyValue) WriterError!std.ArrayListUnmanaged(fbs.KeyValueT) {
+    const kvs = metadata orelse return std.ArrayListUnmanaged(fbs.KeyValueT).initCapacity(allocator, 0);
+    var out = try std.ArrayListUnmanaged(fbs.KeyValueT).initCapacity(allocator, kvs.len);
     for (kvs) |kv| {
         try out.append(allocator, .{ .key = kv.key, .value = kv.value });
     }
@@ -687,11 +687,11 @@ fn buildFieldCustomMetadataT(
     allocator: std.mem.Allocator,
     metadata: ?[]const datatype.KeyValue,
     extension_meta: ?datatype.ExtensionType,
-) WriterError!std.ArrayList(fbs.KeyValueT) {
+) WriterError!std.ArrayListUnmanaged(fbs.KeyValueT) {
     const base_count = if (metadata) |m| m.len else 0;
     const ext_count: usize = if (extension_meta) |ext| if (ext.metadata != null) 2 else 1 else 0;
 
-    var out = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, base_count + ext_count);
+    var out = try std.ArrayListUnmanaged(fbs.KeyValueT).initCapacity(allocator, base_count + ext_count);
     if (metadata) |kvs| {
         for (kvs) |kv| {
             try out.append(allocator, .{ .key = kv.key, .value = kv.value });
@@ -772,7 +772,7 @@ fn buildTypeT(allocator: std.mem.Allocator, dt: DataType) WriterError!fbs.TypeT 
         },
         .map => |m| .{ .Map = try allocT(allocator, fbs.MapT, .{ .keysSorted = m.keys_sorted }) },
         .sparse_union => |u| blk: {
-            var type_ids = try std.ArrayList(i32).initCapacity(allocator, u.type_ids.len);
+            var type_ids = try std.ArrayListUnmanaged(i32).initCapacity(allocator, u.type_ids.len);
             for (u.type_ids) |id| try type_ids.append(allocator, id);
             break :blk .{
                 .Union = try allocT(allocator, fbs.UnionT, .{
@@ -782,7 +782,7 @@ fn buildTypeT(allocator: std.mem.Allocator, dt: DataType) WriterError!fbs.TypeT 
             };
         },
         .dense_union => |u| blk: {
-            var type_ids = try std.ArrayList(i32).initCapacity(allocator, u.type_ids.len);
+            var type_ids = try std.ArrayListUnmanaged(i32).initCapacity(allocator, u.type_ids.len);
             for (u.type_ids) |id| try type_ids.append(allocator, id);
             break :blk .{
                 .Union = try allocT(allocator, fbs.UnionT, .{
@@ -826,7 +826,7 @@ fn collectDictionaryIdsFromField(
     allocator: std.mem.Allocator,
     field: Field,
     next_dictionary_id: *i64,
-    ids: *std.ArrayList(i64),
+    ids: *std.ArrayListUnmanaged(i64),
 ) error{OutOfMemory}!void {
     switch (field.data_type.*) {
         .dictionary => |dict| {
@@ -872,7 +872,7 @@ fn collectDictionaryIdsFromField(
 fn collectDictionaryArraysFromData(
     allocator: std.mem.Allocator,
     data: *const ArrayData,
-    out: *std.ArrayList(ArrayRef),
+    out: *std.ArrayListUnmanaged(ArrayRef),
 ) error{OutOfMemory}!void {
     switch (storageDataType(data.data_type)) {
         .dictionary => {
@@ -906,10 +906,10 @@ fn writeDictionaryBatch(
     is_delta: bool,
     metadata_version: MetadataVersion,
 ) (WriterError || @TypeOf(writer).Error)!void {
-    var nodes = try std.ArrayList(fbs.FieldNodeT).initCapacity(allocator, 0);
-    var buffers = try std.ArrayList(fbs.BufferT).initCapacity(allocator, 0);
-    var variadic_buffer_counts = try std.ArrayList(i64).initCapacity(allocator, 0);
-    var body_buffers = try std.ArrayList(array_data.SharedBuffer).initCapacity(allocator, 0);
+    var nodes = try std.ArrayListUnmanaged(fbs.FieldNodeT).initCapacity(allocator, 0);
+    var buffers = try std.ArrayListUnmanaged(fbs.BufferT).initCapacity(allocator, 0);
+    var variadic_buffer_counts = try std.ArrayListUnmanaged(i64).initCapacity(allocator, 0);
+    var body_buffers = try std.ArrayListUnmanaged(array_data.SharedBuffer).initCapacity(allocator, 0);
     defer body_buffers.deinit(allocator);
 
     var body_offset: u64 = 0;
@@ -945,7 +945,7 @@ fn writeDictionaryBatch(
         .version = toFbsMetadataVersion(metadata_version),
         .header = .{ .DictionaryBatch = dictionary_batch_ptr },
         .bodyLength = try castI64Metadata(body_offset),
-        .custom_metadata = try std.ArrayList(fbs.KeyValueT).initCapacity(allocator, 0),
+        .custom_metadata = try std.ArrayListUnmanaged(fbs.KeyValueT).initCapacity(allocator, 0),
     };
     defer msg.deinit(allocator);
 
@@ -1145,10 +1145,10 @@ fn bitAt(buf: array_data.SharedBuffer, bit_index: usize) bool {
 fn appendArrayMeta(
     allocator: std.mem.Allocator,
     data: *const ArrayData,
-    nodes: *std.ArrayList(fbs.FieldNodeT),
-    buffers: *std.ArrayList(fbs.BufferT),
-    variadic_buffer_counts: *std.ArrayList(i64),
-    body_buffers: *std.ArrayList(array_data.SharedBuffer),
+    nodes: *std.ArrayListUnmanaged(fbs.FieldNodeT),
+    buffers: *std.ArrayListUnmanaged(fbs.BufferT),
+    variadic_buffer_counts: *std.ArrayListUnmanaged(i64),
+    body_buffers: *std.ArrayListUnmanaged(array_data.SharedBuffer),
     body_offset: *u64,
     metadata_version: MetadataVersion,
 ) WriterError!void {
@@ -1213,8 +1213,8 @@ fn appendArrayMeta(
 fn applyBodyCompression(
     allocator: std.mem.Allocator,
     codec: BodyCompressionCodec,
-    buffers: *std.ArrayList(fbs.BufferT),
-    body_buffers: *std.ArrayList(array_data.SharedBuffer),
+    buffers: *std.ArrayListUnmanaged(fbs.BufferT),
+    body_buffers: *std.ArrayListUnmanaged(array_data.SharedBuffer),
     body_offset: *u64,
 ) WriterError!*fbs.BodyCompressionT {
     if (buffers.items.len != body_buffers.items.len) return StreamError.InvalidMetadata;
@@ -1328,7 +1328,7 @@ fn computeNullCount(data: *const ArrayData) usize {
 }
 
 fn parseGoldenHexCsv(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
-    var out = std.ArrayList(u8){};
+    var out = std.ArrayListUnmanaged(u8){};
     defer out.deinit(allocator);
 
     var it = std.mem.tokenizeAny(u8, text, ", \n\r\t");
@@ -1388,7 +1388,7 @@ test "ipc writer stream output matches golden fixture" {
     var batch = try RecordBatch.initBorrowed(allocator, schema, &[_]ArrayRef{col_ref});
     defer batch.deinit();
 
-    var out = std.array_list.Managed(u8).init(allocator);
+    var out = std.ArrayList(u8).init(allocator);
     defer out.deinit();
 
     var writer = StreamWriter(@TypeOf(out.writer())).init(allocator, out.writer());
@@ -1436,7 +1436,7 @@ test "ipc writer roundtrip supports view types and variadicBufferCounts" {
     var batch = try RecordBatch.initBorrowed(allocator, schema, &[_]ArrayRef{ sv_ref, bv_ref });
     defer batch.deinit();
 
-    var out = std.array_list.Managed(u8).init(allocator);
+    var out = std.ArrayList(u8).init(allocator);
     defer out.deinit();
     var writer = StreamWriter(@TypeOf(out.writer())).init(allocator, out.writer());
     defer writer.deinit();
@@ -1504,7 +1504,7 @@ test "ipc writer and reader roundtrip extension field metadata and values" {
     var batch = try RecordBatch.initBorrowed(allocator, schema, &[_]ArrayRef{ext_ref});
     defer batch.deinit();
 
-    var out = std.array_list.Managed(u8).init(allocator);
+    var out = std.ArrayList(u8).init(allocator);
     defer out.deinit();
     var writer = StreamWriter(@TypeOf(out.writer())).init(allocator, out.writer());
     defer writer.deinit();
@@ -1597,7 +1597,7 @@ test "ipc writer emits dictionary delta on append-only dictionary growth" {
     var batch_2 = try RecordBatch.initBorrowed(allocator, schema, &[_]ArrayRef{dict_col_2});
     defer batch_2.deinit();
 
-    var out = std.array_list.Managed(u8).init(allocator);
+    var out = std.ArrayList(u8).init(allocator);
     defer out.deinit();
 
     var writer = StreamWriter(@TypeOf(out.writer())).init(allocator, out.writer());
@@ -1610,7 +1610,7 @@ test "ipc writer emits dictionary delta on append-only dictionary growth" {
     var stream = std.io.fixedBufferStream(out.items);
     const reader = stream.reader();
 
-    var dict_flags = std.ArrayList(bool){};
+    var dict_flags = std.ArrayListUnmanaged(bool){};
     defer dict_flags.deinit(allocator);
 
     while (true) {
@@ -1646,7 +1646,7 @@ test "ipc writer emits body compression metadata and framing" {
     var batch = try RecordBatch.initBorrowed(allocator, schema, &[_]ArrayRef{col});
     defer batch.deinit();
 
-    var out = std.array_list.Managed(u8).init(allocator);
+    var out = std.ArrayList(u8).init(allocator);
     defer out.deinit();
 
     var writer = StreamWriter(@TypeOf(out.writer())).initWithBodyCompression(allocator, out.writer(), .zstd);
@@ -1705,7 +1705,7 @@ test "ipc writer can switch body compression codec between record batches" {
     var rb2 = try RecordBatch.initBorrowed(allocator, schema, &[_]ArrayRef{c2});
     defer rb2.deinit();
 
-    var out = std.array_list.Managed(u8).init(allocator);
+    var out = std.ArrayList(u8).init(allocator);
     defer out.deinit();
 
     var writer = StreamWriter(@TypeOf(out.writer())).init(allocator, out.writer());
@@ -1758,7 +1758,7 @@ test "ipc writer rejects dictionary with unsigned index type" {
     };
     const schema = Schema{ .fields = fields[0..] };
 
-    var out = std.array_list.Managed(u8).init(allocator);
+    var out = std.ArrayList(u8).init(allocator);
     defer out.deinit();
     var writer = StreamWriter(@TypeOf(out.writer())).init(allocator, out.writer());
     defer writer.deinit();
@@ -1797,7 +1797,7 @@ test "ipc writer rejects decimal precision outside allowed range" {
         };
         const schema = Schema{ .fields = fields[0..] };
 
-        var out = std.array_list.Managed(u8).init(allocator);
+        var out = std.ArrayList(u8).init(allocator);
         defer out.deinit();
         var writer = StreamWriter(@TypeOf(out.writer())).init(allocator, out.writer());
         defer writer.deinit();
@@ -1815,7 +1815,7 @@ test "ipc writer rejects big-endian schema" {
     };
     const schema = Schema{ .fields = fields[0..], .endianness = .big };
 
-    var out = std.array_list.Managed(u8).init(allocator);
+    var out = std.ArrayList(u8).init(allocator);
     defer out.deinit();
     var writer = StreamWriter(@TypeOf(out.writer())).init(allocator, out.writer());
     defer writer.deinit();
@@ -1832,7 +1832,7 @@ test "ipc writer normalizes big-endian schema when configured" {
     };
     const schema = Schema{ .fields = fields[0..], .endianness = .big };
 
-    var out = std.array_list.Managed(u8).init(allocator);
+    var out = std.ArrayList(u8).init(allocator);
     defer out.deinit();
     var writer = StreamWriter(@TypeOf(out.writer())).initWithOptions(allocator, out.writer(), .{
         .endianness_mode = .normalize_to_little,
@@ -1868,7 +1868,7 @@ test "ipc writer can emit metadata version V4 for schema and record batch" {
     var batch = try RecordBatch.initBorrowed(allocator, schema, &[_]ArrayRef{id_ref});
     defer batch.deinit();
 
-    var out = std.array_list.Managed(u8).init(allocator);
+    var out = std.ArrayList(u8).init(allocator);
     defer out.deinit();
     var writer = StreamWriter(@TypeOf(out.writer())).initWithOptions(allocator, out.writer(), .{
         .metadata_version = .v4,
@@ -1918,7 +1918,7 @@ test "ipc writer emits V4-compatible sparse union buffers" {
     };
     const schema = Schema{ .fields = schema_fields[0..] };
 
-    var out = std.array_list.Managed(u8).init(allocator);
+    var out = std.ArrayList(u8).init(allocator);
     defer out.deinit();
     var writer = StreamWriter(@TypeOf(out.writer())).initWithOptions(allocator, out.writer(), .{
         .metadata_version = .v4,
@@ -2007,7 +2007,7 @@ test "ipc writer emits tensor message via public tensor-like api" {
         },
     };
 
-    var out = std.array_list.Managed(u8).init(allocator);
+    var out = std.ArrayList(u8).init(allocator);
     defer out.deinit();
     var writer = StreamWriter(@TypeOf(out.writer())).init(allocator, out.writer());
     defer writer.deinit();

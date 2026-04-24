@@ -41,7 +41,7 @@ const fbs = struct {
 
 const CollectWriter = struct {
     allocator: std.mem.Allocator,
-    bytes: *std.ArrayList(u8),
+    bytes: *std.ArrayListUnmanaged(u8),
 
     pub const Error = error{OutOfMemory};
 
@@ -54,14 +54,14 @@ pub fn FileWriter(comptime WriterType: type) type {
     return struct {
         allocator: std.mem.Allocator,
         writer: WriterType,
-        stream_bytes: *std.ArrayList(u8),
+        stream_bytes: *std.ArrayListUnmanaged(u8),
         stream: stream_writer.StreamWriter(CollectWriter),
         schema_msg: ?*fbs.MessageT = null,
         schema_metadata_bytes: ?[]u8 = null,
-        dictionary_blocks: std.ArrayList(fbs.BlockT),
-        record_batch_blocks: std.ArrayList(fbs.BlockT),
-        tensor_blocks: std.ArrayList(fbs.BlockT),
-        sparse_tensor_blocks: std.ArrayList(fbs.BlockT),
+        dictionary_blocks: std.ArrayListUnmanaged(fbs.BlockT),
+        record_batch_blocks: std.ArrayListUnmanaged(fbs.BlockT),
+        tensor_blocks: std.ArrayListUnmanaged(fbs.BlockT),
+        sparse_tensor_blocks: std.ArrayListUnmanaged(fbs.BlockT),
         stream_offset: usize = 0,
         header_written: bool = false,
         saw_stream_end: bool = false,
@@ -74,8 +74,8 @@ pub fn FileWriter(comptime WriterType: type) type {
         }
 
         pub fn initWithOptions(allocator: std.mem.Allocator, writer: WriterType, options: WriterOptions) FileError!Self {
-            const stream_bytes = try allocator.create(std.ArrayList(u8));
-            stream_bytes.* = std.ArrayList(u8){};
+            const stream_bytes = try allocator.create(std.ArrayListUnmanaged(u8));
+            stream_bytes.* = std.ArrayListUnmanaged(u8){};
 
             const collect_writer = CollectWriter{
                 .allocator = allocator,
@@ -86,10 +86,10 @@ pub fn FileWriter(comptime WriterType: type) type {
                 .writer = writer,
                 .stream_bytes = stream_bytes,
                 .stream = stream_writer.StreamWriter(CollectWriter).initWithOptions(allocator, collect_writer, options),
-                .dictionary_blocks = try std.ArrayList(fbs.BlockT).initCapacity(allocator, 0),
-                .record_batch_blocks = try std.ArrayList(fbs.BlockT).initCapacity(allocator, 0),
-                .tensor_blocks = try std.ArrayList(fbs.BlockT).initCapacity(allocator, 0),
-                .sparse_tensor_blocks = try std.ArrayList(fbs.BlockT).initCapacity(allocator, 0),
+                .dictionary_blocks = try std.ArrayListUnmanaged(fbs.BlockT).initCapacity(allocator, 0),
+                .record_batch_blocks = try std.ArrayListUnmanaged(fbs.BlockT).initCapacity(allocator, 0),
+                .tensor_blocks = try std.ArrayListUnmanaged(fbs.BlockT).initCapacity(allocator, 0),
+                .sparse_tensor_blocks = try std.ArrayListUnmanaged(fbs.BlockT).initCapacity(allocator, 0),
             };
         }
 
@@ -291,7 +291,7 @@ fn writeU32Le(writer: anytype, value: u32) !void {
 }
 
 fn encodeBlocksToString(allocator: std.mem.Allocator, blocks: []const fbs.BlockT) error{OutOfMemory}![]u8 {
-    var buf = std.ArrayList(u8){};
+    var buf = std.ArrayListUnmanaged(u8){};
     defer buf.deinit(allocator);
     for (blocks, 0..) |blk, i| {
         if (i > 0) try buf.append(allocator, ',');
@@ -305,17 +305,17 @@ fn encodeBlocksToString(allocator: std.mem.Allocator, blocks: []const fbs.BlockT
 fn buildFooterBytes(
     allocator: std.mem.Allocator,
     schema: *fbs.SchemaT,
-    dictionary_blocks: std.ArrayList(fbs.BlockT),
-    record_batch_blocks: std.ArrayList(fbs.BlockT),
-    tensor_blocks: std.ArrayList(fbs.BlockT),
-    sparse_tensor_blocks: std.ArrayList(fbs.BlockT),
+    dictionary_blocks: std.ArrayListUnmanaged(fbs.BlockT),
+    record_batch_blocks: std.ArrayListUnmanaged(fbs.BlockT),
+    tensor_blocks: std.ArrayListUnmanaged(fbs.BlockT),
+    sparse_tensor_blocks: std.ArrayListUnmanaged(fbs.BlockT),
     metadata_version: fbs.MetadataVersion,
 ) FileError![]u8 {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const aa = arena.allocator();
 
-    var custom_metadata = std.ArrayList(fbs.KeyValueT){};
+    var custom_metadata = std.ArrayListUnmanaged(fbs.KeyValueT){};
 
     if (tensor_blocks.items.len > 0) {
         const encoded = try encodeBlocksToString(aa, tensor_blocks.items);
@@ -380,11 +380,11 @@ test "ipc file writer emits arrow file magic and footer" {
     var batch = try RecordBatch.initBorrowed(allocator, schema, &[_]@import("../array/array_ref.zig").ArrayRef{id_ref});
     defer batch.deinit();
 
-    var out = std.ArrayList(u8){};
+    var out = std.ArrayListUnmanaged(u8){};
     defer out.deinit(allocator);
     const Sink = struct {
         allocator: std.mem.Allocator,
-        out: *std.ArrayList(u8),
+        out: *std.ArrayListUnmanaged(u8),
         pub const Error = error{OutOfMemory};
         pub fn writeAll(self: @This(), bytes: []const u8) Error!void {
             try self.out.appendSlice(self.allocator, bytes);
@@ -415,11 +415,11 @@ test "ipc file writer can emit footer metadata version V4" {
     };
     const schema = Schema{ .fields = fields[0..] };
 
-    var out = std.ArrayList(u8){};
+    var out = std.ArrayListUnmanaged(u8){};
     defer out.deinit(allocator);
     const Sink = struct {
         allocator: std.mem.Allocator,
-        out: *std.ArrayList(u8),
+        out: *std.ArrayListUnmanaged(u8),
         pub const Error = error{OutOfMemory};
         pub fn writeAll(self: @This(), bytes: []const u8) Error!void {
             try self.out.appendSlice(self.allocator, bytes);
@@ -490,11 +490,11 @@ test "ipc file writer streams incrementally and accepts tensor-like messages" {
         },
     };
 
-    var out = std.ArrayList(u8){};
+    var out = std.ArrayListUnmanaged(u8){};
     defer out.deinit(allocator);
     const Sink = struct {
         allocator: std.mem.Allocator,
-        out: *std.ArrayList(u8),
+        out: *std.ArrayListUnmanaged(u8),
         pub const Error = error{OutOfMemory};
         pub fn writeAll(self: @This(), bytes: []const u8) Error!void {
             try self.out.appendSlice(self.allocator, bytes);
@@ -536,11 +536,11 @@ test "ipc file writer rejects damaged metadata root offset" {
     };
     const schema = Schema{ .fields = fields[0..] };
 
-    var out = std.ArrayList(u8){};
+    var out = std.ArrayListUnmanaged(u8){};
     defer out.deinit(allocator);
     const Sink = struct {
         allocator: std.mem.Allocator,
-        out: *std.ArrayList(u8),
+        out: *std.ArrayListUnmanaged(u8),
         pub const Error = error{OutOfMemory};
         pub fn writeAll(self: @This(), bytes: []const u8) Error!void {
             try self.out.appendSlice(self.allocator, bytes);
@@ -566,11 +566,11 @@ test "ipc file writer rejects damaged metadata header type" {
     };
     const schema = Schema{ .fields = fields[0..] };
 
-    var out = std.ArrayList(u8){};
+    var out = std.ArrayListUnmanaged(u8){};
     defer out.deinit(allocator);
     const Sink = struct {
         allocator: std.mem.Allocator,
-        out: *std.ArrayList(u8),
+        out: *std.ArrayListUnmanaged(u8),
         pub const Error = error{OutOfMemory};
         pub fn writeAll(self: @This(), bytes: []const u8) Error!void {
             try self.out.appendSlice(self.allocator, bytes);

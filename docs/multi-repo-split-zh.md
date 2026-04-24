@@ -36,7 +36,7 @@
 
 - `zig build test`
 - `zig build examples`
-- 与 `zarrow` 当前支持版本一致的 Zig matrix（当前以 0.15.x 为准）
+- 与 `zarrow` 当前支持版本一致的 Zig matrix（当前以 0.14.x 为准）
 
 另外建议增加一条“与最新 zarrow 兼容”任务，避免依赖漂移。
 

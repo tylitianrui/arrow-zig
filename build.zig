@@ -5,8 +5,8 @@ const builtin = @import("builtin");
 // Zig 0.16+ is not yet supported; update this check when compatibility is confirmed.
 comptime {
     const ver = builtin.zig_version;
-    if (ver.major == 0 and ver.minor >= 16) {
-        @compileError("zarrow requires Zig 0.15.x. Zig 0.16+ is not yet supported.");
+    if (ver.major != 0 or ver.minor != 14) {
+        @compileError("zarrow release/zig-0.14 requires Zig 0.14.x.");
     }
 }
 
