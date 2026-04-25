@@ -224,6 +224,10 @@ pub const ComputeExecContext = compute_mod.ExecContext;
 pub const computeUnaryNullPropagates = compute_mod.unaryNullPropagates;
 pub const computeBinaryNullPropagates = compute_mod.binaryNullPropagates;
 pub const computeInferBinaryExecLen = compute_mod.inferBinaryExecLen;
+pub const computeDatumListValueAt = compute_mod.datumListValueAt;
+pub const computeDatumLargeListValueAt = compute_mod.datumLargeListValueAt;
+pub const computeDatumFixedSizeListValueAt = compute_mod.datumFixedSizeListValueAt;
+pub const computeDatumStructField = compute_mod.datumStructField;
 pub const computeIntCastOrInvalidCast = compute_mod.intCastOrInvalidCast;
 pub const computeArithmeticDivI64 = compute_mod.arithmeticDivI64;
 
