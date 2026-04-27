@@ -1585,11 +1585,11 @@ fn buildNullLikeArray(allocator: std.mem.Allocator, data_type: DataType, len: us
             break :blk builder.finish(values.array) catch |err| mapArrayReadError(err);
         },
         .fixed_size_list => |list_ty| blk: {
-            var values = try datumBuildEmptyLikeWithAllocator(allocator, list_ty.value_field.data_type.*);
-            defer values.release();
-            std.debug.assert(values == .array);
-
             const list_size = std.math.cast(usize, list_ty.list_size) orelse return error.InvalidInput;
+            const values_len = std.math.mul(usize, len, list_size) catch return error.Overflow;
+            var values = try buildNullLikeArray(allocator, list_ty.value_field.data_type.*, values_len);
+            defer values.release();
+
             var builder = array_mod.FixedSizeListBuilder.init(allocator, list_ty.value_field, list_size) catch |err| return mapArrayReadError(err);
             defer builder.deinit();
 
@@ -1597,7 +1597,7 @@ fn buildNullLikeArray(allocator: std.mem.Allocator, data_type: DataType, len: us
             while (i < len) : (i += 1) {
                 builder.appendNull() catch |err| return mapArrayReadError(err);
             }
-            break :blk builder.finish(values.array) catch |err| mapArrayReadError(err);
+            break :blk builder.finish(values) catch |err| mapArrayReadError(err);
         },
         .struct_ => |struct_ty| blk: {
             var children = allocator.alloc(ArrayRef, struct_ty.fields.len) catch return error.OutOfMemory;
@@ -3966,6 +3966,7 @@ test "compute datumSelect supports mixed candidate datum forms" {
 test "compute datumSelectNullable and datumBuildNullLikeWithAllocator support null output rows" {
     const allocator = std.testing.allocator;
     const int32_array = array_mod.Int32Array;
+    const int32_type = DataType{ .int32 = {} };
 
     var base = try makeInt32Array(allocator, &[_]?i32{ 10, 20, 30 });
     defer base.release();
@@ -4000,4 +4001,135 @@ test "compute datumSelectNullable and datumBuildNullLikeWithAllocator support nu
     try std.testing.expect(null_view.isNull(0));
     try std.testing.expect(null_view.isNull(1));
     try std.testing.expect(null_view.isNull(2));
+
+    const item_field = datatype.Field{
+        .name = "item",
+        .data_type = &int32_type,
+        .nullable = true,
+    };
+    const fixed_size_list_type = DataType{
+        .fixed_size_list = .{
+            .list_size = 2,
+            .value_field = item_field,
+        },
+    };
+    var fsl_nulls = try datumBuildNullLikeWithAllocator(allocator, fixed_size_list_type, 3);
+    defer fsl_nulls.release();
+    try std.testing.expect(fsl_nulls.isArray());
+    try std.testing.expectEqual(@as(usize, 3), fsl_nulls.array.data().length);
+    try fsl_nulls.array.data().validateLayout();
+    const fsl_view = array_mod.FixedSizeListArray{ .data = fsl_nulls.array.data() };
+    try std.testing.expect(fsl_view.isNull(0));
+    try std.testing.expect(fsl_view.isNull(1));
+    try std.testing.expect(fsl_view.isNull(2));
+    try std.testing.expectEqual(@as(usize, 6), fsl_view.valuesRef().data().length);
+}
+
+test "compute datumSelectNullable emits fixed_size_list null rows without child mismatch" {
+    const allocator = std.testing.allocator;
+    const int32_type = DataType{ .int32 = {} };
+    const int32_array = array_mod.Int32Array;
+    const item_field = datatype.Field{
+        .name = "item",
+        .data_type = &int32_type,
+        .nullable = true,
+    };
+
+    var values0 = try makeInt32Array(allocator, &[_]?i32{ 1, 2, 3, 4, 5, 6 });
+    defer values0.release();
+    var builder0 = try array_mod.FixedSizeListBuilder.init(allocator, item_field, 2);
+    defer builder0.deinit();
+    try builder0.appendValid();
+    try builder0.appendValid();
+    try builder0.appendValid();
+    var fsl0 = try builder0.finish(values0);
+    defer fsl0.release();
+
+    var values1 = try makeInt32Array(allocator, &[_]?i32{ 10, 11, 20, 21, 30, 31 });
+    defer values1.release();
+    var builder1 = try array_mod.FixedSizeListBuilder.init(allocator, item_field, 2);
+    defer builder1.deinit();
+    try builder1.appendValid();
+    try builder1.appendValid();
+    try builder1.appendValid();
+    var fsl1 = try builder1.finish(values1);
+    defer fsl1.release();
+
+    const values = [_]Datum{
+        Datum.fromArray(fsl0.retain()),
+        Datum.fromArray(fsl1.retain()),
+    };
+    defer {
+        var i: usize = 0;
+        while (i < values.len) : (i += 1) {
+            var d = values[i];
+            d.release();
+        }
+    }
+
+    var out = try datumSelectNullable(&[_]?usize{ 0, null, 1 }, values[0..]);
+    defer out.release();
+    try std.testing.expect(out.isArray());
+    try std.testing.expectEqual(@as(usize, 3), out.array.data().length);
+    try out.array.data().validateLayout();
+
+    const fsl_view = array_mod.FixedSizeListArray{ .data = out.array.data() };
+    try std.testing.expect(!fsl_view.isNull(0));
+    try std.testing.expect(fsl_view.isNull(1));
+    try std.testing.expect(!fsl_view.isNull(2));
+    try std.testing.expectEqual(@as(usize, 6), fsl_view.valuesRef().data().length);
+
+    const child = int32_array{ .data = fsl_view.valuesRef().data() };
+    try std.testing.expectEqual(@as(i32, 1), child.value(0));
+    try std.testing.expectEqual(@as(i32, 2), child.value(1));
+    try std.testing.expect(child.isNull(2));
+    try std.testing.expect(child.isNull(3));
+    try std.testing.expectEqual(@as(i32, 30), child.value(4));
+    try std.testing.expectEqual(@as(i32, 31), child.value(5));
+}
+
+test "compute datumFilter emits fixed_size_list null rows when predicate nulls are kept" {
+    const allocator = std.testing.allocator;
+    const int32_type = DataType{ .int32 = {} };
+    const int32_array = array_mod.Int32Array;
+    const item_field = datatype.Field{
+        .name = "item",
+        .data_type = &int32_type,
+        .nullable = true,
+    };
+
+    var values = try makeInt32Array(allocator, &[_]?i32{ 1, 2, 3, 4, 5, 6 });
+    defer values.release();
+    var builder = try array_mod.FixedSizeListBuilder.init(allocator, item_field, 2);
+    defer builder.deinit();
+    try builder.appendValid();
+    try builder.appendValid();
+    try builder.appendValid();
+    var fsl = try builder.finish(values);
+    defer fsl.release();
+
+    var pred = try makeBoolArray(allocator, &[_]?bool{ true, null, false });
+    defer pred.release();
+
+    var in_datum = Datum.fromArray(fsl.retain());
+    defer in_datum.release();
+    var pred_datum = Datum.fromArray(pred.retain());
+    defer pred_datum.release();
+
+    var out = try datumFilter(in_datum, pred_datum, .{ .drop_nulls = false });
+    defer out.release();
+    try std.testing.expect(out.isArray());
+    try std.testing.expectEqual(@as(usize, 2), out.array.data().length);
+    try out.array.data().validateLayout();
+
+    const fsl_view = array_mod.FixedSizeListArray{ .data = out.array.data() };
+    try std.testing.expect(!fsl_view.isNull(0));
+    try std.testing.expect(fsl_view.isNull(1));
+    try std.testing.expectEqual(@as(usize, 4), fsl_view.valuesRef().data().length);
+
+    const child = int32_array{ .data = fsl_view.valuesRef().data() };
+    try std.testing.expectEqual(@as(i32, 1), child.value(0));
+    try std.testing.expectEqual(@as(i32, 2), child.value(1));
+    try std.testing.expect(child.isNull(2));
+    try std.testing.expect(child.isNull(3));
 }
