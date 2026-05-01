@@ -116,6 +116,7 @@ fn datumTakeChunkedNullable(
     }
 
     var resolved: []accessors.ChunkLocalIndex = &[_]accessors.ChunkLocalIndex{};
+    defer if (resolved.len > 0) allocator.free(resolved);
     var non_null_indices: []usize = &[_]usize{};
     if (non_null_count > 0) {
         non_null_indices = allocator.alloc(usize, non_null_count) catch return error.OutOfMemory;
@@ -129,7 +130,6 @@ fn datumTakeChunkedNullable(
             }
         }
         resolved = try accessors.chunkedResolveLogicalIndices(allocator, chunks, non_null_indices);
-        defer allocator.free(resolved);
     }
 
     var run_active = false;
