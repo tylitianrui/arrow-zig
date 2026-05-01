@@ -189,6 +189,12 @@ pub const ComputeExecContext = compute_mod.ExecContext;
 pub const computeUnaryNullPropagates = compute_mod.unaryNullPropagates;
 pub const computeBinaryNullPropagates = compute_mod.binaryNullPropagates;
 pub const computeInferBinaryExecLen = compute_mod.inferBinaryExecLen;
+pub const ComputeChunkLocalIndex = compute_mod.ChunkLocalIndex;
+pub const computeChunkedResolveLogicalIndices = compute_mod.chunkedResolveLogicalIndices;
+pub const computeDatumTake = compute_mod.datumTake;
+pub const computeDatumTakeNullable = compute_mod.datumTakeNullable;
+pub const computeDatumFilterSelectionIndices = compute_mod.datumFilterSelectionIndices;
+pub const computeDatumFilterChunkAware = compute_mod.datumFilterChunkAware;
 pub const computeIntCastOrInvalidCast = compute_mod.intCastOrInvalidCast;
 pub const computeArithmeticDivI64 = compute_mod.arithmeticDivI64;
 

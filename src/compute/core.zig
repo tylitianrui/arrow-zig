@@ -1151,6 +1151,78 @@ const ChunkLookup = struct {
     local_index: usize,
 };
 
+/// Chunk-local coordinate for a logical row in a chunked datum.
+pub const ChunkLocalIndex = struct {
+    chunk_index: usize,
+    index_in_chunk: usize,
+};
+
+const ChunkIndexResolver = struct {
+    offsets: []usize,
+
+    fn init(allocator: std.mem.Allocator, chunks: ChunkedArray) KernelError!ChunkIndexResolver {
+        var offsets = allocator.alloc(usize, chunks.numChunks() + 1) catch return error.OutOfMemory;
+        errdefer allocator.free(offsets);
+
+        offsets[0] = 0;
+        var total: usize = 0;
+        var i: usize = 0;
+        while (i < chunks.numChunks()) : (i += 1) {
+            total = std.math.add(usize, total, chunks.chunk(i).data().length) catch return error.Overflow;
+            offsets[i + 1] = total;
+        }
+        return .{ .offsets = offsets };
+    }
+
+    fn deinit(self: *ChunkIndexResolver, allocator: std.mem.Allocator) void {
+        allocator.free(self.offsets);
+        self.* = undefined;
+    }
+
+    fn locate(self: *const ChunkIndexResolver, chunks: ChunkedArray, logical_index: usize) KernelError!ChunkLocalIndex {
+        if (logical_index >= chunks.len()) return error.InvalidInput;
+        if (chunks.numChunks() == 0) return error.InvalidInput;
+
+        var lo: usize = 0;
+        var hi: usize = chunks.numChunks();
+        while (lo < hi) {
+            const mid = lo + (hi - lo) / 2;
+            if (self.offsets[mid + 1] <= logical_index) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+
+        if (lo >= chunks.numChunks()) return error.InvalidInput;
+        return .{
+            .chunk_index = lo,
+            .index_in_chunk = logical_index - self.offsets[lo],
+        };
+    }
+};
+
+/// Resolve logical row indices into chunk-local coordinates.
+///
+/// This is a building block for permutation-producing kernels (e.g. sort_indices)
+/// that need to bridge global logical indices back to chunk-local positions.
+pub fn chunkedResolveLogicalIndices(
+    allocator: std.mem.Allocator,
+    chunks: ChunkedArray,
+    logical_indices: []const usize,
+) KernelError![]ChunkLocalIndex {
+    var out = allocator.alloc(ChunkLocalIndex, logical_indices.len) catch return error.OutOfMemory;
+    errdefer allocator.free(out);
+
+    var resolver = try ChunkIndexResolver.init(allocator, chunks);
+    defer resolver.deinit(allocator);
+
+    for (logical_indices, 0..) |logical_index, i| {
+        out[i] = try resolver.locate(chunks, logical_index);
+    }
+    return out;
+}
+
 fn lookupChunkAt(chunks: ChunkedArray, logical_index: usize) ?ChunkLookup {
     if (logical_index >= chunks.len()) return null;
 
@@ -1706,6 +1778,147 @@ const PredicateDecision = enum {
     emit_null,
 };
 
+fn appendOwnedArrayRef(
+    allocator: std.mem.Allocator,
+    pieces: *std.ArrayList(ArrayRef),
+    piece: ArrayRef,
+) KernelError!void {
+    pieces.append(allocator, piece) catch {
+        var owned = piece;
+        owned.release();
+        return error.OutOfMemory;
+    };
+}
+
+fn flushTakeContiguousRun(
+    allocator: std.mem.Allocator,
+    out_chunks: *std.ArrayList(ArrayRef),
+    chunks: ChunkedArray,
+    chunk_index: usize,
+    run_start_local: usize,
+    run_len: usize,
+) KernelError!void {
+    if (run_len == 0) return;
+    const source = chunks.chunk(chunk_index).*;
+    const source_len = source.data().length;
+    const piece = if (run_start_local == 0 and run_len == source_len)
+        source.retain()
+    else
+        source.slice(run_start_local, run_len) catch |err| return mapArrayReadError(err);
+    try appendOwnedArrayRef(allocator, out_chunks, piece);
+}
+
+fn flushTakeNullRun(
+    allocator: std.mem.Allocator,
+    out_chunks: *std.ArrayList(ArrayRef),
+    out_type: DataType,
+    null_run_len: usize,
+) KernelError!void {
+    if (null_run_len == 0) return;
+    const nulls = try buildNullLikeArray(allocator, out_type, null_run_len);
+    try appendOwnedArrayRef(allocator, out_chunks, nulls);
+}
+
+fn datumTakeChunkedNullable(
+    allocator: std.mem.Allocator,
+    chunks: ChunkedArray,
+    out_type: DataType,
+    indices: []const ?usize,
+) KernelError!Datum {
+    if (indices.len == 0) {
+        return Datum.fromChunked(chunks.slice(allocator, 0, 0) catch |err| return mapChunkedError(err));
+    }
+
+    var out_chunks: std.ArrayList(ArrayRef) = .{};
+    defer {
+        for (out_chunks.items) |*chunk| chunk.release();
+        out_chunks.deinit(allocator);
+    }
+
+    var resolver = try ChunkIndexResolver.init(allocator, chunks);
+    defer resolver.deinit(allocator);
+
+    var run_active = false;
+    var run_chunk_index: usize = 0;
+    var run_start_local: usize = 0;
+    var run_len: usize = 0;
+    var null_run_len: usize = 0;
+
+    for (indices) |maybe_index| {
+        if (maybe_index == null) {
+            if (run_active) {
+                try flushTakeContiguousRun(allocator, &out_chunks, chunks, run_chunk_index, run_start_local, run_len);
+                run_active = false;
+                run_len = 0;
+            }
+            null_run_len = std.math.add(usize, null_run_len, 1) catch return error.Overflow;
+            continue;
+        }
+
+        if (null_run_len > 0) {
+            try flushTakeNullRun(allocator, &out_chunks, out_type, null_run_len);
+            null_run_len = 0;
+        }
+
+        const located = try resolver.locate(chunks, maybe_index.?);
+        if (!run_active) {
+            run_active = true;
+            run_chunk_index = located.chunk_index;
+            run_start_local = located.index_in_chunk;
+            run_len = 1;
+            continue;
+        }
+
+        const expected_next = run_start_local + run_len;
+        if (located.chunk_index == run_chunk_index and located.index_in_chunk == expected_next) {
+            run_len = std.math.add(usize, run_len, 1) catch return error.Overflow;
+            continue;
+        }
+
+        try flushTakeContiguousRun(allocator, &out_chunks, chunks, run_chunk_index, run_start_local, run_len);
+        run_chunk_index = located.chunk_index;
+        run_start_local = located.index_in_chunk;
+        run_len = 1;
+    }
+
+    if (run_active) {
+        try flushTakeContiguousRun(allocator, &out_chunks, chunks, run_chunk_index, run_start_local, run_len);
+    }
+    if (null_run_len > 0) {
+        try flushTakeNullRun(allocator, &out_chunks, out_type, null_run_len);
+    }
+
+    const out = ChunkedArray.init(allocator, out_type, out_chunks.items) catch |err| return mapChunkedError(err);
+    return Datum.fromChunked(out);
+}
+
+fn datumTakeArrayLikeNullable(
+    allocator: std.mem.Allocator,
+    datum: Datum,
+    out_type: DataType,
+    indices: []const ?usize,
+) KernelError!Datum {
+    if (indices.len == 0) return datumBuildEmptyLikeWithAllocator(allocator, out_type);
+
+    var pieces: std.ArrayList(ArrayRef) = .{};
+    defer {
+        for (pieces.items) |*piece| piece.release();
+        pieces.deinit(allocator);
+    }
+    try pieces.ensureTotalCapacity(allocator, indices.len);
+
+    for (indices) |choice| {
+        const piece = if (choice) |idx|
+            try datumElementArrayAt(allocator, datum, idx)
+        else
+            try buildNullLikeArray(allocator, out_type, 1);
+        pieces.appendAssumeCapacity(piece);
+    }
+
+    const out = concat_array_refs.concatArrayRefs(allocator, out_type, pieces.items) catch |err| return mapConcatError(err);
+    return Datum.fromArray(out);
+}
+
 fn predicateDecisionAt(predicate: Datum, logical_index: usize, options: FilterOptions) KernelError!PredicateDecision {
     return switch (predicate) {
         .scalar => |s| blk: {
@@ -1728,6 +1941,30 @@ fn predicateDecisionAt(predicate: Datum, logical_index: usize, options: FilterOp
             break :blk if (bool_array.value(located.local_index)) .keep else .drop;
         },
     };
+}
+
+/// Build nullable selection indices from a boolean predicate.
+///
+/// `keep` emits the logical input index, `drop` emits nothing, and `emit_null`
+/// emits `null` to preserve output row count for null-predicate semantics.
+pub fn datumFilterSelectionIndices(
+    allocator: std.mem.Allocator,
+    predicate: Datum,
+    logical_len: usize,
+    options: FilterOptions,
+) KernelError![]?usize {
+    var selections: std.ArrayList(?usize) = .{};
+    defer selections.deinit(allocator);
+
+    var i: usize = 0;
+    while (i < logical_len) : (i += 1) {
+        switch (try predicateDecisionAt(predicate, i, options)) {
+            .drop => {},
+            .keep => try selections.append(allocator, i),
+            .emit_null => try selections.append(allocator, null),
+        }
+    }
+    return selections.toOwnedSlice(allocator);
 }
 
 /// Build an all-null datum for the requested logical type and length.
@@ -1826,6 +2063,50 @@ pub fn datumSliceEmpty(datum: Datum) KernelError!Datum {
     };
 }
 
+/// Gather/take rows from a datum according to logical indices.
+///
+/// For chunked inputs this helper preserves chunked output and avoids forcing
+/// concat pre-normalization.
+pub fn datumTake(datum: Datum, indices: []const usize) KernelError!Datum {
+    const allocator = inferDatumAllocator(datum) orelse std.heap.page_allocator;
+    const out_type = datum.dataType();
+
+    if (indices.len == 0) {
+        return switch (datum) {
+            .chunked => |chunks| Datum.fromChunked(chunks.slice(allocator, 0, 0) catch |err| return mapChunkedError(err)),
+            else => datumBuildEmptyLikeWithAllocator(allocator, out_type),
+        };
+    }
+
+    return switch (datum) {
+        .chunked => |chunks| blk: {
+            var nullable = allocator.alloc(?usize, indices.len) catch break :blk error.OutOfMemory;
+            defer allocator.free(nullable);
+            for (indices, 0..) |index, i| nullable[i] = index;
+            break :blk try datumTakeChunkedNullable(allocator, chunks, out_type, nullable);
+        },
+        else => blk: {
+            var nullable = allocator.alloc(?usize, indices.len) catch break :blk error.OutOfMemory;
+            defer allocator.free(nullable);
+            for (indices, 0..) |index, i| nullable[i] = index;
+            break :blk try datumTakeArrayLikeNullable(allocator, datum, out_type, nullable);
+        },
+    };
+}
+
+/// Gather/take rows with nullable indices where `null` emits an all-null row.
+///
+/// For chunked inputs this helper preserves chunked output and avoids forcing
+/// concat pre-normalization.
+pub fn datumTakeNullable(datum: Datum, indices: []const ?usize) KernelError!Datum {
+    const allocator = inferDatumAllocator(datum) orelse std.heap.page_allocator;
+    const out_type = datum.dataType();
+    return switch (datum) {
+        .chunked => |chunks| datumTakeChunkedNullable(allocator, chunks, out_type, indices),
+        else => datumTakeArrayLikeNullable(allocator, datum, out_type, indices),
+    };
+}
+
 /// Row-wise selection primitive shared by choose/case_when/filter style operators.
 ///
 /// `indices[i]` selects which entry in `values` contributes output row `i`.
@@ -1891,7 +2172,21 @@ pub fn datumSelectNullable(indices: []const ?usize, values: []const Datum) Kerne
     return Datum.fromArray(out);
 }
 
+/// Chunk-aware filter helper for array/chunked/scalar datums with bool predicates.
+///
+/// This helper composes `datumFilterSelectionIndices` + `datumTakeNullable`,
+/// preserving chunked output when the input datum is chunked.
+pub fn datumFilterChunkAware(datum: Datum, predicate: Datum, options: FilterOptions) KernelError!Datum {
+    const input_len = try inferBinaryExecLen(datum, predicate);
+    const allocator = inferDatumsAllocator(&[_]Datum{ datum, predicate });
+    const selections = try datumFilterSelectionIndices(allocator, predicate, input_len, options);
+    defer allocator.free(selections);
+    return datumTakeNullable(datum, selections);
+}
+
 /// Generic filter primitive for array/chunked/scalar datums with bool predicates.
+///
+/// This preserves the historical array-output shape for compatibility.
 pub fn datumFilter(datum: Datum, predicate: Datum, options: FilterOptions) KernelError!Datum {
     const output_len = try inferBinaryExecLen(datum, predicate);
     const allocator = inferDatumsAllocator(&[_]Datum{ datum, predicate });
@@ -1913,11 +2208,7 @@ pub fn datumFilter(datum: Datum, predicate: Datum, options: FilterOptions) Kerne
             .keep => try datumElementArrayAt(allocator, datum, i),
             .emit_null => try buildNullLikeArray(allocator, out_type, 1),
         };
-        pieces.append(allocator, piece) catch {
-            var owned = piece;
-            owned.release();
-            return error.OutOfMemory;
-        };
+        try appendOwnedArrayRef(allocator, &pieces, piece);
     }
 
     if (pieces.items.len == 0) return datumBuildEmptyLikeWithAllocator(allocator, out_type);
@@ -2449,6 +2740,43 @@ fn makeBoolArray(allocator: std.mem.Allocator, values: []const ?bool) !ArrayRef 
         }
     }
     return builder.finish();
+}
+
+fn collectInt32ValuesFromDatum(allocator: std.mem.Allocator, datum: Datum) ![]?i32 {
+    return switch (datum) {
+        .array => |arr| blk: {
+            if (arr.data().data_type != .int32) break :blk error.InvalidInput;
+            var out = try allocator.alloc(?i32, arr.data().length);
+            const view = array_mod.Int32Array{ .data = arr.data() };
+            var i: usize = 0;
+            while (i < out.len) : (i += 1) {
+                out[i] = if (view.isNull(i)) null else try view.value(i);
+            }
+            break :blk out;
+        },
+        .chunked => |chunks| blk: {
+            if (!chunks.dataType().eql(.{ .int32 = {} })) break :blk error.InvalidInput;
+            var out = try allocator.alloc(?i32, chunks.len());
+            var out_index: usize = 0;
+            var chunk_index: usize = 0;
+            while (chunk_index < chunks.numChunks()) : (chunk_index += 1) {
+                const chunk = chunks.chunk(chunk_index);
+                const view = array_mod.Int32Array{ .data = chunk.data() };
+                var i: usize = 0;
+                while (i < view.len()) : (i += 1) {
+                    out[out_index] = if (view.isNull(i)) null else try view.value(i);
+                    out_index += 1;
+                }
+            }
+            break :blk out;
+        },
+        .scalar => |s| blk: {
+            if (s.data_type != .int32) break :blk error.InvalidInput;
+            var out = try allocator.alloc(?i32, 1);
+            out[0] = if (s.isNull()) null else s.value.i32;
+            break :blk out;
+        },
+    };
 }
 
 test "compute registry registers and invokes scalar kernel" {
@@ -3927,6 +4255,165 @@ test "compute datumBuildEmptyLike and datumSliceEmpty preserve nested layout" {
     try std.testing.expectEqual(@as(usize, 0), sliced_empty.array.data().length);
     try std.testing.expect(sliced_empty.array.data().data_type.eql(list_type));
     try sliced_empty.array.data().validateLayout();
+}
+
+test "compute chunkedResolveLogicalIndices maps chunk-local coordinates and validates bounds" {
+    const allocator = std.testing.allocator;
+
+    var c0 = try makeInt32Array(allocator, &[_]?i32{ 10, 20 });
+    defer c0.release();
+    var c1 = try makeInt32Array(allocator, &[_]?i32{ 30, 40, 50 });
+    defer c1.release();
+    var chunks = try ChunkedArray.init(allocator, .{ .int32 = {} }, &[_]ArrayRef{ c0, c1 });
+    defer chunks.release();
+
+    const mapped = try chunkedResolveLogicalIndices(allocator, chunks, &[_]usize{ 0, 1, 2, 4 });
+    defer allocator.free(mapped);
+
+    try std.testing.expectEqual(@as(usize, 4), mapped.len);
+    try std.testing.expectEqual(@as(usize, 0), mapped[0].chunk_index);
+    try std.testing.expectEqual(@as(usize, 0), mapped[0].index_in_chunk);
+    try std.testing.expectEqual(@as(usize, 0), mapped[1].chunk_index);
+    try std.testing.expectEqual(@as(usize, 1), mapped[1].index_in_chunk);
+    try std.testing.expectEqual(@as(usize, 1), mapped[2].chunk_index);
+    try std.testing.expectEqual(@as(usize, 0), mapped[2].index_in_chunk);
+    try std.testing.expectEqual(@as(usize, 1), mapped[3].chunk_index);
+    try std.testing.expectEqual(@as(usize, 2), mapped[3].index_in_chunk);
+
+    try std.testing.expectError(
+        error.InvalidInput,
+        chunkedResolveLogicalIndices(allocator, chunks, &[_]usize{5}),
+    );
+}
+
+test "compute datumTake keeps chunked output and matches array logical result on misaligned boundaries" {
+    const allocator = std.testing.allocator;
+
+    var base = try makeInt32Array(allocator, &[_]?i32{ 10, 20, 30, 40, 50 });
+    defer base.release();
+
+    var c0 = try makeInt32Array(allocator, &[_]?i32{ 10, 20 });
+    defer c0.release();
+    var c1 = try makeInt32Array(allocator, &[_]?i32{30});
+    defer c1.release();
+    var c2 = try makeInt32Array(allocator, &[_]?i32{ 40, 50 });
+    defer c2.release();
+    var chunked = try ChunkedArray.init(allocator, .{ .int32 = {} }, &[_]ArrayRef{ c0, c1, c2 });
+    defer chunked.release();
+
+    var array_datum = Datum.fromArray(base.retain());
+    defer array_datum.release();
+    var chunked_datum = Datum.fromChunked(chunked.retain());
+    defer chunked_datum.release();
+
+    const indices = [_]usize{ 1, 2, 4, 0 };
+
+    var out_array = try datumTake(array_datum, indices[0..]);
+    defer out_array.release();
+    var out_chunked = try datumTake(chunked_datum, indices[0..]);
+    defer out_chunked.release();
+
+    try std.testing.expect(out_array.isArray());
+    try std.testing.expect(out_chunked.isChunked());
+    try std.testing.expectEqual(@as(usize, 4), out_chunked.chunked.len());
+
+    const array_values = try collectInt32ValuesFromDatum(allocator, out_array);
+    defer allocator.free(array_values);
+    const chunked_values = try collectInt32ValuesFromDatum(allocator, out_chunked);
+    defer allocator.free(chunked_values);
+
+    try std.testing.expectEqual(@as(usize, array_values.len), chunked_values.len);
+    var i: usize = 0;
+    while (i < array_values.len) : (i += 1) {
+        try std.testing.expectEqual(array_values[i], chunked_values[i]);
+    }
+    try std.testing.expectEqual(@as(?i32, 20), chunked_values[0]);
+    try std.testing.expectEqual(@as(?i32, 30), chunked_values[1]);
+    try std.testing.expectEqual(@as(?i32, 50), chunked_values[2]);
+    try std.testing.expectEqual(@as(?i32, 10), chunked_values[3]);
+}
+
+test "compute datumFilterSelectionIndices and datumFilterChunkAware stay consistent for array and chunked" {
+    const allocator = std.testing.allocator;
+
+    var values_array = try makeInt32Array(allocator, &[_]?i32{ 1, 2, 3, 4, 5 });
+    defer values_array.release();
+    var pred_array = try makeBoolArray(allocator, &[_]?bool{ true, false, null, true, true });
+    defer pred_array.release();
+
+    var v0 = try makeInt32Array(allocator, &[_]?i32{ 1, 2 });
+    defer v0.release();
+    var v1 = try makeInt32Array(allocator, &[_]?i32{ 3, 4, 5 });
+    defer v1.release();
+    var values_chunked = try ChunkedArray.init(allocator, .{ .int32 = {} }, &[_]ArrayRef{ v0, v1 });
+    defer values_chunked.release();
+
+    var p0 = try makeBoolArray(allocator, &[_]?bool{true});
+    defer p0.release();
+    var p1 = try makeBoolArray(allocator, &[_]?bool{ false, null, true });
+    defer p1.release();
+    var p2 = try makeBoolArray(allocator, &[_]?bool{true});
+    defer p2.release();
+    var pred_chunked = try ChunkedArray.init(allocator, .{ .bool = {} }, &[_]ArrayRef{ p0, p1, p2 });
+    defer pred_chunked.release();
+
+    var pred_array_datum = Datum.fromArray(pred_array.retain());
+    defer pred_array_datum.release();
+    const selections = try datumFilterSelectionIndices(allocator, pred_array_datum, 5, .{ .drop_nulls = false });
+    defer allocator.free(selections);
+    try std.testing.expectEqual(@as(usize, 4), selections.len);
+    try std.testing.expectEqual(@as(?usize, 0), selections[0]);
+    try std.testing.expectEqual(@as(?usize, null), selections[1]);
+    try std.testing.expectEqual(@as(?usize, 3), selections[2]);
+    try std.testing.expectEqual(@as(?usize, 4), selections[3]);
+
+    var array_datum = Datum.fromArray(values_array.retain());
+    defer array_datum.release();
+    var chunked_datum = Datum.fromChunked(values_chunked.retain());
+    defer chunked_datum.release();
+    var pred_chunked_datum = Datum.fromChunked(pred_chunked.retain());
+    defer pred_chunked_datum.release();
+
+    var filtered_array = try datumFilterChunkAware(array_datum, pred_array_datum, .{ .drop_nulls = false });
+    defer filtered_array.release();
+    var filtered_chunked = try datumFilterChunkAware(chunked_datum, pred_chunked_datum, .{ .drop_nulls = false });
+    defer filtered_chunked.release();
+
+    try std.testing.expect(filtered_array.isArray());
+    try std.testing.expect(filtered_chunked.isChunked());
+
+    const expected = try collectInt32ValuesFromDatum(allocator, filtered_array);
+    defer allocator.free(expected);
+    const actual = try collectInt32ValuesFromDatum(allocator, filtered_chunked);
+    defer allocator.free(actual);
+
+    try std.testing.expectEqual(@as(usize, expected.len), actual.len);
+    var i: usize = 0;
+    while (i < expected.len) : (i += 1) {
+        try std.testing.expectEqual(expected[i], actual[i]);
+    }
+}
+
+test "compute datumFilter keeps compatibility array output shape for chunked inputs" {
+    const allocator = std.testing.allocator;
+
+    var v0 = try makeInt32Array(allocator, &[_]?i32{ 1, 2 });
+    defer v0.release();
+    var v1 = try makeInt32Array(allocator, &[_]?i32{ 3, 4 });
+    defer v1.release();
+    var values_chunked = try ChunkedArray.init(allocator, .{ .int32 = {} }, &[_]ArrayRef{ v0, v1 });
+    defer values_chunked.release();
+
+    var p0 = try makeBoolArray(allocator, &[_]?bool{ true, false, true, true });
+    defer p0.release();
+    var values_datum = Datum.fromChunked(values_chunked.retain());
+    defer values_datum.release();
+    var pred_datum = Datum.fromArray(p0.retain());
+    defer pred_datum.release();
+
+    var filtered = try datumFilter(values_datum, pred_datum, .{ .drop_nulls = true });
+    defer filtered.release();
+    try std.testing.expect(filtered.isArray());
 }
 
 test "compute datumFilter supports scalar array chunked and fixed_size_list null alignment" {
