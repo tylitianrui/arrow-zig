@@ -95,6 +95,13 @@ len=3, v0=10, isNull1=true, v2=30
 - [Compute API（zarrow-core）使用说明](compute-api-zh.md)
 - 示例：`../examples/compute_lifecycle.zig`
 
+## 类型覆盖
+
+如果你想查看当前数据类型支持范围（已声明/已实现/已测试/有示例），请看：
+
+- [类型覆盖矩阵（中文）](type-coverage-zh.md)
+- [Type Coverage Matrix (English)](type-coverage.md)
+
 ## 互操作
 
 关于 Arrow IPC 与 C ABI 互操作覆盖范围和本地验证命令，请看：

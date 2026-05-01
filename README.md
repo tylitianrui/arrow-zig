@@ -98,6 +98,13 @@ For compute framework APIs used by downstream `zarrow-compute`, see:
 - [docs/compute-api-zh.md](docs/compute-api-zh.md)
 - Example: `examples/compute_lifecycle.zig`
 
+## Type Coverage
+
+For current data type support coverage (declared/implemented/tested/example), see:
+
+- [docs/type-coverage.md](docs/type-coverage.md)
+- [docs/type-coverage-zh.md](docs/type-coverage-zh.md)
+
 ## Interop
 
 For Arrow IPC and C ABI interop coverage and local verification commands, see:
